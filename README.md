@@ -5,6 +5,7 @@
 当前收录项目：
 
 - `furniture-uploader`
+- `jushuitan-sku-offline-batch`
 - `jushuitan-link-ops`
 
 ## 项目说明
@@ -32,6 +33,29 @@
 主目录：
 
 - `jushuitan-link-ops/`
+
+### `jushuitan-sku-offline-batch`
+
+定位：
+
+- 当前聚水潭“批量更新商品编码”主线项目
+- 专注处理“停产下架商品编码批量改为 `txcj`”这一条业务链路
+
+主目录：
+
+- `jushuitan-sku-offline-batch/`
+
+## 主线与扩展线定义
+
+- 当前主线：
+  - `jushuitan-sku-offline-batch`
+- 历史 / 扩展线：
+  - `jushuitan-link-ops`
+
+解释：
+
+- `jushuitan-sku-offline-batch` 更聚焦、目标更明确，适合直接推进
+- `jushuitan-link-ops` 保留为泛化版 / 扩展版参考，不作为当前第一主线
 
 ## 当前仓库规则
 

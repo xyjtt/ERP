@@ -1,0 +1,25 @@
+{
+  "name": "jushuitan-sku-offline-batch",
+  "version": "1.0.0",
+  "description": "Batch update discontinued product online sku codes on Jushuitan pages",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "tsx src/index.ts",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "probe:product": "tsx src/probe-product-page.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "date-fns": "^4.1.0",
+    "dotenv": "^17.3.1",
+    "exceljs": "^4.4.0",
+    "playwright": "^1.58.2",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "zod": "^4.3.6"
+  }
+}
