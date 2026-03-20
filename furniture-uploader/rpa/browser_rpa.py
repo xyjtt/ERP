@@ -33,13 +33,32 @@ class BrowserRPA:
         self.browser_config = browser_config
         self.project_root = Path(project_root)
         self.driver: webdriver.Chrome | None = None
+        self.attached_to_existing_browser = False
         self.last_screenshot_path = ""
         self.last_html_snapshot_path = ""
         self.last_result_context: dict[str, Any] = {}
 
     def open(self) -> None:
         options = Options()
-        if self.browser_config.get("headless"):
+        debugger_address = str(self.browser_config.get("debugger_address", "")).strip()
+        chrome_binary_path = str(self.browser_config.get("chrome_binary_path", "")).strip()
+        user_data_dir = str(self.browser_config.get("user_data_dir", "")).strip()
+        profile_directory = str(self.browser_config.get("profile_directory", "")).strip()
+
+        if chrome_binary_path:
+            options.binary_location = chrome_binary_path
+
+        if debugger_address:
+            options.add_experimental_option("debuggerAddress", debugger_address)
+            self.attached_to_existing_browser = True
+        else:
+            self.attached_to_existing_browser = False
+            if user_data_dir:
+                options.add_argument(f"--user-data-dir={user_data_dir}")
+            if profile_directory:
+                options.add_argument(f"--profile-directory={profile_directory}")
+
+        if self.browser_config.get("headless") and not debugger_address:
             options.add_argument("--headless=new")
 
         self.driver = webdriver.Chrome(
@@ -50,6 +69,9 @@ class BrowserRPA:
 
     def close(self) -> None:
         if self.driver:
+            if self.attached_to_existing_browser and self.browser_config.get("keep_browser_open_on_close", True):
+                self.driver = None
+                return
             self.driver.quit()
             self.driver = None
 

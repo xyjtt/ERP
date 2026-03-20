@@ -15,6 +15,26 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Capture visible page elements for selector discovery.")
     parser.add_argument("--url", default="", help="Optional URL to open before manual navigation.")
     parser.add_argument(
+        "--debugger-address",
+        default="",
+        help="Attach to an existing Chrome instance via remote debugging, for example 127.0.0.1:9222.",
+    )
+    parser.add_argument(
+        "--user-data-dir",
+        default="",
+        help="Optional Chrome user data directory for reusing a local browser profile.",
+    )
+    parser.add_argument(
+        "--profile-directory",
+        default="",
+        help="Optional Chrome profile directory name, for example Default.",
+    )
+    parser.add_argument(
+        "--chrome-binary",
+        default="",
+        help="Optional Chrome binary path.",
+    )
+    parser.add_argument(
         "--output",
         default="logs/selector_probe/selector_probe.json",
         help="JSON output path.",
@@ -39,7 +59,13 @@ def build_argument_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_argument_parser().parse_args()
-    driver = open_browser(headless=args.headless)
+    driver, attached_to_existing_browser = open_browser(
+        headless=args.headless,
+        debugger_address=args.debugger_address,
+        user_data_dir=args.user_data_dir,
+        profile_directory=args.profile_directory,
+        chrome_binary=args.chrome_binary,
+    )
     try:
         if args.url:
             driver.get(args.url)
@@ -61,17 +87,41 @@ def main() -> None:
         print(f"Saved screenshot: {screenshot_path}")
         print(f"Saved html snapshot: {html_path}")
     finally:
-        driver.quit()
+        if not attached_to_existing_browser:
+            driver.quit()
 
 
-def open_browser(*, headless: bool) -> webdriver.Chrome:
+def open_browser(
+    *,
+    headless: bool,
+    debugger_address: str,
+    user_data_dir: str,
+    profile_directory: str,
+    chrome_binary: str,
+) -> tuple[webdriver.Chrome, bool]:
     options = Options()
-    if headless:
+    attached_to_existing_browser = False
+
+    if chrome_binary:
+        options.binary_location = chrome_binary
+
+    if debugger_address:
+        options.add_experimental_option("debuggerAddress", debugger_address)
+        attached_to_existing_browser = True
+    else:
+        if user_data_dir:
+            options.add_argument(f"--user-data-dir={user_data_dir}")
+        if profile_directory:
+            options.add_argument(f"--profile-directory={profile_directory}")
+
+    if headless and not debugger_address:
         options.add_argument("--headless=new")
-    return webdriver.Chrome(
+
+    driver = webdriver.Chrome(
         service=Service(ChromeDriverManager().install()),
         options=options,
     )
+    return driver, attached_to_existing_browser
 
 
 def build_probe_payload(driver: webdriver.Chrome) -> dict[str, object]:

@@ -8,9 +8,29 @@ When real page selectors are still unknown, use the selector probe tool to expor
 python rpa/selector_probe.py --url "https://www.erp321.com/login.aspx?refer=https%3A%2F%2Fwww.erp321.com%2Fepaas"
 ```
 
+Attach to an existing Chrome debug session:
+
+```bash
+python rpa/selector_probe.py --debugger-address 127.0.0.1:9222
+```
+
+Reuse a local Chrome profile:
+
+```bash
+python rpa/selector_probe.py --user-data-dir "C:/Users/Administrator/AppData/Local/Google/Chrome/User Data" --profile-directory Default
+```
+
+Recommended 1688 workflow:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\start_debug_chrome.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\capture_1688_pages.ps1
+```
+
 Workflow:
 
 1. the browser opens
+   or attaches to an existing Chrome session
 2. log in manually
 3. navigate to the exact target page or popup
 4. press Enter in the terminal

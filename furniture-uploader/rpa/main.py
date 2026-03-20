@@ -413,6 +413,11 @@ def initialize_operator_local_config(config_dir: Path) -> str:
         },
         "browser": {
             "headless": False,
+            "debugger_address": "",
+            "user_data_dir": "",
+            "profile_directory": "Default",
+            "chrome_binary_path": "",
+            "keep_browser_open_on_close": True,
         },
     }
     target_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

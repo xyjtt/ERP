@@ -1,0 +1,18 @@
+{
+  "system": "1688_direct",
+  "display_name": "1688商家后台直连",
+  "login_url": "https://login.1688.com/",
+  "login": {
+    "mode": "manual",
+    "completion_prompt": "请先在浏览器中登录 1688 商家后台，进入商品发布页后按回车继续..."
+  },
+  "workflow": {
+    "steps": [
+      {
+        "name": "prepare_publish_context",
+        "action": "manual",
+        "message": "请确认当前浏览器已登录 1688 商家后台，并准备开始逐条发布商品，完成后按回车继续..."
+      }
+    ]
+  }
+}
