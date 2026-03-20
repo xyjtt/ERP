@@ -27,6 +27,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\start_debug_chrome.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\capture_1688_pages.ps1
 ```
 
+If you need to point the debug browser at an existing absolute Chrome profile path, pass `-ProfileDir` to `start_debug_chrome.ps1`.
+
 Workflow:
 
 1. the browser opens

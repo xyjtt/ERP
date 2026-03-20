@@ -118,6 +118,12 @@ python rpa/main.py --system 1688_direct --platform 1688 --file templates/furnitu
 powershell -ExecutionPolicy Bypass -File .\scripts\start_debug_chrome.ps1
 ```
 
+如果需要显式指定已有 Chrome profile 路径，也可以：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\start_debug_chrome.ps1 -ProfileDir "C:\Users\Administrator\AppData\Local\Google\Chrome\User Data\Default"
+```
+
 登录完成后，抓 1688 关键页面：
 
 ```powershell

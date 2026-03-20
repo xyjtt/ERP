@@ -33,7 +33,12 @@ function Resolve-ChromePath {
 }
 
 $resolvedChrome = Resolve-ChromePath -PreferredPath $ChromeExe
-$resolvedProfileDir = Join-Path $projectRoot $ProfileDir
+$resolvedProfileDir = if ([System.IO.Path]::IsPathRooted($ProfileDir)) {
+    $ProfileDir
+}
+else {
+    Join-Path $projectRoot $ProfileDir
+}
 New-Item -ItemType Directory -Force -Path $resolvedProfileDir | Out-Null
 
 Write-Host "[INFO] Project root: $projectRoot"
