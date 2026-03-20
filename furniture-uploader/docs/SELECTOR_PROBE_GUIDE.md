@@ -52,6 +52,25 @@ The JSON includes:
 - visible `input / textarea / select / button / a / img / role=button` elements
 - selector hints based on `id / name / placeholder / class`
 
+After capture, generate selector suggestions:
+
+```bash
+python rpa/suggest_selectors.py --probe-json logs/selector_probe/1688/publish_detail_page.json
+```
+
+This writes a `*.suggestions.json` file next to the probe JSON and ranks likely selectors for:
+
+- `title`
+- `price`
+- `quantity`
+- `main_image`
+- `detail_images`
+- `description`
+- `ship_from_template`
+- `freight_template`
+- `ship_time_template`
+- `submit_selector`
+
 ## Suggested Usage
 
 Run once for each critical page:
