@@ -1,0 +1,39 @@
+{
+  "browser": {
+    "type": "chrome",
+    "headless": false,
+    "implicit_wait_seconds": 10,
+    "explicit_wait_seconds": 20,
+    "page_load_wait_seconds": 2,
+    "action_wait_seconds": 0.5,
+    "screenshot_dir": "logs/screenshots",
+    "html_snapshot_dir": "logs/html_snapshots",
+    "screenshot_on_error": true
+  },
+  "update": {
+    "enabled": true,
+    "config_source": "https://example.com/furniture-uploader/config"
+  },
+  "accounts": {
+    "1688": {
+      "username": "",
+      "password": ""
+    },
+    "taobao": {
+      "username": "",
+      "password": ""
+    },
+    "jd": {
+      "username": "",
+      "password": ""
+    },
+    "pdd": {
+      "username": "",
+      "password": ""
+    }
+  },
+  "runtime": {
+    "continue_on_error": true,
+    "run_report_dir": "logs/run_reports"
+  }
+}

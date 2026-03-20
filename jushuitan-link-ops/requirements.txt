@@ -1,0 +1,6 @@
+selenium
+pandas
+openpyxl
+webdriver-manager
+pyodbc
+pyinstaller

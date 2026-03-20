@@ -1,0 +1,97 @@
+{
+  "system": "jushuitan",
+  "display_name": "聚水潭",
+  "login_url": "https://www.erp321.com/login.aspx?refer=https%3A%2F%2Fwww.erp321.com%2Fepaas",
+  "login": {
+    "mode": "manual",
+    "completion_prompt": "请先在浏览器中登录聚水潭并进入商品多店铺铺货页，完成后按回车继续..."
+  },
+  "workflow": {
+    "steps": [
+      {
+        "name": "open_batch_publish_dialog",
+        "action": "manual",
+        "message": "请在聚水潭商品列表中筛选目标商品并打开“批量上架/上架到店铺”弹窗，准备好后按回车继续..."
+      },
+      {
+        "name": "select_platform_1688",
+        "action": "click",
+        "selector": {
+          "by": "css",
+          "value": ""
+        },
+        "required": false
+      },
+      {
+        "name": "search_store_name",
+        "action": "input",
+        "source": "store_name",
+        "required": false,
+        "selector": {
+          "by": "css",
+          "value": ""
+        }
+      },
+      {
+        "name": "click_store_search",
+        "action": "click",
+        "selector": {
+          "by": "css",
+          "value": ""
+        },
+        "required": false
+      },
+      {
+        "name": "match_history_candidate",
+        "action": "match_candidates",
+        "required": false,
+        "row_selector": {
+          "by": "css",
+          "value": ""
+        },
+        "title_selector": {
+          "by": "css",
+          "value": ""
+        },
+        "store_name_selector": {
+          "by": "css",
+          "value": ""
+        },
+        "source_id_selector": {
+          "by": "css",
+          "value": ""
+        },
+        "use_button_selector": {
+          "by": "css",
+          "value": ""
+        },
+        "fallback_selector": {
+          "by": "css",
+          "value": ""
+        },
+        "invalid_error_detection": {
+          "enabled": true,
+          "timeout_seconds": 1.5,
+          "keywords": [
+            "资料失效",
+            "日志失效",
+            "已不可用"
+          ],
+          "message_selector": {
+            "by": "css",
+            "value": ""
+          },
+          "close_selector": {
+            "by": "css",
+            "value": ""
+          }
+        }
+      },
+      {
+        "name": "confirm_store_selection",
+        "action": "manual",
+        "message": "请确认已选中目标授权店铺并进入 1688 发布页，完成后按回车继续..."
+      }
+    ]
+  }
+}

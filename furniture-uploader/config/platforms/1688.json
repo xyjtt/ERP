@@ -1,0 +1,275 @@
+{
+  "platform": "1688",
+  "display_name": "1688",
+  "login_url": "https://login.1688.com/",
+  "publish_url": "",
+  "required_fields": [
+    "title",
+    "price",
+    "quantity",
+    "platform_category",
+    "main_image"
+  ],
+  "field_mapping": {
+    "title": "商品标题",
+    "subtitle": "副标题",
+    "brand": "品牌",
+    "material": "材质",
+    "size": "尺寸",
+    "color": "颜色",
+    "price": "价格",
+    "quantity": "库存",
+    "main_image": "主图",
+    "detail_images": "详情图",
+    "description": "商品描述"
+  },
+  "login": {
+    "mode": "manual",
+    "completion_prompt": "请在浏览器中手动完成 1688 登录，进入商家后台后按回车继续..."
+  },
+  "publish": {
+    "open_each_product": true,
+    "auto_submit": false,
+    "pause_before_submit": true,
+    "pre_submit_error_detection": {
+      "enabled": true,
+      "timeout_seconds": 0,
+      "keywords": [
+        "发布失败",
+        "产品规格包含表情符号",
+        "资料失效",
+        "日志失效"
+      ],
+      "message_selector": {
+        "by": "css",
+        "value": ""
+      },
+      "close_selector": {
+        "by": "css",
+        "value": ""
+      }
+    },
+    "submit_error_detection": {
+      "enabled": true,
+      "timeout_seconds": 3,
+      "keywords": [
+        "发布失败",
+        "产品规格包含表情符号",
+        "资料失效",
+        "日志失效"
+      ],
+      "message_selector": {
+        "by": "css",
+        "value": ""
+      },
+      "close_selector": {
+        "by": "css",
+        "value": ""
+      }
+    },
+    "submit_selector": {
+      "by": "css",
+      "value": ""
+    },
+    "success_extractors": [
+      {
+        "name": "platform_link_id",
+        "target": "platform_link_id",
+        "attribute": "value",
+        "required": false,
+        "selector": {
+          "by": "css",
+          "value": ""
+        }
+      },
+      {
+        "name": "platform_link_url",
+        "target": "platform_link_url",
+        "attribute": "href",
+        "required": false,
+        "selector": {
+          "by": "css",
+          "value": ""
+        }
+      }
+    ],
+    "steps": [
+      {
+        "name": "open_publish_page",
+        "action": "manual",
+        "message": "请先手动进入 1688 商家后台的商品发布页面，页面加载完成后按回车继续..."
+      },
+      {
+        "name": "title",
+        "action": "input",
+        "source": "title",
+        "required": true,
+        "selector": {
+          "by": "css",
+          "value": ""
+        }
+      },
+      {
+        "name": "price",
+        "action": "input",
+        "source": "price",
+        "required": true,
+        "selector": {
+          "by": "css",
+          "value": ""
+        }
+      },
+      {
+        "name": "quantity",
+        "action": "input",
+        "source": "quantity",
+        "required": true,
+        "selector": {
+          "by": "css",
+          "value": ""
+        }
+      },
+      {
+        "name": "category",
+        "action": "input",
+        "source": "resolved_category_name",
+        "required": false,
+        "selector": {
+          "by": "css",
+          "value": ""
+        }
+      },
+      {
+        "name": "brand",
+        "action": "input",
+        "source": "brand",
+        "required": false,
+        "selector": {
+          "by": "css",
+          "value": ""
+        }
+      },
+      {
+        "name": "material",
+        "action": "input",
+        "source": "material",
+        "required": false,
+        "selector": {
+          "by": "css",
+          "value": ""
+        }
+      },
+      {
+        "name": "main_image",
+        "action": "file",
+        "source": "main_image",
+        "required": true,
+        "selector": {
+          "by": "css",
+          "value": ""
+        }
+      },
+      {
+        "name": "detail_images",
+        "action": "file",
+        "source": "detail_images",
+        "multiple": true,
+        "required": false,
+        "selector": {
+          "by": "css",
+          "value": ""
+        }
+      },
+      {
+        "name": "description",
+        "action": "textarea",
+        "source": "description",
+        "required": false,
+        "selector": {
+          "by": "css",
+          "value": ""
+        }
+      },
+      {
+        "name": "ship_from_template",
+        "action": "select",
+        "source": "ship_from_template",
+        "required": false,
+        "select_by": "text",
+        "selector": {
+          "by": "css",
+          "value": ""
+        }
+      },
+      {
+        "name": "freight_template",
+        "action": "select",
+        "source": "freight_template",
+        "required": false,
+        "select_by": "text",
+        "selector": {
+          "by": "css",
+          "value": ""
+        }
+      },
+      {
+        "name": "ship_time_template",
+        "action": "select",
+        "source": "ship_time_template",
+        "required": false,
+        "select_by": "text",
+        "selector": {
+          "by": "css",
+          "value": ""
+        }
+      },
+      {
+        "name": "sanitize_spec_inputs",
+        "action": "sanitize_inputs",
+        "input_selector": "input, textarea",
+        "skip_readonly": true,
+        "selector": {
+          "by": "css",
+          "value": ""
+        }
+      },
+      {
+        "name": "assert_no_publish_errors",
+        "action": "assert_no_errors",
+        "error_detection": {
+          "enabled": true,
+          "timeout_seconds": 0,
+          "keywords": [
+            "发布失败",
+            "产品规格包含表情符号",
+            "资料失效",
+            "日志失效"
+          ],
+          "message_selector": {
+            "by": "css",
+            "value": ""
+          },
+          "close_selector": {
+            "by": "css",
+            "value": ""
+          }
+        }
+      },
+      {
+        "name": "extract_match_source_id",
+        "action": "extract",
+        "target": "match_source_id",
+        "required": false,
+        "selector": {
+          "by": "css",
+          "value": ""
+        }
+      },
+      {
+        "name": "manual_review",
+        "action": "manual",
+        "message": "请检查 1688 发布页中的类目、运费和规格设置，确认后回车继续..."
+      }
+    ]
+  }
+}

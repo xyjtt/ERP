@@ -1,0 +1,29 @@
+{
+  "platform": "pdd",
+  "login_url": "https://mms.pinduoduo.com/",
+  "publish_url": "https://mms.pinduoduo.com/goods/goods_list",
+  "required_fields": [
+    "title",
+    "price",
+    "quantity",
+    "platform_category",
+    "main_image"
+  ],
+  "field_mapping": {
+    "title": "商品标题",
+    "brand": "品牌",
+    "material": "材质",
+    "size": "规格",
+    "price": "拼单价",
+    "quantity": "库存",
+    "main_image": "轮播图",
+    "detail_images": "详情图",
+    "description": "商品详情"
+  },
+  "selectors": {
+    "login_username": "",
+    "login_password": "",
+    "login_submit": "",
+    "publish_button": ""
+  }
+}

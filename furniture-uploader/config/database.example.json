@@ -1,0 +1,10 @@
+{
+  "driver": "ODBC Driver 17 for SQL Server",
+  "host": "192.168.151.76",
+  "port": 1433,
+  "database": "JianSun",
+  "username": "sa",
+  "password_env": "FURNITURE_UPLOADER_DB_PASSWORD",
+  "encrypt": false,
+  "trust_server_certificate": true
+}

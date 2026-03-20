@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+node_modules/
+dist/
+build/
+logs/
+artifacts/
+results/
+storage/
+*.local.json
+.env

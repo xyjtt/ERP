@@ -1,0 +1,2 @@
+task_id,source_type,source_record_id,platform,shop_name,old_online_sku_code,new_online_sku_code,operator_name,remark
+TASK-001,excel,SRC-001,天猫,天猫-亿家达旗舰店,ZH-31192C-1-SZ001537N961V01,OFF_ZH-31192C-1-SZ001537N961V01,张三,测试批量改编码

@@ -1,0 +1,3 @@
+{
+  "note": "账号密码优先放在 config/systems/jushuitan.local.json，不建议直接写入公开配置。"
+}

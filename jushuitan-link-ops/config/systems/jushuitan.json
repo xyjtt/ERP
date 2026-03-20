@@ -1,0 +1,25 @@
+{
+  "login_url": "https://www.erp321.com/login.aspx?refer=https%3A%2F%2Fwww.erp321.com%2Fepaas",
+  "manage_page_url": "",
+  "username": "",
+  "password": "",
+  "browser": {
+    "headless": false,
+    "wait_seconds": 20,
+    "implicit_wait_seconds": 2
+  },
+  "login_selectors": {
+    "username_input": {
+      "by": "css",
+      "value": ""
+    },
+    "password_input": {
+      "by": "css",
+      "value": ""
+    },
+    "submit_button": {
+      "by": "css",
+      "value": ""
+    }
+  }
+}

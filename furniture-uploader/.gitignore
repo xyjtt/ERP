@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+.idea/
+.vscode/
+build/
+dist/
+logs/
+downloads/
+config/database.local.json
+config/operator_config.local.json
+config/systems/*.local.json
+config/platforms/*.local.json

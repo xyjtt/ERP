@@ -1,0 +1,29 @@
+{
+  "login_url": "https://www.erp321.com/login.aspx?refer=https%3A%2F%2Fwww.erp321.com%2Fepaas",
+  "manage_page_url": "https://www.erp321.com/your_shop_manage_page",
+  "login": {
+    "username_selector": {"by": "css", "value": "input[name='username']"},
+    "password_selector": {"by": "css", "value": "input[name='password']"},
+    "submit_selector": {"by": "css", "value": "button[type='submit']"}
+  },
+  "selectors": {
+    "sku_tab": {"by": "css", "value": "#sku-tab"},
+    "sku_search_input": {"by": "css", "value": "input[placeholder*='商品编码']"},
+    "platform_filter_dropdown": {"by": "css", "value": "#platform-filter"},
+    "platform_option": {"by": "xpath", "value": "//li[contains(text(), '{platform}')]"},
+    "platform_search_input": {"by": "css", "value": "#platform-search"},
+    "platform_search_submit": {"by": "css", "value": "#platform-search-btn"},
+    "search_button": {"by": "css", "value": "button.search-btn"},
+    "batch_update_button": {"by": "css", "value": "button.batch-update-btn"},
+    "batch_fill_mode": {"by": "css", "value": "button[title='批量填充']"},
+    "batch_fill_value": {"by": "css", "value": "input[placeholder='请输入填充值']"},
+    "batch_fill_confirm": {"by": "css", "value": "button.confirm-btn"},
+    "batch_fill_message": {"by": "css", "value": "div.toast-message"},
+    "result_row": {"by": "css", "value": "table tbody tr"},
+    "result_columns": {
+      "商品编码": {"by": "css", "value": "td:nth-child(2)"},
+      "商品名称": {"by": "css", "value": "td:nth-child(3)"},
+      "店铺": {"by": "css", "value": "td:nth-child(4)"}
+    }
+  }
+}

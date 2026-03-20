@@ -1,0 +1,98 @@
+{
+  "allow_manual_fallback": true,
+  "search_wait_seconds": 2,
+  "submit_wait_seconds": 2,
+  "post_submit_wait_seconds": 2,
+  "error_keywords": [
+    "失败",
+    "异常",
+    "错误",
+    "无权限"
+  ],
+  "selectors": {
+    "page_ready_marker": {
+      "by": "css",
+      "value": ""
+    },
+    "search_dimension_dropdown": {
+      "by": "css",
+      "value": ""
+    },
+    "search_dimension_sku_option": {
+      "by": "xpath",
+      "value": ""
+    },
+    "platform_dropdown": {
+      "by": "css",
+      "value": ""
+    },
+    "platform_search_input": {
+      "by": "css",
+      "value": ""
+    },
+    "platform_option_template": {
+      "by": "xpath",
+      "value": ""
+    },
+    "shop_dropdown": {
+      "by": "css",
+      "value": ""
+    },
+    "shop_search_input": {
+      "by": "css",
+      "value": ""
+    },
+    "shop_option_template": {
+      "by": "xpath",
+      "value": ""
+    },
+    "old_code_input": {
+      "by": "css",
+      "value": ""
+    },
+    "search_button": {
+      "by": "css",
+      "value": ""
+    },
+    "result_count_label": {
+      "by": "css",
+      "value": ""
+    },
+    "result_rows": {
+      "by": "css",
+      "value": ""
+    },
+    "select_all_checkbox": {
+      "by": "css",
+      "value": ""
+    },
+    "batch_update_button": {
+      "by": "css",
+      "value": ""
+    },
+    "batch_dialog": {
+      "by": "css",
+      "value": ""
+    },
+    "new_code_input": {
+      "by": "css",
+      "value": ""
+    },
+    "batch_fill_button": {
+      "by": "css",
+      "value": ""
+    },
+    "submit_button": {
+      "by": "css",
+      "value": ""
+    },
+    "success_message": {
+      "by": "css",
+      "value": ""
+    },
+    "error_message": {
+      "by": "css",
+      "value": ""
+    }
+  }
+}

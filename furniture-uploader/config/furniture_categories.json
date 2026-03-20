@@ -1,0 +1,34 @@
+{
+  "living_room": {
+    "display_name": "客厅家具",
+    "platform_categories": {
+      "1688": "家具 > 客厅家具",
+      "taobao": "住宅家具/客厅家具",
+      "jd": "家具/客厅家具",
+      "pdd": "家装家具/客厅家具"
+    },
+    "required_fields": [
+      "title",
+      "brand",
+      "material",
+      "price",
+      "quantity"
+    ]
+  },
+  "bedroom": {
+    "display_name": "卧室家具",
+    "platform_categories": {
+      "1688": "家具 > 卧室家具",
+      "taobao": "住宅家具/卧室家具",
+      "jd": "家具/卧室家具",
+      "pdd": "家装家具/卧室家具"
+    },
+    "required_fields": [
+      "title",
+      "brand",
+      "size",
+      "price",
+      "quantity"
+    ]
+  }
+}
