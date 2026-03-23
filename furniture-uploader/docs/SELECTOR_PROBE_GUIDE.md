@@ -53,6 +53,9 @@ The JSON includes:
 - visible element count
 - visible `input / textarea / select / button / a / img / role=button` elements
 - selector hints based on `id / name / placeholder / class`
+- nearby `label_text`
+- nearby `parent_text`
+- `dom_path_hint`
 
 After capture, generate selector suggestions:
 
@@ -72,6 +75,15 @@ This writes a `*.suggestions.json` file next to the probe JSON and ranks likely 
 - `freight_template`
 - `ship_time_template`
 - `submit_selector`
+
+The ranking now also uses:
+
+- `label_text`
+- `parent_text`
+- `aria-label`
+- `data-name`
+- `data-testid`
+- `dom_path_hint`
 
 ## Suggested Usage
 

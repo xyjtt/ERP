@@ -110,9 +110,12 @@ def build_suggestions(payload: dict[str, Any], *, top: int) -> dict[str, Any]:
                     "tag": str(element.get("tag", "")).strip(),
                     "type": str(element.get("type", "")).strip(),
                     "text": str(element.get("text", "")).strip(),
+                    "label_text": str(element.get("label_text", "")).strip(),
+                    "parent_text": str(element.get("parent_text", "")).strip(),
                     "placeholder": str(element.get("placeholder", "")).strip(),
                     "id": str(element.get("id", "")).strip(),
                     "name": str(element.get("name", "")).strip(),
+                    "dom_path_hint": str(element.get("dom_path_hint", "")).strip(),
                     "classes": element.get("classes", []),
                 }
             )
@@ -127,13 +130,18 @@ def score_element(element: dict[str, Any], rule: dict[str, Any]) -> int:
     score = 0
     haystacks = [
         str(element.get("text", "")),
+        str(element.get("label_text", "")),
+        str(element.get("parent_text", "")),
         str(element.get("placeholder", "")),
         str(element.get("name", "")),
         str(element.get("id", "")),
         str(element.get("selector_hint", "")),
+        str(element.get("dom_path_hint", "")),
         str(element.get("value", "")),
         str((element.get("attributes", {}) or {}).get("title", "")),
         str((element.get("attributes", {}) or {}).get("aria-label", "")),
+        str((element.get("attributes", {}) or {}).get("data-name", "")),
+        str((element.get("attributes", {}) or {}).get("data-testid", "")),
     ]
     normalized = " | ".join(item.lower() for item in haystacks if item).strip()
     if not normalized:

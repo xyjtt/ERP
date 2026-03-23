@@ -146,6 +146,57 @@ def build_probe_payload(driver: webdriver.Chrome) -> dict[str, object]:
       return node.tagName.toLowerCase();
     }
 
+    function findLabelText(node) {
+      const id = node.id || '';
+      if (id) {
+        const explicit = document.querySelector(`label[for="${CSS.escape(id)}"]`);
+        if (explicit) {
+          return shortText(explicit.innerText || explicit.textContent || '');
+        }
+      }
+      const wrappedLabel = node.closest('label');
+      if (wrappedLabel) {
+        return shortText(wrappedLabel.innerText || wrappedLabel.textContent || '');
+      }
+      return '';
+    }
+
+    function findParentText(node) {
+      let current = node.parentElement;
+      let depth = 0;
+      while (current && depth < 4) {
+        const text = shortText(current.innerText || current.textContent || '');
+        if (text) {
+          return text;
+        }
+        current = current.parentElement;
+        depth += 1;
+      }
+      return '';
+    }
+
+    function buildDomPath(node) {
+      const parts = [];
+      let current = node;
+      let depth = 0;
+      while (current && current.nodeType === Node.ELEMENT_NODE && depth < 5) {
+        let part = current.tagName.toLowerCase();
+        if (current.id) {
+          part += `#${current.id}`;
+          parts.unshift(part);
+          break;
+        }
+        const classes = Array.from(current.classList || []).slice(0, 2).filter(Boolean);
+        if (classes.length) {
+          part += `.${classes.join('.')}`;
+        }
+        parts.unshift(part);
+        current = current.parentElement;
+        depth += 1;
+      }
+      return parts.join(' > ');
+    }
+
     return visible.map((node, index) => ({
       index: index + 1,
       tag: node.tagName.toLowerCase(),
@@ -155,9 +206,12 @@ def build_probe_payload(driver: webdriver.Chrome) -> dict[str, object]:
       text: shortText(node.innerText || node.textContent || ''),
       value: shortText(node.value || ''),
       placeholder: node.getAttribute('placeholder') || '',
+      label_text: findLabelText(node),
+      parent_text: findParentText(node),
       role: node.getAttribute('role') || '',
       classes: Array.from(node.classList || []).slice(0, 8),
       selector_hint: buildSelector(node),
+      dom_path_hint: buildDomPath(node),
       attributes: {
         title: node.getAttribute('title') || '',
         href: node.getAttribute('href') || '',
