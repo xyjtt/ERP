@@ -1,6 +1,9 @@
 param(
     [string]$PythonExe = "python",
-    [string]$DebuggerAddress = "127.0.0.1:9222"
+    [string]$DebuggerAddress = "127.0.0.1:9222",
+    [switch]$UpdatePlatformLocalConfig,
+    [string]$PlatformLocalConfigPath = "",
+    [switch]$ReplacePlatformLocal
 )
 
 $ErrorActionPreference = "Stop"
@@ -26,5 +29,29 @@ Write-Host "[INFO] Navigate the attached Chrome window to the 1688 publish detai
     --output (Join-Path $outputDir "publish_detail_page.json") `
     --screenshot (Join-Path $outputDir "publish_detail_page.png") `
     --html (Join-Path $outputDir "publish_detail_page.html")
+
+if ($UpdatePlatformLocalConfig) {
+    $targetPlatformLocalConfigPath = $PlatformLocalConfigPath
+    if (-not $targetPlatformLocalConfigPath) {
+        $targetPlatformLocalConfigPath = Join-Path $projectRoot "config\platforms\1688.local.json"
+    }
+
+    Write-Host "[STEP] Generate 1688 local selector overrides"
+    Write-Host "[INFO] Target local config: $targetPlatformLocalConfigPath"
+
+    $suggestArgs = @(
+        "rpa/suggest_selectors.py",
+        "--probe-json",
+        (Join-Path $outputDir "publish_detail_page.json"),
+        "--platform-local-output",
+        $targetPlatformLocalConfigPath
+    )
+
+    if ($ReplacePlatformLocal) {
+        $suggestArgs += "--replace-platform-local"
+    }
+
+    & $PythonExe @suggestArgs
+}
 
 Write-Host "[DONE] 1688 selector capture completed."

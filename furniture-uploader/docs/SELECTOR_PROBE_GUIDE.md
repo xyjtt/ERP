@@ -27,6 +27,18 @@ powershell -ExecutionPolicy Bypass -File .\scripts\start_debug_chrome.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\capture_1688_pages.ps1
 ```
 
+Generate and merge selector suggestions into `config/platforms/1688.local.json` during the same capture flow:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\capture_1688_pages.ps1 -UpdatePlatformLocalConfig
+```
+
+If you want the new probe result to overwrite existing selector values in the local config:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\capture_1688_pages.ps1 -UpdatePlatformLocalConfig -ReplacePlatformLocal
+```
+
 If you need to point the debug browser at an existing absolute Chrome profile path, pass `-ProfileDir` to `start_debug_chrome.ps1`.
 
 Workflow:
