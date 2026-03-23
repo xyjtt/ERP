@@ -12,6 +12,7 @@ RPA_ROOT = PROJECT_ROOT / "rpa"
 if str(RPA_ROOT) not in sys.path:
     sys.path.insert(0, str(RPA_ROOT))
 
+from browser_rpa import BrowserRPA
 from main import (
     apply_category_history,
     build_category_mapping_payload,
@@ -129,6 +130,42 @@ class MainHelperTests(unittest.TestCase):
         self.assertEqual(resolve_category_keyword(product), "living_room")
         product.platform_category = ""
         self.assertEqual(resolve_category_keyword(product), "北欧餐桌")
+
+    def test_browser_context_splits_resolved_category_path(self) -> None:
+        product = self.build_product()
+        browser = BrowserRPA({}, PROJECT_ROOT)
+
+        context = browser._build_context(
+            "1688",
+            product,
+            {
+                "living_room": {
+                    "display_name": "客厅家具",
+                    "platform_categories": {
+                        "1688": "家具 > 客厅家具 > 布艺沙发",
+                    },
+                }
+            },
+        )
+
+        self.assertEqual(
+            context["resolved_category_levels"],
+            ["家具", "客厅家具", "布艺沙发"],
+        )
+        self.assertEqual(context["resolved_category_level_1"], "家具")
+        self.assertEqual(context["resolved_category_level_2"], "客厅家具")
+        self.assertEqual(context["resolved_category_level_3"], "布艺沙发")
+
+    def test_browser_resolve_selector_supports_context_placeholders(self) -> None:
+        browser = BrowserRPA({}, PROJECT_ROOT)
+
+        selector = browser._resolve_selector(
+            {"by": "xpath", "value": "//span[contains(., '{resolved_category_level_2}')]"},
+            {"resolved_category_level_2": "客厅家具"},
+        )
+
+        self.assertEqual(selector["by"], "xpath")
+        self.assertEqual(selector["value"], "//span[contains(., '客厅家具')]")
 
 
 if __name__ == "__main__":

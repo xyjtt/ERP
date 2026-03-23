@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -165,6 +166,7 @@ class BrowserRPA:
             self._run_publish_steps(publish_config.get("steps", []), context)
             self._check_publish_error_state(
                 publish_config.get("pre_submit_error_detection", {}),
+                context=context,
                 stage_name="pre_submit",
                 exception_cls=PublishValidationError,
             )
@@ -179,6 +181,7 @@ class BrowserRPA:
                 self._wait_for_element(submit_selector, clickable=True).click()
                 self._check_publish_error_state(
                     publish_config.get("submit_error_detection", {}),
+                    context=context,
                     stage_name="post_submit",
                     exception_cls=PublishSubmitError,
                 )
@@ -221,6 +224,7 @@ class BrowserRPA:
             if action == "assert_no_errors":
                 self._check_publish_error_state(
                     step.get("error_detection", {}),
+                    context=context,
                     stage_name=step.get("name", "assert_no_errors"),
                     exception_cls=PublishValidationError,
                 )
@@ -235,7 +239,7 @@ class BrowserRPA:
                 self._pause(self.browser_config.get("action_wait_seconds", 0.5))
                 continue
 
-            selector = step.get("selector", {})
+            selector = self._resolve_selector(step.get("selector", {}), context)
             required = bool(step.get("required", False))
             if not self._selector_is_configured(selector):
                 if required:
@@ -274,7 +278,7 @@ class BrowserRPA:
                 self._wait_for_element(selector, clickable=True).click()
                 if step.get("check_errors_after"):
                     self._check_publish_error_state(
-                        step.get("error_detection", {}),
+                        self._resolve_error_detection(step.get("error_detection", {}), context),
                         stage_name=step.get("name", "click"),
                         exception_cls=PublishValidationError,
                     )
@@ -299,9 +303,13 @@ class BrowserRPA:
         context["display_category_name"] = category_entry.get(
             "display_name", product.platform_category
         )
-        context["resolved_category_name"] = category_entry.get("platform_categories", {}).get(
-            platform_key, ""
-        )
+        resolved_category_name = category_entry.get("platform_categories", {}).get(platform_key, "")
+        context["resolved_category_name"] = resolved_category_name
+        resolved_category_levels = self._split_category_path(resolved_category_name)
+        context["resolved_category_levels"] = resolved_category_levels
+        context["resolved_category_level_count"] = len(resolved_category_levels)
+        for index, level in enumerate(resolved_category_levels, start=1):
+            context[f"resolved_category_level_{index}"] = level
         context["detail_images_list"] = detail_images
         return context
 
@@ -370,7 +378,7 @@ class BrowserRPA:
         if not self.driver:
             raise RuntimeError("Browser has not been opened.")
 
-        selector = step.get("selector", {})
+        selector = self._resolve_selector(step.get("selector", {}), context)
         target_key = step.get("target", step.get("name", "extracted_value"))
         if not self._selector_is_configured(selector):
             if step.get("required", False):
@@ -428,6 +436,7 @@ class BrowserRPA:
                 use_button.click()
                 self._check_publish_error_state(
                     step.get("invalid_error_detection", {}),
+                    context=context,
                     stage_name=step.get("name", "match_candidates"),
                     exception_cls=MatchCandidateInvalidError,
                 )
@@ -535,9 +544,11 @@ class BrowserRPA:
         self,
         detection_config: dict[str, Any],
         *,
+        context: dict[str, Any] | None = None,
         stage_name: str,
         exception_cls: type[Exception] = ValueError,
     ) -> None:
+        detection_config = self._resolve_error_detection(detection_config, context or {})
         if not detection_config or not detection_config.get("enabled", True):
             return
         if not self.driver:
@@ -614,6 +625,50 @@ class BrowserRPA:
             return wait.until(EC.presence_of_element_located(locator))
         except TimeoutException as exc:
             raise TimeoutException(f"Timed out waiting for selector: {selector}") from exc
+
+    def _resolve_selector(
+        self,
+        selector: dict[str, Any] | None,
+        context: dict[str, Any],
+    ) -> dict[str, str]:
+        if not selector:
+            return {}
+        return {
+            "by": str(selector.get("by", "css")).strip() or "css",
+            "value": self._render_template(str(selector.get("value", "")).strip(), context),
+        }
+
+    def _resolve_error_detection(
+        self,
+        detection_config: dict[str, Any] | None,
+        context: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not detection_config:
+            return {}
+        resolved = dict(detection_config)
+        for key in ("message_selector", "close_selector"):
+            resolved[key] = self._resolve_selector(detection_config.get(key, {}), context)
+        return resolved
+
+    def _render_template(self, template: str, context: dict[str, Any]) -> str:
+        if not template or "{" not in template:
+            return template
+
+        def replace(match: re.Match[str]) -> str:
+            key = match.group(1)
+            value = context.get(key, "")
+            return str(value).strip()
+
+        return re.sub(r"\{([a-zA-Z0-9_]+)\}", replace, template)
+
+    def _split_category_path(self, raw_value: str) -> list[str]:
+        if not raw_value:
+            return []
+        return [
+            item.strip()
+            for item in re.split(r"\s*>\s*|\s*/\s*|\s*-\s*", raw_value)
+            if item.strip()
+        ]
 
     def _selector_is_configured(self, selector: dict[str, str] | None) -> bool:
         if not selector:
