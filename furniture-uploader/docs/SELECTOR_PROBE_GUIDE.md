@@ -39,6 +39,12 @@ If you want the new probe result to overwrite existing selector values in the lo
 powershell -ExecutionPolicy Bypass -File .\scripts\capture_1688_pages.ps1 -UpdatePlatformLocalConfig -ReplacePlatformLocal
 ```
 
+Run `doctor` immediately after updating the local config:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\capture_1688_pages.ps1 -UpdatePlatformLocalConfig -RunDoctorAfterUpdate
+```
+
 If you need to point the debug browser at an existing absolute Chrome profile path, pass `-ProfileDir` to `start_debug_chrome.ps1`.
 
 Workflow:

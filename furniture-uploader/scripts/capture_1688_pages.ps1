@@ -3,7 +3,10 @@ param(
     [string]$DebuggerAddress = "127.0.0.1:9222",
     [switch]$UpdatePlatformLocalConfig,
     [string]$PlatformLocalConfigPath = "",
-    [switch]$ReplacePlatformLocal
+    [switch]$ReplacePlatformLocal,
+    [switch]$RunDoctorAfterUpdate,
+    [string]$DoctorSystem = "1688_direct",
+    [string]$TemplateFile = "templates/furniture_template.csv"
 )
 
 $ErrorActionPreference = "Stop"
@@ -52,6 +55,15 @@ if ($UpdatePlatformLocalConfig) {
     }
 
     & $PythonExe @suggestArgs
+
+    if ($RunDoctorAfterUpdate) {
+        Write-Host "[STEP] Run doctor after updating local config"
+        & $PythonExe rpa/main.py `
+            --system $DoctorSystem `
+            --platform 1688 `
+            --file $TemplateFile `
+            --doctor
+    }
 }
 
 Write-Host "[DONE] 1688 selector capture completed."
