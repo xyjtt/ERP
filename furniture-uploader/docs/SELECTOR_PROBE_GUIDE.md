@@ -86,6 +86,9 @@ This writes a `*.suggestions.json` file next to the probe JSON and ranks likely 
 - `title`
 - `price`
 - `quantity`
+- `category`
+- `brand`
+- `material`
 - `main_image`
 - `detail_images`
 - `description`

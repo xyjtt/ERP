@@ -21,6 +21,18 @@ FIELD_RULES = {
         "keywords": ["库存", "可售数量", "数量", "起订量", "quantity", "amount"],
         "preferred_tags": {"input"},
     },
+    "category": {
+        "keywords": ["类目", "商品类目", "category"],
+        "preferred_tags": {"input", "select", "div", "button"},
+    },
+    "brand": {
+        "keywords": ["品牌", "brand"],
+        "preferred_tags": {"input", "select", "div"},
+    },
+    "material": {
+        "keywords": ["材质", "material"],
+        "preferred_tags": {"input", "select", "div"},
+    },
     "main_image": {
         "keywords": ["主图", "主图图片", "商品主图", "image", "upload"],
         "preferred_tags": {"input", "button", "div"},
@@ -167,6 +179,9 @@ def build_platform_local_override(suggestions: dict[str, Any]) -> dict[str, Any]
         "title",
         "price",
         "quantity",
+        "category",
+        "brand",
+        "material",
         "main_image",
         "detail_images",
         "description",

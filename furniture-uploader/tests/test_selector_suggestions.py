@@ -119,6 +119,15 @@ class SelectorSuggestionTests(unittest.TestCase):
                 "price": [
                     {"selector": {"by": "css", "value": "#price"}},
                 ],
+                "category": [
+                    {"selector": {"by": "css", "value": "#category"}},
+                ],
+                "brand": [
+                    {"selector": {"by": "css", "value": "#brand"}},
+                ],
+                "material": [
+                    {"selector": {"by": "css", "value": "#material"}},
+                ],
                 "submit_selector": [
                     {"selector": {"by": "css", "value": "button.submit"}},
                 ],
@@ -132,6 +141,9 @@ class SelectorSuggestionTests(unittest.TestCase):
             [
                 {"name": "title", "selector": {"by": "css", "value": "#title"}},
                 {"name": "price", "selector": {"by": "css", "value": "#price"}},
+                {"name": "category", "selector": {"by": "css", "value": "#category"}},
+                {"name": "brand", "selector": {"by": "css", "value": "#brand"}},
+                {"name": "material", "selector": {"by": "css", "value": "#material"}},
             ],
         )
         self.assertEqual(
