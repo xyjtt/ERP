@@ -1,6 +1,8 @@
 param(
     [string]$PythonExe = "python",
     [string]$DebuggerAddress = "127.0.0.1:9222",
+    [ValidateSet("chrome", "edge")]
+    [string]$Browser = "chrome",
     [switch]$UpdatePlatformLocalConfig,
     [string]$PlatformLocalConfigPath = "",
     [switch]$ReplacePlatformLocal,
@@ -20,6 +22,7 @@ New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
 Write-Host "[STEP] Capture 1688 category selection page"
 Write-Host "[INFO] Navigate the attached Chrome window to the 1688 category selection page."
 & $PythonExe rpa/selector_probe.py `
+    --browser $Browser `
     --debugger-address $DebuggerAddress `
     --output (Join-Path $outputDir "category_page.json") `
     --screenshot (Join-Path $outputDir "category_page.png") `
@@ -28,6 +31,7 @@ Write-Host "[INFO] Navigate the attached Chrome window to the 1688 category sele
 Write-Host "[STEP] Capture 1688 publish detail page"
 Write-Host "[INFO] Navigate the attached Chrome window to the 1688 publish detail page."
 & $PythonExe rpa/selector_probe.py `
+    --browser $Browser `
     --debugger-address $DebuggerAddress `
     --output (Join-Path $outputDir "publish_detail_page.json") `
     --screenshot (Join-Path $outputDir "publish_detail_page.png") `

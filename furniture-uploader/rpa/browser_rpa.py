@@ -6,19 +6,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from selenium import webdriver
 from selenium.common.exceptions import TimeoutException
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.remote.webelement import WebElement
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.select import Select
 from selenium.webdriver.support.ui import WebDriverWait
-from webdriver_manager.chrome import ChromeDriverManager
 
 from exceptions import MatchCandidateInvalidError, ProductMatchNotFoundError, PublishSubmitError, PublishValidationError
 from parser import ProductRecord, strip_emoji
+from webdriver_factory import open_webdriver
 
 
 BY_MAPPING = {
@@ -33,38 +30,28 @@ class BrowserRPA:
     def __init__(self, browser_config: dict, project_root: str | Path) -> None:
         self.browser_config = browser_config
         self.project_root = Path(project_root)
-        self.driver: webdriver.Chrome | None = None
+        self.driver: Any | None = None
         self.attached_to_existing_browser = False
         self.last_screenshot_path = ""
         self.last_html_snapshot_path = ""
         self.last_result_context: dict[str, Any] = {}
 
     def open(self) -> None:
-        options = Options()
         debugger_address = str(self.browser_config.get("debugger_address", "")).strip()
-        chrome_binary_path = str(self.browser_config.get("chrome_binary_path", "")).strip()
+        browser_binary_path = str(
+            self.browser_config.get("browser_binary_path", self.browser_config.get("chrome_binary_path", ""))
+        ).strip()
         user_data_dir = str(self.browser_config.get("user_data_dir", "")).strip()
         profile_directory = str(self.browser_config.get("profile_directory", "")).strip()
+        browser_type = str(self.browser_config.get("browser_type", "")).strip()
 
-        if chrome_binary_path:
-            options.binary_location = chrome_binary_path
-
-        if debugger_address:
-            options.add_experimental_option("debuggerAddress", debugger_address)
-            self.attached_to_existing_browser = True
-        else:
-            self.attached_to_existing_browser = False
-            if user_data_dir:
-                options.add_argument(f"--user-data-dir={user_data_dir}")
-            if profile_directory:
-                options.add_argument(f"--profile-directory={profile_directory}")
-
-        if self.browser_config.get("headless") and not debugger_address:
-            options.add_argument("--headless=new")
-
-        self.driver = webdriver.Chrome(
-            service=Service(ChromeDriverManager().install()),
-            options=options,
+        self.driver, self.attached_to_existing_browser = open_webdriver(
+            headless=bool(self.browser_config.get("headless")),
+            debugger_address=debugger_address,
+            user_data_dir=user_data_dir,
+            profile_directory=profile_directory,
+            browser_binary_path=browser_binary_path,
+            browser_type=browser_type,
         )
         self.driver.implicitly_wait(self.browser_config.get("implicit_wait_seconds", 10))
 

@@ -4,11 +4,9 @@ import argparse
 import json
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
+from webdriver_factory import open_webdriver
 
 
 def build_argument_parser() -> argparse.ArgumentParser:
@@ -17,22 +15,33 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--debugger-address",
         default="",
-        help="Attach to an existing Chrome instance via remote debugging, for example 127.0.0.1:9222.",
+        help="Attach to an existing Chrome or Edge instance via remote debugging, for example 127.0.0.1:9222.",
+    )
+    parser.add_argument(
+        "--browser",
+        default="chrome",
+        choices=["chrome", "edge"],
+        help="Browser engine to launch or attach to.",
     )
     parser.add_argument(
         "--user-data-dir",
         default="",
-        help="Optional Chrome user data directory for reusing a local browser profile.",
+        help="Optional browser user data directory for reusing a local browser profile.",
     )
     parser.add_argument(
         "--profile-directory",
         default="",
-        help="Optional Chrome profile directory name, for example Default.",
+        help="Optional browser profile directory name, for example Default.",
     )
     parser.add_argument(
         "--chrome-binary",
         default="",
-        help="Optional Chrome binary path.",
+        help="Optional browser binary path. Works for both Chrome and Edge for backward compatibility.",
+    )
+    parser.add_argument(
+        "--browser-binary",
+        default="",
+        help="Optional browser binary path.",
     )
     parser.add_argument(
         "--output",
@@ -64,7 +73,8 @@ def main() -> None:
         debugger_address=args.debugger_address,
         user_data_dir=args.user_data_dir,
         profile_directory=args.profile_directory,
-        chrome_binary=args.chrome_binary,
+        browser_binary=args.browser_binary or args.chrome_binary,
+        browser_type=args.browser,
     )
     try:
         if args.url:
@@ -97,34 +107,20 @@ def open_browser(
     debugger_address: str,
     user_data_dir: str,
     profile_directory: str,
-    chrome_binary: str,
-) -> tuple[webdriver.Chrome, bool]:
-    options = Options()
-    attached_to_existing_browser = False
-
-    if chrome_binary:
-        options.binary_location = chrome_binary
-
-    if debugger_address:
-        options.add_experimental_option("debuggerAddress", debugger_address)
-        attached_to_existing_browser = True
-    else:
-        if user_data_dir:
-            options.add_argument(f"--user-data-dir={user_data_dir}")
-        if profile_directory:
-            options.add_argument(f"--profile-directory={profile_directory}")
-
-    if headless and not debugger_address:
-        options.add_argument("--headless=new")
-
-    driver = webdriver.Chrome(
-        service=Service(ChromeDriverManager().install()),
-        options=options,
+    browser_binary: str,
+    browser_type: str,
+) -> tuple[Any, bool]:
+    return open_webdriver(
+        headless=headless,
+        debugger_address=debugger_address,
+        user_data_dir=user_data_dir,
+        profile_directory=profile_directory,
+        browser_binary_path=browser_binary,
+        browser_type=browser_type,
     )
-    return driver, attached_to_existing_browser
 
 
-def build_probe_payload(driver: webdriver.Chrome) -> dict[str, object]:
+def build_probe_payload(driver: Any) -> dict[str, object]:
     script = """
     const nodes = Array.from(document.querySelectorAll('input, textarea, select, button, a, img, [role="button"], [contenteditable="true"]'));
     const visible = nodes.filter((node) => {

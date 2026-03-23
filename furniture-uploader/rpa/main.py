@@ -412,10 +412,12 @@ def initialize_operator_local_config(config_dir: Path) -> str:
             }
         },
         "browser": {
+            "browser_type": "chrome",
             "headless": False,
             "debugger_address": "",
             "user_data_dir": "",
             "profile_directory": "Default",
+            "browser_binary_path": "",
             "chrome_binary_path": "",
             "keep_browser_open_on_close": True,
         },
