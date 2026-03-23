@@ -3,6 +3,8 @@ param(
     [string]$DebuggerAddress = "127.0.0.1:9222",
     [ValidateSet("chrome", "edge")]
     [string]$Browser = "chrome",
+    [ValidateSet("webdriver", "devtools")]
+    [string]$ProbeMode = "webdriver",
     [switch]$UpdatePlatformLocalConfig,
     [string]$PlatformLocalConfigPath = "",
     [switch]$ReplacePlatformLocal,
@@ -16,26 +18,54 @@ $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $projectRoot
 
+if ($Browser -eq "edge" -and $ProbeMode -eq "webdriver") {
+    $ProbeMode = "devtools"
+}
+
 $outputDir = Join-Path $projectRoot "logs\selector_probe\1688"
 New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
 
+function Invoke-SelectorProbe {
+    param(
+        [string]$UrlContains,
+        [string]$OutputJson
+    )
+
+    if ($ProbeMode -eq "devtools") {
+        & $PythonExe rpa/devtools_probe.py `
+            --debugger-address $DebuggerAddress `
+            --url-contains $UrlContains `
+            --output $OutputJson `
+            --screenshot ([System.IO.Path]::ChangeExtension($OutputJson, ".png")) `
+            --html ([System.IO.Path]::ChangeExtension($OutputJson, ".html"))
+        return
+    }
+
+    & $PythonExe rpa/selector_probe.py `
+        --browser $Browser `
+        --debugger-address $DebuggerAddress `
+        --output $OutputJson `
+        --screenshot ([System.IO.Path]::ChangeExtension($OutputJson, ".png")) `
+        --html ([System.IO.Path]::ChangeExtension($OutputJson, ".html"))
+}
+
 Write-Host "[STEP] Capture 1688 category selection page"
-Write-Host "[INFO] Navigate the attached Chrome window to the 1688 category selection page."
-& $PythonExe rpa/selector_probe.py `
-    --browser $Browser `
-    --debugger-address $DebuggerAddress `
-    --output (Join-Path $outputDir "category_page.json") `
-    --screenshot (Join-Path $outputDir "category_page.png") `
-    --html (Join-Path $outputDir "category_page.html")
+Write-Host "[INFO] Navigate the attached browser window to the 1688 category selection page."
+if ($ProbeMode -eq "devtools") {
+    Read-Host "Press Enter after the category page is ready"
+}
+Invoke-SelectorProbe `
+    -UrlContains "offer-new.1688.com/select.htm" `
+    -OutputJson (Join-Path $outputDir "category_page.json")
 
 Write-Host "[STEP] Capture 1688 publish detail page"
-Write-Host "[INFO] Navigate the attached Chrome window to the 1688 publish detail page."
-& $PythonExe rpa/selector_probe.py `
-    --browser $Browser `
-    --debugger-address $DebuggerAddress `
-    --output (Join-Path $outputDir "publish_detail_page.json") `
-    --screenshot (Join-Path $outputDir "publish_detail_page.png") `
-    --html (Join-Path $outputDir "publish_detail_page.html")
+Write-Host "[INFO] Navigate the attached browser window to the 1688 publish detail page."
+if ($ProbeMode -eq "devtools") {
+    Read-Host "Press Enter after the publish detail page is ready"
+}
+Invoke-SelectorProbe `
+    -UrlContains "offer-new.1688.com/popular/publish.htm" `
+    -OutputJson (Join-Path $outputDir "publish_detail_page.json")
 
 if ($UpdatePlatformLocalConfig) {
     $targetPlatformLocalConfigPath = $PlatformLocalConfigPath

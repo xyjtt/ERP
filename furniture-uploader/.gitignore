@@ -8,6 +8,8 @@ dist/
 logs/
 downloads/
 .chrome-debug-profile/
+.edge-debug-profile/
+.tmp/
 config/database.local.json
 config/operator_config.local.json
 config/systems/*.local.json

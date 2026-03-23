@@ -7,7 +7,18 @@ from typing import Any
 
 from config_loader import load_json_with_local_override
 
-SELECTOR_ACTIONS = {"click", "input", "textarea", "file", "select", "extract"}
+SELECTOR_ACTIONS = {
+    "click",
+    "input",
+    "textarea",
+    "file",
+    "select",
+    "extract",
+    "combobox",
+    "picker_upload",
+    "tinymce",
+    "tinymce_images",
+}
 SPECIAL_SELECTOR_KEYS = {
     "match_candidates": [
         "row_selector",

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import shutil
+import urllib.request
+import zipfile
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 from selenium import webdriver
@@ -53,7 +57,12 @@ def open_webdriver(
         if headless and not debugger_address:
             options.add_argument("--headless=new")
         driver = webdriver.Edge(
-            service=EdgeService(EdgeChromiumDriverManager().install()),
+            service=EdgeService(
+                resolve_edge_driver_path(
+                    debugger_address=debugger_address,
+                    browser_binary_path=browser_binary_path,
+                )
+            ),
             options=options,
         )
         return driver, attached_to_existing_browser
@@ -76,3 +85,82 @@ def open_webdriver(
         options=options,
     )
     return driver, attached_to_existing_browser
+
+
+def resolve_edge_driver_path(
+    *,
+    debugger_address: str = "",
+    browser_binary_path: str = "",
+) -> str:
+    try:
+        return EdgeChromiumDriverManager().install()
+    except Exception:
+        version = detect_edge_version(
+            debugger_address=debugger_address,
+            browser_binary_path=browser_binary_path,
+        )
+        if not version:
+            raise
+        return download_edge_driver(version)
+
+
+def detect_edge_version(
+    *,
+    debugger_address: str = "",
+    browser_binary_path: str = "",
+) -> str:
+    if debugger_address:
+        version = detect_edge_version_from_debugger(debugger_address)
+        if version:
+            return version
+
+    binary_path = Path(str(browser_binary_path).strip())
+    if binary_path.name:
+        version = extract_version_from_text(binary_path.name)
+        if version:
+            return version
+
+    return ""
+
+
+def detect_edge_version_from_debugger(debugger_address: str) -> str:
+    try:
+        with urllib.request.urlopen(f"http://{debugger_address}/json/version", timeout=10) as response:
+            payload = response.read().decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+
+    return extract_version_from_text(payload)
+
+
+def extract_version_from_text(raw_value: str) -> str:
+    marker = "Edg/"
+    text = str(raw_value)
+    if marker in text:
+        start = text.index(marker) + len(marker)
+        end = start
+        while end < len(text) and (text[end].isdigit() or text[end] == "."):
+            end += 1
+        return text[start:end]
+    return ""
+
+
+def download_edge_driver(version: str) -> str:
+    cache_dir = Path.home() / ".cache" / "furniture-uploader" / "drivers" / "edge" / version
+    target_path = cache_dir / "msedgedriver.exe"
+    if target_path.exists():
+        return str(target_path)
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    archive_url = f"https://msedgedriver.microsoft.com/{version}/edgedriver_win64.zip"
+
+    with TemporaryDirectory() as temp_dir:
+        temp_root = Path(temp_dir)
+        archive_path = temp_root / "edgedriver_win64.zip"
+        with urllib.request.urlopen(archive_url, timeout=60) as response, archive_path.open("wb") as target:
+            shutil.copyfileobj(response, target)
+        with zipfile.ZipFile(archive_path) as archive:
+            archive.extract("msedgedriver.exe", path=temp_root)
+        shutil.copy2(temp_root / "msedgedriver.exe", target_path)
+
+    return str(target_path)

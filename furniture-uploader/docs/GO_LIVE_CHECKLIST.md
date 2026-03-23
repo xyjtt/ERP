@@ -1,3 +1,11 @@
+## 2026-03-23 Update
+
+- Base `config/platforms/1688.json` now contains live selectors for title, price, quantity, main image, detail images, description, and logistics templates
+- 1688 main image upload now uses the page's own React bridge instead of relying on the unstable image-picker opener
+- Detail images are uploaded through the same bridge and inserted into TinyMCE as remote image URLs
+- Live smoke on the current 1688 publish page completed for `title / price / quantity / main_image / detail_images / description`
+- Remaining pre-go-live gaps are category-tree automation, publish error selectors, and success result extractors
+
 # Go-Live Checklist
 
 ## Already Completed

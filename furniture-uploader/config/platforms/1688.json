@@ -69,7 +69,7 @@
     },
     "submit_selector": {
       "by": "css",
-      "value": ""
+      "value": "#submitFormButton"
     },
     "success_extractors": [
       {
@@ -106,7 +106,7 @@
         "required": true,
         "selector": {
           "by": "css",
-          "value": ""
+          "value": "#guid-title input[maxlength=\"60\"]"
         }
       },
       {
@@ -116,7 +116,7 @@
         "required": true,
         "selector": {
           "by": "css",
-          "value": ""
+          "value": "#guid-priceRange td[data-next-table-col=\"2\"] input"
         }
       },
       {
@@ -126,7 +126,7 @@
         "required": true,
         "selector": {
           "by": "css",
-          "value": ""
+          "value": "#guid-totalSales input"
         }
       },
       {
@@ -141,86 +141,93 @@
       },
       {
         "name": "brand",
-        "action": "input",
+        "action": "combobox",
         "source": "brand",
         "required": false,
         "selector": {
-          "by": "css",
-          "value": ""
+          "by": "xpath",
+          "value": "//div[@id='guid-catProp']//div[contains(@class,'decorate-cat-prop')][.//span[contains(@class,'cat-prop-label')][contains(normalize-space(.), '品牌')]]//input[@role='combobox' or @type='text']"
         }
       },
       {
         "name": "material",
-        "action": "input",
+        "action": "combobox",
         "source": "material",
         "required": false,
         "selector": {
-          "by": "css",
-          "value": ""
+          "by": "xpath",
+          "value": "//div[@id='guid-catProp']//div[contains(@class,'decorate-cat-prop')][.//span[contains(@class,'cat-prop-label')][contains(normalize-space(.), '材质')]]//input[@role='combobox' or @type='text']"
         }
       },
       {
         "name": "main_image",
-        "action": "file",
+        "action": "picker_upload",
         "source": "main_image",
         "required": true,
+        "upload_via_react_bridge": true,
+        "bridge_slot_index": 0,
         "selector": {
-          "by": "css",
-          "value": ""
+          "by": "xpath",
+          "value": "(//div[@id='guid-primaryPicture']//div[contains(@class,'picture-sort-item')]//div[contains(@class,'module-picture-cover-wrapper')])[1]"
         }
       },
       {
         "name": "detail_images",
-        "action": "file",
+        "action": "tinymce_images",
         "source": "detail_images",
         "multiple": true,
         "required": false,
+        "upload_via_react_bridge": true,
+        "bridge_slot_index": 1,
+        "clear_bridge_slot_after_upload": true,
+        "bridge_selector": {
+          "by": "xpath",
+          "value": "(//div[@id='guid-primaryPicture']//div[contains(@class,'picture-sort-item')]//div[contains(@class,'module-picture-cover-wrapper')])[1]"
+        },
         "selector": {
           "by": "css",
-          "value": ""
+          "value": "#tinyMCE-0"
         }
       },
       {
         "name": "description",
-        "action": "textarea",
+        "action": "tinymce",
         "source": "description",
         "required": false,
+        "append_mode": "prepend",
         "selector": {
           "by": "css",
-          "value": ""
+          "value": "#tinyMCE-0"
         }
       },
       {
         "name": "ship_from_template",
-        "action": "select",
+        "action": "combobox",
         "source": "ship_from_template",
         "required": false,
-        "select_by": "text",
         "selector": {
           "by": "css",
-          "value": ""
+          "value": "#rc_select_3"
         }
       },
       {
         "name": "freight_template",
-        "action": "select",
+        "action": "combobox",
         "source": "freight_template",
         "required": false,
-        "select_by": "text",
         "selector": {
           "by": "css",
-          "value": ""
+          "value": "#rc_select_6"
         }
       },
       {
         "name": "ship_time_template",
-        "action": "select",
+        "action": "combobox",
         "source": "ship_time_template",
         "required": false,
-        "select_by": "text",
         "selector": {
           "by": "css",
-          "value": ""
+          "value": "#rc_select_7"
         }
       },
       {

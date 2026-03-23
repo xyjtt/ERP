@@ -58,3 +58,11 @@
 - “P10 现在怎么样”
 
 我都会按这张表直接回复对应状态和产出。
+## 2026-03-23 Live Update
+
+- P10 selector capture: completed for the current 1688 publish page session
+- P11 platform config: completed for title, price, quantity, main image, detail images, description, and logistics template selectors
+- P12 first live smoke: completed for `title / price / quantity / main_image / detail_images / description`
+- Main image upload path no longer depends on the unstable picker opener; it now uses the live 1688 primary-picture React bridge
+- Detail images now upload through the same bridge and are written back into TinyMCE as remote image URLs
+- Remaining warnings are limited to category selection, publish error selectors, and success extractor selectors

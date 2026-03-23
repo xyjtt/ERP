@@ -200,3 +200,9 @@ powershell -ExecutionPolicy Bypass -File .\scripts\capture_1688_pages.ps1
 - `人工确认发布`
 
 这是当前最稳、最容易尽快看到结果的路径。
+## 2026-03-23 Stability Update
+
+- Current live 1688 smoke is stable for `title / price / quantity / main_image / detail_images / description`
+- Main image upload now uses the live primary-picture React bridge, which avoids the unreliable picker opener
+- Detail images are uploaded through the same bridge and then written into TinyMCE as remote URLs
+- `config/platforms/1688.json` has been promoted from empty placeholders to a usable live baseline for the current publish page

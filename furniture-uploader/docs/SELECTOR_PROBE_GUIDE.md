@@ -14,6 +14,12 @@ Attach to an existing Chrome debug session:
 python rpa/selector_probe.py --debugger-address 127.0.0.1:9222
 ```
 
+Attach through DevTools only, without webdriver startup:
+
+```bash
+python rpa/devtools_probe.py --debugger-address 127.0.0.1:9222 --url-contains "offer-new.1688.com/popular/publish.htm"
+```
+
 Reuse a local Chrome profile:
 
 ```bash
@@ -25,6 +31,13 @@ Recommended 1688 workflow:
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\start_debug_chrome.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\capture_1688_pages.ps1
+```
+
+Recommended workflow for Edge debug sessions:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\start_debug_edge.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\capture_1688_pages.ps1 -Browser edge -ProbeMode devtools
 ```
 
 Generate and merge selector suggestions into `config/platforms/1688.local.json` during the same capture flow:
@@ -46,6 +59,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\capture_1688_pages.ps1 -Updat
 ```
 
 If you need to point the debug browser at an existing absolute Chrome profile path, pass `-ProfileDir` to `start_debug_chrome.ps1`.
+
+For Edge sessions, `-ProbeMode devtools` avoids local `msedgedriver` download issues and captures directly through the remote debugging socket.
 
 Workflow:
 

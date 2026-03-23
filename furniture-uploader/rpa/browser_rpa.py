@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import base64
+import html
+import mimetypes
 import re
 import time
 from datetime import datetime
@@ -8,6 +11,7 @@ from typing import Any
 
 from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.remote.webelement import WebElement
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.select import Select
@@ -241,9 +245,14 @@ class BrowserRPA:
                         raise ValueError(f"Required value missing for step '{step.get('name')}'")
                     continue
                 element = self._wait_for_element(selector, clickable=True)
-                if step.get("clear", True):
-                    element.clear()
-                element.send_keys(str(value))
+                self._fill_text_field(element, str(value), clear=bool(step.get("clear", True)))
+            elif action == "combobox":
+                value = self._resolve_value(step, context)
+                if not value:
+                    if required:
+                        raise ValueError(f"Required combobox value missing for step '{step.get('name')}'")
+                    continue
+                self._fill_combobox(selector, step, value)
             elif action == "select":
                 value = self._resolve_value(step, context)
                 if not value:
@@ -261,6 +270,27 @@ class BrowserRPA:
                 element = self._wait_for_element(selector)
                 payload = "\n".join(values) if step.get("multiple") else values[0]
                 element.send_keys(payload)
+            elif action == "picker_upload":
+                values = self._resolve_file_values(step, context)
+                if not values:
+                    if required:
+                        raise ValueError(f"Required picker_upload value missing for step '{step.get('name')}'")
+                    continue
+                self._run_picker_upload(step, selector, values, context)
+            elif action == "tinymce":
+                value = self._resolve_value(step, context)
+                if not value:
+                    if required:
+                        raise ValueError(f"Required TinyMCE value missing for step '{step.get('name')}'")
+                    continue
+                self._write_tinymce_content(step, selector, value)
+            elif action == "tinymce_images":
+                values = self._resolve_file_values(step, context)
+                if not values:
+                    if required:
+                        raise ValueError(f"Required TinyMCE image value missing for step '{step.get('name')}'")
+                    continue
+                self._insert_tinymce_images(step, selector, values)
             elif action == "click":
                 self._wait_for_element(selector, clickable=True).click()
                 if step.get("check_errors_after"):
@@ -526,6 +556,748 @@ class BrowserRPA:
             select_control.select_by_index(int(value))
         else:
             select_control.select_by_visible_text(value)
+
+    def _fill_text_field(self, element: WebElement, value: str, *, clear: bool = True) -> None:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+
+        next_value = str(value)
+        self.driver.execute_script(
+            """
+            const element = arguments[0];
+            const nextValue = arguments[1];
+            const tagName = (element.tagName || '').toUpperCase();
+            const prototype = tagName === 'TEXTAREA'
+              ? window.HTMLTextAreaElement.prototype
+              : window.HTMLInputElement.prototype;
+            const descriptor = Object.getOwnPropertyDescriptor(prototype, 'value');
+            element.scrollIntoView({block: 'center', inline: 'nearest'});
+            element.focus();
+            if (descriptor && descriptor.set) {
+              descriptor.set.call(element, nextValue);
+            } else {
+              element.value = nextValue;
+            }
+            element.dispatchEvent(new Event('input', {bubbles: true}));
+            element.dispatchEvent(new Event('change', {bubbles: true}));
+            element.dispatchEvent(new Event('blur', {bubbles: true}));
+            if (typeof element.blur === 'function') {
+              element.blur();
+            }
+            """,
+            element,
+            next_value if clear else f"{element.get_attribute('value') or ''}{next_value}",
+        )
+        self._pause(0.2)
+
+    def _fill_combobox(self, selector: dict[str, str], step: dict[str, Any], value: str) -> None:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+
+        input_element = self._wait_for_element(selector)
+        self.driver.execute_script(
+            """
+            const input = arguments[0];
+            input.scrollIntoView({block: 'center', inline: 'nearest'});
+            const container =
+              input.closest('.ant-select') ||
+              input.closest('.next-select') ||
+              input.closest('.next-select-inner') ||
+              input.closest('.ant-select-selector') ||
+              input;
+            if (input.hasAttribute('readonly')) {
+              input.removeAttribute('readonly');
+            }
+            container.click();
+            input.focus();
+            """,
+            input_element,
+        )
+        self._pause(float(step.get("open_wait_seconds", 0.3)))
+
+        try:
+            input_element.send_keys(Keys.CONTROL, "a")
+            input_element.send_keys(Keys.DELETE)
+        except Exception:
+            self.driver.execute_script(
+                """
+                const input = arguments[0];
+                input.value = '';
+                input.dispatchEvent(new Event('input', {bubbles: true}));
+                """,
+                input_element,
+            )
+
+        try:
+            input_element.send_keys(str(value))
+        except Exception:
+            self.driver.execute_script(
+                """
+                const input = arguments[0];
+                const nextValue = arguments[1];
+                input.value = nextValue;
+                input.dispatchEvent(new Event('input', {bubbles: true}));
+                input.dispatchEvent(new Event('change', {bubbles: true}));
+                """,
+                input_element,
+                str(value),
+            )
+        self._pause(float(step.get("type_wait_seconds", 0.5)))
+
+        matched = self.driver.execute_script(
+            """
+            const expected = (arguments[0] || '').replace(/\\s+/g, ' ').trim();
+            function norm(value) {
+              return (value || '').replace(/\\s+/g, ' ').trim();
+            }
+            function isVisible(node) {
+              if (!node) return false;
+              const style = window.getComputedStyle(node);
+              const rect = node.getBoundingClientRect();
+              return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+            }
+            const selectors = [
+              '.ant-select-dropdown .ant-select-item-option',
+              '.next-overlay-wrapper .next-menu-item',
+              '.next-overlay-wrapper li'
+            ];
+            const nodes = selectors.flatMap((selector) => Array.from(document.querySelectorAll(selector)));
+            const visible = nodes.filter(isVisible);
+            const exact = visible.find((node) => norm(node.innerText) === expected);
+            const fuzzy = visible.find((node) => norm(node.innerText).includes(expected));
+            const target = exact || fuzzy;
+            if (!target) {
+              return false;
+            }
+            target.click();
+            return true;
+            """,
+            str(value),
+        )
+        if not matched:
+            input_element.send_keys(Keys.ENTER)
+        self._pause(float(step.get("select_wait_seconds", 0.5)))
+
+    def _run_picker_upload(
+        self,
+        step: dict[str, Any],
+        selector: dict[str, str],
+        values: list[str],
+        context: dict[str, Any],
+    ) -> None:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+
+        dialog_selector = self._resolve_selector(
+            step.get("dialog_selector", {"by": "css", "value": "div.ibank-picker-dialog"}),
+            context,
+        )
+        cleanup_selector = self._resolve_selector(
+            step.get(
+                "cleanup_selector",
+                {"by": "css", "value": "div.ibank-picker-dialog, div.ui-dialog, div.ui-dialog-overlay"},
+            ),
+            context,
+        )
+        frame_selector = self._resolve_selector(
+            step.get("frame_selector", {"by": "css", "value": "iframe.picker-frame"}),
+            context,
+        )
+        upload_tab_selector = self._resolve_selector(
+            step.get("upload_tab_selector", {"by": "css", "value": "li.tab-upload"}),
+            context,
+        )
+        album_select_selector = self._resolve_selector(
+            step.get("album_select_selector", {"by": "css", "value": "select"}),
+            context,
+        )
+        file_input_selector = self._resolve_selector(
+            step.get("file_input_selector", {"by": "css", "value": "input[type='file'][accept*='image']"}),
+            context,
+        )
+        insert_selector = self._resolve_selector(
+            step.get("insert_selector", {"by": "css", "value": "a.button.submit"}),
+            context,
+        )
+        insert_count_selector = self._resolve_selector(
+            step.get("insert_count_selector", {"by": "css", "value": ".insert-header em"}),
+            context,
+        )
+
+        if step.get("upload_via_react_bridge", False):
+            self._upload_images_via_primary_picture_bridge(step, selector, values, context)
+            return
+
+        if not step.get("skip_open", False):
+            self._remove_elements(cleanup_selector)
+            opener = self._wait_for_element(selector, clickable=True)
+            self._trigger_picker_opener(opener)
+
+        dialog_element = self._wait_for_dialog(dialog_selector)
+        self._pause(float(step.get("dialog_wait_seconds", 0.5)))
+        frame_element = self._wait_for_element(frame_selector)
+        self.driver.switch_to.frame(frame_element)
+        try:
+            if self._selector_is_configured(upload_tab_selector):
+                try:
+                    upload_tab = self._wait_for_element(upload_tab_selector, clickable=True)
+                    self.driver.execute_script("arguments[0].click();", upload_tab)
+                    self._pause(float(step.get("upload_tab_wait_seconds", 0.5)))
+                except TimeoutException:
+                    pass
+                self._select_picker_album(album_select_selector)
+
+            file_input = self._wait_for_element(file_input_selector)
+            payload = "\n".join(values) if step.get("multiple", len(values) > 1) else values[0]
+            file_input.send_keys(payload)
+
+            wait = WebDriverWait(self.driver, float(step.get("upload_timeout_seconds", 30)))
+            try:
+                wait.until(
+                    lambda driver: self._picker_insert_count(insert_count_selector) >= min(
+                        len(values),
+                        int(step.get("max_insert_count", len(values))),
+                    )
+                )
+            except TimeoutException:
+                self._pause(float(step.get("upload_settle_seconds", 2)))
+
+            insert_button = self._wait_for_element(insert_selector, clickable=True)
+            self.driver.execute_script("arguments[0].click();", insert_button)
+        finally:
+            self.driver.switch_to.default_content()
+
+        self._pause(float(step.get("after_insert_wait_seconds", 1.5)))
+        self._remove_elements(cleanup_selector)
+        self._pause(float(step.get("after_cleanup_wait_seconds", 0.3)))
+
+    def _insert_tinymce_images(
+        self,
+        step: dict[str, Any],
+        selector: dict[str, str],
+        values: list[str],
+    ) -> None:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+
+        self._ensure_old_tinymce_mode(step)
+        if step.get("upload_via_react_bridge", False):
+            uploaded_urls = self._upload_images_via_primary_picture_bridge(step, selector, values, {})
+            html_value = self._build_tinymce_image_html(uploaded_urls)
+            if not html_value:
+                return
+            self._write_tinymce_content(
+                {
+                    **step,
+                    "append_mode": step.get("append_mode", "append"),
+                },
+                selector,
+                html_value,
+            )
+            return
+
+        editor_id = self._resolve_tinymce_editor_id(step, selector)
+        executed = self.driver.execute_script(
+            """
+            const editorId = arguments[0];
+            const editor = window.tinyMCE && window.tinyMCE.get && window.tinyMCE.get(editorId);
+            if (!editor) {
+              return false;
+            }
+            editor.execCommand('mceImage');
+            return true;
+            """,
+            editor_id,
+        )
+        if not executed:
+            raise ValueError(f"TinyMCE editor '{editor_id}' is not available.")
+
+        self._run_picker_upload(
+            {
+                **step,
+                "skip_open": True,
+                "dialog_selector": step.get("dialog_selector", {"by": "css", "value": "div.ibank-picker-dialog"}),
+                "frame_selector": step.get("frame_selector", {"by": "css", "value": "iframe.picker-frame"}),
+                "upload_tab_selector": step.get("upload_tab_selector", {"by": "css", "value": "li.tab-upload"}),
+                "file_input_selector": step.get(
+                    "file_input_selector",
+                    {"by": "css", "value": "input[type='file'][accept*='image']"},
+                ),
+                "insert_selector": step.get("insert_selector", {"by": "css", "value": "a.button.submit"}),
+                "insert_count_selector": step.get(
+                    "insert_count_selector",
+                    {"by": "css", "value": ".insert-header em"},
+                ),
+            },
+            {"by": "css", "value": "body"},
+            values,
+            {},
+        )
+
+    def _write_tinymce_content(
+        self,
+        step: dict[str, Any],
+        selector: dict[str, str],
+        value: str,
+    ) -> None:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+
+        self._ensure_old_tinymce_mode(step)
+        editor_id = self._resolve_tinymce_editor_id(step, selector)
+        html_value = self._build_tinymce_html(value)
+        append_mode = str(step.get("append_mode", "replace")).strip().lower()
+        result = self.driver.execute_script(
+            """
+            const editorId = arguments[0];
+            const htmlValue = arguments[1];
+            const appendMode = arguments[2];
+            const editor = window.tinyMCE && window.tinyMCE.get && window.tinyMCE.get(editorId);
+            if (!editor) {
+              return {ok: false, reason: 'editor_not_found'};
+            }
+            const current = editor.getContent() || '';
+            let nextValue = htmlValue;
+            if (appendMode === 'append' && current) {
+              nextValue = current + htmlValue;
+            } else if (appendMode === 'prepend' && current) {
+              nextValue = htmlValue + current;
+            }
+            editor.setContent(nextValue);
+            editor.save();
+            return {
+              ok: true,
+              textareaValue: document.querySelector('#' + editorId) ? document.querySelector('#' + editorId).value : '',
+            };
+            """,
+            editor_id,
+            html_value,
+            append_mode,
+        )
+        if not result.get("ok"):
+            raise ValueError(f"Failed to write TinyMCE content for editor '{editor_id}'.")
+        self._pause(float(step.get("editor_wait_seconds", 0.5)))
+
+    def _ensure_old_tinymce_mode(self, step: dict[str, Any]) -> None:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+
+        toggle_selector = step.get(
+            "mode_toggle_selector",
+            {"by": "css", "value": ".editor-type-toggle-btn button"},
+        )
+        resolved_toggle_selector = self._resolve_selector(toggle_selector, {})
+        if not self._selector_is_configured(resolved_toggle_selector):
+            return
+
+        toggle_buttons = self.driver.find_elements(
+            BY_MAPPING.get(resolved_toggle_selector.get("by", "css"), By.CSS_SELECTOR),
+            resolved_toggle_selector.get("value", ""),
+        )
+        if not toggle_buttons:
+            return
+
+        if self._tinymce_ready(step):
+            return
+
+        toggle_button = toggle_buttons[0]
+        self.driver.execute_script("arguments[0].click();", toggle_button)
+        self._pause(float(step.get("toggle_wait_seconds", 0.5)))
+        confirm_buttons = self.driver.find_elements(By.CSS_SELECTOR, ".ant-modal-root button")
+        if confirm_buttons:
+            self.driver.execute_script("arguments[0].click();", confirm_buttons[-1])
+        self._pause(float(step.get("confirm_wait_seconds", 1.5)))
+
+        if not self._tinymce_ready(step):
+            raise TimeoutException("TinyMCE editor did not become ready after switching to old mode.")
+        return
+
+        toggle_button = toggle_buttons[0]
+        toggle_text = " ".join(toggle_button.text.split())
+        if "返回到旧版" in toggle_text:
+            self.driver.execute_script("arguments[0].click();", toggle_button)
+            self._pause(float(step.get("toggle_wait_seconds", 0.5)))
+            confirm_buttons = self.driver.find_elements(By.CSS_SELECTOR, ".ant-modal-root button")
+            if confirm_buttons:
+                self.driver.execute_script("arguments[0].click();", confirm_buttons[-1])
+            self._pause(float(step.get("confirm_wait_seconds", 1.5)))
+        if "返回到旧版" in toggle_text:
+            self.driver.execute_script("arguments[0].click();", toggle_button)
+            self._pause(float(step.get("toggle_wait_seconds", 0.5)))
+            confirm_buttons = self.driver.find_elements(By.CSS_SELECTOR, ".ant-modal-root button")
+            if confirm_buttons:
+                self.driver.execute_script("arguments[0].click();", confirm_buttons[-1])
+            self._pause(float(step.get("confirm_wait_seconds", 1.5)))
+
+        if not self._tinymce_ready(step):
+            raise TimeoutException("TinyMCE editor did not become ready after switching to old mode.")
+
+    def _tinymce_ready(self, step: dict[str, Any]) -> bool:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+
+        frame_selector = step.get(
+            "editor_frame_selector",
+            {"by": "css", "value": "#tinyMCE-0_ifr"},
+        )
+        resolved_frame_selector = self._resolve_selector(frame_selector, {})
+        wait = WebDriverWait(self.driver, float(step.get("editor_timeout_seconds", 15)))
+        try:
+            wait.until(
+                lambda driver: driver.execute_script(
+                    """
+                    const selector = arguments[0];
+                    const node = document.querySelector(selector);
+                    if (!node) return false;
+                    const rect = node.getBoundingClientRect();
+                    const style = window.getComputedStyle(node);
+                    return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+                    """,
+                    resolved_frame_selector.get("value", ""),
+                )
+            )
+            return True
+        except TimeoutException:
+            return False
+
+    def _resolve_tinymce_editor_id(self, step: dict[str, Any], selector: dict[str, str]) -> str:
+        configured = str(step.get("editor_id", "")).strip()
+        if configured:
+            return configured
+        raw_selector = selector.get("value", "").strip()
+        if raw_selector.startswith("#"):
+            return raw_selector[1:]
+        return "tinyMCE-0"
+
+    def _build_tinymce_html(self, value: str) -> str:
+        raw_value = str(value).strip()
+        if not raw_value:
+            return ""
+        if bool(re.search(r"<[a-zA-Z][^>]*>", raw_value)):
+            return raw_value
+        paragraphs = [
+            f"<p>{html.escape(line)}</p>"
+            for line in raw_value.splitlines()
+            if line.strip()
+        ]
+        return "".join(paragraphs) or f"<p>{html.escape(raw_value)}</p>"
+
+    def _build_tinymce_image_html(self, image_urls: list[str]) -> str:
+        blocks = [
+            f'<p><img src="{html.escape(str(image_url).strip(), quote=True)}" /></p>'
+            for image_url in image_urls
+            if str(image_url).strip()
+        ]
+        return "".join(blocks)
+
+    def _upload_images_via_primary_picture_bridge(
+        self,
+        step: dict[str, Any],
+        selector: dict[str, str],
+        values: list[str],
+        context: dict[str, Any],
+    ) -> list[str]:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+
+        bridge_selector = self._resolve_selector(step.get("bridge_selector", selector), context)
+        if not self._selector_is_configured(bridge_selector):
+            bridge_selector = selector
+
+        slot_index = self._resolve_bridge_slot_index(step)
+        clear_after_upload = bool(step.get("clear_bridge_slot_after_upload", False))
+        clear_wait_seconds = float(step.get("bridge_clear_wait_seconds", 0.2))
+        upload_timeout_seconds = float(step.get("bridge_upload_timeout_seconds", 60))
+
+        uploaded_urls: list[str] = []
+        for value in values:
+            data_url = self._encode_file_as_data_url(value)
+            self._clear_primary_picture_bridge_slot(bridge_selector, slot_index)
+            self._pause(clear_wait_seconds)
+
+            result = self._invoke_primary_picture_bridge_upload(
+                bridge_selector,
+                data_url,
+                slot_index,
+            )
+            if not result.get("ok"):
+                raise ValueError(
+                    "Failed to upload image via primary picture bridge: "
+                    f"{result.get('reason', 'unknown error')}"
+                )
+
+            wait = WebDriverWait(self.driver, upload_timeout_seconds)
+            wait.until(
+                lambda _driver: bool(
+                    str(
+                        self._read_primary_picture_bridge_slot(
+                            bridge_selector,
+                            slot_index,
+                        ).get("url", "")
+                    ).strip()
+                )
+            )
+
+            slot_state = self._read_primary_picture_bridge_slot(bridge_selector, slot_index)
+            remote_url = str(slot_state.get("url", "")).strip()
+            if not remote_url:
+                raise TimeoutException("Primary picture bridge upload completed without a remote image URL.")
+            uploaded_urls.append(remote_url)
+
+            if clear_after_upload:
+                self._clear_primary_picture_bridge_slot(bridge_selector, slot_index)
+                self._pause(clear_wait_seconds)
+
+        return uploaded_urls
+
+    def _encode_file_as_data_url(self, raw_path: str) -> str:
+        file_path = Path(raw_path)
+        mime_type = mimetypes.guess_type(file_path.name)[0] or "image/png"
+        encoded = base64.b64encode(file_path.read_bytes()).decode("ascii")
+        return f"data:{mime_type};base64,{encoded}"
+
+    def _resolve_bridge_slot_index(self, step: dict[str, Any]) -> int:
+        try:
+            return max(0, int(step.get("bridge_slot_index", 0)))
+        except (TypeError, ValueError):
+            return 0
+
+    def _invoke_primary_picture_bridge_upload(
+        self,
+        selector: dict[str, str],
+        data_url: str,
+        slot_index: int,
+    ) -> dict[str, Any]:
+        return self._execute_primary_picture_bridge_script(
+            selector,
+            """
+            const dataUrl = arguments[1];
+            const slotIndex = arguments[2];
+            try {
+              bridge.uploadAnImageBank(null, dataUrl, slotIndex, 'imageList');
+              return {ok: true};
+            } catch (error) {
+              return {
+                ok: false,
+                reason: String((error && error.message) || error),
+              };
+            }
+            """,
+            data_url,
+            slot_index,
+        )
+
+    def _read_primary_picture_bridge_slot(
+        self,
+        selector: dict[str, str],
+        slot_index: int,
+    ) -> dict[str, Any]:
+        return self._execute_primary_picture_bridge_script(
+            selector,
+            """
+            const slotIndex = arguments[1];
+            const value = bridge.props && bridge.props.value ? bridge.props.value : {};
+            const imageList = Array.isArray(value.imageList) ? value.imageList : [];
+            const slot = imageList[slotIndex] || {};
+            return {
+              ok: true,
+              url: slot.url || '',
+              key: slot.key || '',
+              isAiTaskLoading: Boolean(slot.isAiTaskLoading),
+            };
+            """,
+            slot_index,
+        )
+
+    def _clear_primary_picture_bridge_slot(
+        self,
+        selector: dict[str, str],
+        slot_index: int,
+    ) -> None:
+        result = self._execute_primary_picture_bridge_script(
+            selector,
+            """
+            const slotIndex = arguments[1];
+            try {
+              bridge.handleUpdateWith('imageList', function(imageList) {
+                if (!Array.isArray(imageList) || !imageList[slotIndex]) {
+                  return;
+                }
+                const current = imageList[slotIndex] || {};
+                imageList[slotIndex] = {
+                  ...current,
+                  url: null,
+                  isAiTaskLoading: false,
+                };
+              });
+              return {ok: true};
+            } catch (error) {
+              return {
+                ok: false,
+                reason: String((error && error.message) || error),
+              };
+            }
+            """,
+            slot_index,
+        )
+        if not result.get("ok"):
+            raise ValueError(
+                "Failed to clear primary picture bridge slot: "
+                f"{result.get('reason', 'unknown error')}"
+            )
+
+    def _execute_primary_picture_bridge_script(
+        self,
+        selector: dict[str, str],
+        script_body: str,
+        *args: Any,
+    ) -> dict[str, Any]:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+
+        target = self._wait_for_element(selector)
+        return self.driver.execute_script(
+            f"""
+            const target = arguments[0];
+            function findPrimaryPictureBridge(node) {{
+              const reactKey = Object.keys(node || {{}}).find(
+                (key) => key.startsWith('__reactInternalInstance') || key.startsWith('__reactFiber')
+              );
+              let fiber = reactKey ? node[reactKey] : null;
+              while (fiber) {{
+                const stateNode = fiber.stateNode;
+                if (
+                  stateNode &&
+                  typeof stateNode.uploadAnImageBank === 'function' &&
+                  typeof stateNode.handleUpdateWith === 'function'
+                ) {{
+                  return stateNode;
+                }}
+                fiber = fiber.return;
+              }}
+              return null;
+            }}
+            const bridge = findPrimaryPictureBridge(target);
+            if (!bridge) {{
+              return {{
+                ok: false,
+                reason: 'primary_picture_bridge_not_found',
+              }};
+            }}
+            {script_body}
+            """,
+            target,
+            *args,
+        )
+
+    def _picker_insert_count(self, selector: dict[str, str]) -> int:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        if not self._selector_is_configured(selector):
+            return 0
+        try:
+            element = self.driver.find_element(
+                BY_MAPPING.get(selector.get("by", "css").strip().lower(), By.CSS_SELECTOR),
+                selector.get("value", "").strip(),
+            )
+        except Exception:
+            return 0
+        digits = re.findall(r"\d+", element.text or "")
+        return int(digits[0]) if digits else 0
+
+    def _select_picker_album(self, selector: dict[str, str]) -> None:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        if not self._selector_is_configured(selector):
+            return
+        try:
+            album_select = self.driver.find_element(
+                BY_MAPPING.get(selector.get("by", "css").strip().lower(), By.CSS_SELECTOR),
+                selector.get("value", "").strip(),
+            )
+        except Exception:
+            return
+
+        select_control = Select(album_select)
+        viable_options = [
+            option
+            for option in select_control.options
+            if option.is_enabled() and "已满" not in option.text
+        ]
+        if not viable_options:
+            return
+
+        selected_options = [option for option in select_control.options if option.is_selected()]
+        if selected_options and selected_options[0] in viable_options:
+            return
+
+        target_option = viable_options[0]
+        select_control.select_by_value(target_option.get_attribute("value"))
+        self._pause(0.3)
+
+    def _remove_elements(self, selector: dict[str, str]) -> None:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        if not self._selector_is_configured(selector):
+            return
+        self.driver.execute_script(
+            """
+            const selector = arguments[0];
+            document.querySelectorAll(selector).forEach((node) => node.remove());
+            """,
+            selector.get("value", ""),
+        )
+
+    def _wait_for_dialog(self, selector: dict[str, str]) -> WebElement:
+        try:
+            return self._wait_for_element(selector)
+        except TimeoutException:
+            # Some 1688 upload tiles only respond to native mouse events, so keep the
+            # original timeout behavior for callers after a single retry window.
+            return self._wait_for_element(selector)
+
+    def _trigger_picker_opener(self, element: WebElement) -> None:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
+        self.driver.execute_script(
+            """
+            const target = arguments[0];
+            const rect = target.getBoundingClientRect();
+            const hitNode = document.elementFromPoint(
+              rect.left + rect.width / 2,
+              rect.top + rect.height / 2,
+            );
+            (hitNode || target).click();
+            """,
+            element,
+        )
+        self._pause(0.5)
+        if self.driver.find_elements(By.CSS_SELECTOR, "div.ibank-picker-dialog"):
+            return
+        self.driver.execute_script(
+            """
+            const target = arguments[0];
+            const rect = target.getBoundingClientRect();
+            const node = document.elementFromPoint(
+              rect.left + rect.width / 2,
+              rect.top + rect.height / 2,
+            ) || target;
+            ['mouseover', 'mousedown', 'mouseup', 'click'].forEach((eventName) => {
+              node.dispatchEvent(
+                new MouseEvent(eventName, {
+                  bubbles: true,
+                  cancelable: true,
+                  view: window,
+                  clientX: rect.left + Math.min(10, rect.width / 2),
+                  clientY: rect.top + Math.min(10, rect.height / 2),
+                })
+              );
+            });
+            """,
+            element,
+        )
+        self._pause(0.5)
 
     def _check_publish_error_state(
         self,
