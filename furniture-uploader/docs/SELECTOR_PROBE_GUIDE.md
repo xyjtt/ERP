@@ -63,6 +63,12 @@ After capture, generate selector suggestions:
 python rpa/suggest_selectors.py --probe-json logs/selector_probe/1688/publish_detail_page.json
 ```
 
+Write the top-ranked suggestions directly into the local 1688 override file:
+
+```bash
+python rpa/suggest_selectors.py --probe-json logs/selector_probe/1688/publish_detail_page.json --platform-local-output config/platforms/1688.local.json
+```
+
 This writes a `*.suggestions.json` file next to the probe JSON and ranks likely selectors for:
 
 - `title`
@@ -84,6 +90,12 @@ The ranking now also uses:
 - `data-name`
 - `data-testid`
 - `dom_path_hint`
+
+When `--platform-local-output` points at an existing file, the tool keeps non-empty selectors that are already confirmed and only fills blank entries. If you want to replace existing selector values with the new probe result, add:
+
+```bash
+python rpa/suggest_selectors.py --probe-json logs/selector_probe/1688/publish_detail_page.json --platform-local-output config/platforms/1688.local.json --replace-platform-local
+```
 
 ## Suggested Usage
 
