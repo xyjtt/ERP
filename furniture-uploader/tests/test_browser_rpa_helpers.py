@@ -6,6 +6,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from selenium.common.exceptions import TimeoutException
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RPA_ROOT = PROJECT_ROOT / "rpa"
@@ -110,6 +112,23 @@ class BrowserRPAHelperTests(unittest.TestCase):
 
         self.assertTrue(
             self.browser._category_matches_current_page(["家装建材", "客厅家具", "角几/边几"])
+        )
+
+    def test_run_publish_steps_skips_optional_combobox_timeout(self) -> None:
+        self.browser.driver = FakeDriver(current_url="https://offer-new.1688.com/popular/publish.htm")
+        self.browser._fill_combobox = lambda selector, step, value: (_ for _ in ()).throw(TimeoutException())
+
+        self.browser._run_publish_steps(
+            [
+                {
+                    "name": "brand",
+                    "action": "combobox",
+                    "source": "brand",
+                    "required": False,
+                    "selector": {"by": "css", "value": "#missing-brand"},
+                }
+            ],
+            {"brand": "SmokeBrand"},
         )
 
     def test_resolve_tinymce_editor_id_prefers_explicit_id(self) -> None:

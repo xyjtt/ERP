@@ -66,3 +66,11 @@
 - Main image upload path no longer depends on the unstable picker opener; it now uses the live 1688 primary-picture React bridge
 - Detail images now upload through the same bridge and are written back into TinyMCE as remote image URLs
 - Remaining warnings are limited to category selection, publish error selectors, and success extractor selectors
+
+## 2026-03-24 Live Update
+
+- Category-tree automation is now completed for the current 1688 publish flow and has been live-validated against `家装建材 > 客厅家具 > 角几/边几`
+- Success extractors now support `current_url`, `body_text`, and `page_source`, which removes the dependency on unstable success-page selectors
+- Optional publish attributes such as `brand` and `material` now skip cleanly when the current category does not expose those fields
+- Added `templates/1688_corner_table_smoke.csv` as a stable smoke template for repeatable 1688 direct-run validation
+- A full `1688_direct --limit 1 --skip-login` dry run completed successfully on March 24, 2026 without auto-submit; run summary: `logs/run_reports/20260324_094724.summary.json`

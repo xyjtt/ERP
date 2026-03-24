@@ -1,11 +1,11 @@
 {
   "living_room": {
-    "display_name": "客厅家具",
+    "display_name": "\u5ba2\u5385\u5bb6\u5177",
     "platform_categories": {
-      "1688": "家具 > 客厅家具",
-      "taobao": "住宅家具/客厅家具",
-      "jd": "家具/客厅家具",
-      "pdd": "家装家具/客厅家具"
+      "1688": "\u5bb6\u5177 > \u5ba2\u5385\u5bb6\u5177",
+      "taobao": "\u4f4f\u5b85\u5bb6\u5177/\u5ba2\u5385\u5bb6\u5177",
+      "jd": "\u5bb6\u5177/\u5ba2\u5385\u5bb6\u5177",
+      "pdd": "\u5bb6\u88c5\u5bb6\u5177/\u5ba2\u5385\u5bb6\u5177"
     },
     "required_fields": [
       "title",
@@ -16,17 +16,33 @@
     ]
   },
   "bedroom": {
-    "display_name": "卧室家具",
+    "display_name": "\u5367\u5ba4\u5bb6\u5177",
     "platform_categories": {
-      "1688": "家具 > 卧室家具",
-      "taobao": "住宅家具/卧室家具",
-      "jd": "家具/卧室家具",
-      "pdd": "家装家具/卧室家具"
+      "1688": "\u5bb6\u5177 > \u5367\u5ba4\u5bb6\u5177",
+      "taobao": "\u4f4f\u5b85\u5bb6\u5177/\u5367\u5ba4\u5bb6\u5177",
+      "jd": "\u5bb6\u5177/\u5367\u5ba4\u5bb6\u5177",
+      "pdd": "\u5bb6\u88c5\u5bb6\u5177/\u5367\u5ba4\u5bb6\u5177"
     },
     "required_fields": [
       "title",
       "brand",
       "size",
+      "price",
+      "quantity"
+    ]
+  },
+  "corner_table": {
+    "display_name": "\u89d2\u51e0/\u8fb9\u51e0",
+    "platform_categories": {
+      "1688": "\u5bb6\u88c5\u5efa\u6750 > \u5ba2\u5385\u5bb6\u5177 > \u89d2\u51e0/\u8fb9\u51e0",
+      "taobao": "\u4f4f\u5b85\u5bb6\u5177/\u5ba2\u5385\u5bb6\u5177/\u89d2\u51e0",
+      "jd": "\u5bb6\u5177/\u5ba2\u5385\u5bb6\u5177/\u89d2\u51e0",
+      "pdd": "\u5bb6\u88c5\u5bb6\u5177/\u5ba2\u5385\u5bb6\u5177/\u89d2\u51e0"
+    },
+    "required_fields": [
+      "title",
+      "brand",
+      "material",
       "price",
       "quantity"
     ]

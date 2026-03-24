@@ -244,69 +244,77 @@ class BrowserRPA:
                 print(f"[WARN] Skip step '{step.get('name')}' because selector is empty.")
                 continue
 
-            if action in {"input", "textarea"}:
-                value = self._resolve_value(step, context)
-                if not value:
-                    if required:
-                        raise ValueError(f"Required value missing for step '{step.get('name')}'")
-                    continue
-                element = self._wait_for_element(selector, clickable=True)
-                self._fill_text_field(element, str(value), clear=bool(step.get("clear", True)))
-            elif action == "combobox":
-                value = self._resolve_value(step, context)
-                if not value:
-                    if required:
-                        raise ValueError(f"Required combobox value missing for step '{step.get('name')}'")
-                    continue
-                self._fill_combobox(selector, step, value)
-            elif action == "select":
-                value = self._resolve_value(step, context)
-                if not value:
-                    if required:
-                        raise ValueError(f"Required select value missing for step '{step.get('name')}'")
-                    continue
-                element = self._wait_for_element(selector, clickable=True)
-                self._select_option(element, step, value)
-            elif action == "file":
-                values = self._resolve_file_values(step, context)
-                if not values:
-                    if required:
-                        raise ValueError(f"Required file value missing for step '{step.get('name')}'")
-                    continue
-                element = self._wait_for_element(selector)
-                payload = "\n".join(values) if step.get("multiple") else values[0]
-                element.send_keys(payload)
-            elif action == "picker_upload":
-                values = self._resolve_file_values(step, context)
-                if not values:
-                    if required:
-                        raise ValueError(f"Required picker_upload value missing for step '{step.get('name')}'")
-                    continue
-                self._run_picker_upload(step, selector, values, context)
-            elif action == "tinymce":
-                value = self._resolve_value(step, context)
-                if not value:
-                    if required:
-                        raise ValueError(f"Required TinyMCE value missing for step '{step.get('name')}'")
-                    continue
-                self._write_tinymce_content(step, selector, value)
-            elif action == "tinymce_images":
-                values = self._resolve_file_values(step, context)
-                if not values:
-                    if required:
-                        raise ValueError(f"Required TinyMCE image value missing for step '{step.get('name')}'")
-                    continue
-                self._insert_tinymce_images(step, selector, values)
-            elif action == "click":
-                self._wait_for_element(selector, clickable=True).click()
-                if step.get("check_errors_after"):
-                    self._check_publish_error_state(
-                        self._resolve_error_detection(step.get("error_detection", {}), context),
-                        stage_name=step.get("name", "click"),
-                        exception_cls=PublishValidationError,
-                    )
-            else:
-                raise ValueError(f"Unsupported action type: {action}")
+            try:
+                if action in {"input", "textarea"}:
+                    value = self._resolve_value(step, context)
+                    if not value:
+                        if required:
+                            raise ValueError(f"Required value missing for step '{step.get('name')}'")
+                        continue
+                    element = self._wait_for_element(selector, clickable=True)
+                    self._fill_text_field(element, str(value), clear=bool(step.get("clear", True)))
+                elif action == "combobox":
+                    value = self._resolve_value(step, context)
+                    if not value:
+                        if required:
+                            raise ValueError(f"Required combobox value missing for step '{step.get('name')}'")
+                        continue
+                    self._fill_combobox(selector, step, value)
+                elif action == "select":
+                    value = self._resolve_value(step, context)
+                    if not value:
+                        if required:
+                            raise ValueError(f"Required select value missing for step '{step.get('name')}'")
+                        continue
+                    element = self._wait_for_element(selector, clickable=True)
+                    self._select_option(element, step, value)
+                elif action == "file":
+                    values = self._resolve_file_values(step, context)
+                    if not values:
+                        if required:
+                            raise ValueError(f"Required file value missing for step '{step.get('name')}'")
+                        continue
+                    element = self._wait_for_element(selector)
+                    payload = "\n".join(values) if step.get("multiple") else values[0]
+                    element.send_keys(payload)
+                elif action == "picker_upload":
+                    values = self._resolve_file_values(step, context)
+                    if not values:
+                        if required:
+                            raise ValueError(f"Required picker_upload value missing for step '{step.get('name')}'")
+                        continue
+                    self._run_picker_upload(step, selector, values, context)
+                elif action == "tinymce":
+                    value = self._resolve_value(step, context)
+                    if not value:
+                        if required:
+                            raise ValueError(f"Required TinyMCE value missing for step '{step.get('name')}'")
+                        continue
+                    self._write_tinymce_content(step, selector, value)
+                elif action == "tinymce_images":
+                    values = self._resolve_file_values(step, context)
+                    if not values:
+                        if required:
+                            raise ValueError(f"Required TinyMCE image value missing for step '{step.get('name')}'")
+                        continue
+                    self._insert_tinymce_images(step, selector, values)
+                elif action == "click":
+                    self._wait_for_element(selector, clickable=True).click()
+                    if step.get("check_errors_after"):
+                        self._check_publish_error_state(
+                            self._resolve_error_detection(step.get("error_detection", {}), context),
+                            stage_name=step.get("name", "click"),
+                            exception_cls=PublishValidationError,
+                        )
+                else:
+                    raise ValueError(f"Unsupported action type: {action}")
+            except TimeoutException:
+                if required:
+                    raise
+                print(
+                    f"[WARN] Skip optional step '{step.get('name')}' because the element did not appear in time."
+                )
+                continue
 
             self._pause(self.browser_config.get("action_wait_seconds", 0.5))
 

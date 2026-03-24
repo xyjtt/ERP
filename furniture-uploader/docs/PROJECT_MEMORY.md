@@ -43,6 +43,13 @@ Updated: 2026-03-18
 - First live end-to-end browser walkthrough still needs to be completed
 - Final success-page link ID / URL extraction still needs live validation
 
+## 2026-03-24 Refresh
+
+- `config/platforms/1688.json` is now a live-tested baseline for the current 1688 publish page
+- Category automation is live-validated for `家装建材 > 客厅家具 > 角几/边几`
+- A no-submit end-to-end dry run for `1688_direct` now completes successfully with one smoke product
+- The remaining 1688-specific blocker is no longer "fill the page", but "validate the real post-submit success result on a genuine submitted item"
+
 ## Recommended Next Action
 
 1. Set the real DB password and rerun `--check-db`

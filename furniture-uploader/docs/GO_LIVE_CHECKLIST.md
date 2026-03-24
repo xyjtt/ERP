@@ -6,6 +6,18 @@
 - Live smoke on the current 1688 publish page completed for `title / price / quantity / main_image / detail_images / description`
 - Remaining pre-go-live gaps are category-tree automation, publish error selectors, and success result extractors
 
+## 2026-03-24 Update
+
+- Category-tree automation is now working on the live 1688 publish flow
+- Publish error selectors were promoted into the live base config and pass `--doctor`
+- A full `1688_direct --limit 1 --skip-login` dry run completed successfully with `success_count = 1` and `failed_count = 0`
+- Auto-submit remains disabled by design; current definition of success is "page filled successfully and handed back for manual review"
+
+## Current Remaining Gaps Before Real Auto-Submit
+
+- Live validation of the final post-submit success URL / offer ID still needs a real submitted listing
+- Final review is still required for category-specific properties and freight/spec combinations before enabling `auto_submit`
+
 # Go-Live Checklist
 
 ## Already Completed
