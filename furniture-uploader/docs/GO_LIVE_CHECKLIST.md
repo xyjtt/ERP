@@ -1,99 +1,68 @@
-## 2026-03-23 Update
-
-- Base `config/platforms/1688.json` now contains live selectors for title, price, quantity, main image, detail images, description, and logistics templates
-- 1688 main image upload now uses the page's own React bridge instead of relying on the unstable image-picker opener
-- Detail images are uploaded through the same bridge and inserted into TinyMCE as remote image URLs
-- Live smoke on the current 1688 publish page completed for `title / price / quantity / main_image / detail_images / description`
-- Remaining pre-go-live gaps are category-tree automation, publish error selectors, and success result extractors
-
-## 2026-03-24 Update
-
-- Category-tree automation is now working on the live 1688 publish flow
-- Publish error selectors were promoted into the live base config and pass `--doctor`
-- A full `1688_direct --limit 1 --skip-login` dry run completed successfully with `success_count = 1` and `failed_count = 0`
-- Auto-submit remains disabled by design; current definition of success is "page filled successfully and handed back for manual review"
-
-## Current Remaining Gaps Before Real Auto-Submit
-
-- Live validation of the final post-submit success URL / offer ID still needs a real submitted listing
-- Final review is still required for category-specific properties and freight/spec combinations before enabling `auto_submit`
-
 # Go-Live Checklist
 
-## Already Completed
+更新时间：2026-03-24
 
-- Python runtime dependencies installed
-- local bootstrap script available
-- local DB config template generation available
-- local operator private config template generation available
-- selector local override template generation available
-- environment preflight available
-- database preflight available
-- offline unit tests available
-- publish task / result / error / match history / category history / store template persistence implemented
-- emoji sanitization before publish implemented
-- selector probe tool available
+## 当前已经完成
 
-## Must Be Completed Before Real Publishing
+- Python 依赖安装
+- 本地 bootstrap
+- 环境检查
+- 单元测试
+- selector probe 工具
+- 1688 基线 selector 补齐
+- 类目路径自动化
+- 文本/图片/详情 live 干跑
+- smoke 模板准备
+- 草稿模式代码支持
 
-### 1. Fill Real Selectors
+## 上线前必须完成
 
-Required files:
+### 1. 浏览器与账号
 
-- `config/systems/jushuitan.local.json`
-- `config/platforms/1688.local.json`
+- 1688 后台账号可稳定登录
+- 本机调试浏览器可接管
+- 如需长期运行，确认独立浏览器 profile
 
-Minimum required selectors still missing:
+### 2. 配置
 
-- 聚水潭平台选择
-- 聚水潭店铺搜索
-- 聚水潭匹配商品资料弹窗
-- 1688 标题输入框
-- 1688 价格输入框
-- 1688 库存输入框
-- 1688 主图上传控件
+- `config/operator_config.local.json` 已填好浏览器接管信息
+- `config/platforms/1688.local.json` 如有覆盖，已确认不覆盖有效基线
+- 如需数据库写回，已填好 `config/database.local.json`
 
-Recommended helper:
+### 3. 页面能力验证
+
+- 类目选择成功
+- 主图上传成功
+- 详情图上传成功
+- 描述写入成功
+- 运费/发货模板填写成功
+- 当前类目下的可选属性行为已确认
+
+### 4. 最终动作验证
+
+- 真实草稿按钮选择器已确认
+- 已完成一次真实草稿保存
+- 已完成一次真实正式提交
+- 提交成功后的链接/ID 已被脚本提取
+
+### 5. 稳定性
+
+- 单测通过
+- `doctor` 通过
+- 至少连续 3 次干跑无结构性报错
+- 失败时截图和 HTML 快照可用
+
+## 当前未完成的关键上线项
+
+- 真实草稿按钮选择器确认
+- 真实提交成功结果确认
+- 自动提交前的最终风险复核
+
+## 推荐验证命令
 
 ```bash
-python rpa/selector_probe.py --url "https://www.erp321.com/login.aspx?refer=https%3A%2F%2Fwww.erp321.com%2Fepaas"
+python -m unittest discover -s tests -p "test_*.py"
+python rpa/main.py --system 1688_direct --platform 1688 --file templates/1688_corner_table_smoke.csv --doctor
+python rpa/main.py --system 1688_direct --platform 1688 --file templates/1688_corner_table_smoke.csv --validate-only
+python rpa/main.py --system 1688_direct --platform 1688 --file templates/1688_corner_table_smoke.csv --limit 1 --skip-login
 ```
-
-### 2. Use Real Database Password
-
-Current DB preflight result proves:
-
-- driver selection is correct
-- target SQL Server is reachable enough for driver negotiation
-- current failure is credential failure for `sa`
-
-You must set the real password:
-
-```powershell
-$env:FURNITURE_UPLOADER_DB_PASSWORD='真实密码'
-```
-
-Then run:
-
-```bash
-python rpa/main.py --system jushuitan --platform 1688 --file templates/furniture_template.csv --check-db --db-config config/database.local.json
-```
-
-### 3. First Real Dry Run
-
-Recommended order:
-
-1. `python rpa/main.py --system jushuitan --platform 1688 --file templates/furniture_template.csv --check-env`
-2. `python rpa/main.py --system jushuitan --platform 1688 --file templates/furniture_template.csv --doctor`
-3. `python rpa/main.py --system jushuitan --platform 1688 --file templates/furniture_template.csv --validate-only --db-config config/database.local.json`
-4. `python rpa/main.py --system jushuitan --platform 1688 --file templates/furniture_template.csv --limit 1 --db-config config/database.local.json`
-
-## Current Definition of Done
-
-From a software-engineering perspective, the project scaffold is complete enough for real-world integration.
-
-The remaining blockers are not missing code paths; they are missing production-specific runtime facts:
-
-- real page selectors
-- real database password / account availability
-- first live browser walkthrough

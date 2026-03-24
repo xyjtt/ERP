@@ -1,73 +1,73 @@
 # Project Memory
 
-Updated: 2026-03-18
+更新时间：2026-03-24
 
-## Project Positioning
+## 项目定位
 
-- Project: `furniture-uploader`
-- Current operating entry: 聚水潭 Web
-- First target platform: 1688
-- Current execution engine: Python + Selenium
-- Future execution engine: OpenClaw
-- Publish strategy: manual review by default, with support for either save-draft or direct submit
+- 项目：`furniture-uploader`
+- 当前业务目标：实现电商后台自动上架的最小可落地版本
+- 当前执行入口：`1688_direct`
+- 当前首个平台：`1688`
+- 当前执行引擎：`Python + Selenium`
+- 当前默认发布策略：人工复核优先，代码层已经支持 `manual / draft / submit`
 
-## What Is Already Done
+## 当前已验证事实
 
-- Core runtime scaffold completed
-- SQL Server logging and knowledge-base persistence completed
-- `publish_task / publish_result / publish_error_log / match_candidate_history / category_mapping_history / store_default_template` implemented
-- Emoji sanitization before publish implemented
-- Match-history retry skeleton implemented
-- Local config override merge implemented
-- Local bootstrap script implemented
-- Environment preflight implemented
-- Database preflight implemented
-- Selector probe tool implemented
-- Offline unit tests implemented and passing
+- Python 依赖已安装
+- 单元测试通过
+- `doctor` 通过
+- 已支持连接本机已登录的 `Edge/Chrome` 调试会话
+- 1688 发布页主线已完成真实干跑
+- 类目自动选择已在 live 页面验证
+- 成功结果提取已支持 `current_url / body_text / page_source`
+- 可选属性缺失时会自动跳过，不阻塞整单
 
-## Current Verified State
+## 当前已经做完的核心能力
 
-- Python dependencies are installed
-- `--check-env` passes
-- unit tests pass
-- local bootstrap script runs successfully
-- SQL driver auto-detection works on this machine
-- DB connectivity is blocked only by real credential availability
+- 模板读取与字段校验
+- 图片路径校验
+- 本地配置覆盖机制
+- 选择器采集工具
+- 环境体检
+- 数据库预检骨架
+- 发布前错误捕获
+- 主图上传桥接
+- 详情图上传桥接
+- TinyMCE 描述写入
+- 类目路径自动化
+- 1688 smoke 回归模板
 
-## Remaining Real Blockers
+## 当前剩余 blocker
 
-- Real selectors are still missing in:
-  - `config/systems/jushuitan.local.json`
-  - `config/platforms/1688.local.json`
-- Real SQL Server password still needs to be provided
-- First live end-to-end browser walkthrough still needs to be completed
-- Final success-page link ID / URL extraction still needs live validation
+- 真实“保存草稿”按钮还没有完成 live 选择器确认
+- 真实“发布成功”后的 offer 链接/ID 还没有完成最终验证
+- 自动提交模式还没有完成生产级验证
+- SQL Server 真实账号密码仍待提供
+- 聚水潭系统链路仍属于后续阶段，不是当前 1688 主线 blocker
 
-## 2026-03-24 Refresh
+## 当前推荐下一步
 
-- `config/platforms/1688.json` is now a live-tested baseline for the current 1688 publish page
-- Category automation is live-validated for `家装建材 > 客厅家具 > 角几/边几`
-- A no-submit end-to-end dry run for `1688_direct` now completes successfully with one smoke product
-- The remaining 1688-specific blocker is no longer "fill the page", but "validate the real post-submit success result on a genuine submitted item"
+1. 在真实 1688 发布页抓到草稿按钮选择器
+2. 切换 `auto_save_draft` 做一次真实草稿保存验证
+3. 在可控商品上做一次真实提交验证
+4. 回填成功页结果提取
+5. 再决定是否开启自动提交
 
-## Recommended Next Action
+## 关键文件
 
-1. Set the real DB password and rerun `--check-db`
-2. Use `rpa/selector_probe.py` to capture the four critical pages
-3. Fill local selector configs
-4. Run `--doctor`
-5. Run `--validate-only`
-6. Run a first live dry run with `--limit 1`
+- [config/platforms/1688.json](D:/script_files/ERP/furniture-uploader/config/platforms/1688.json)
+- [config/operator_config.local.json](D:/script_files/ERP/furniture-uploader/config/operator_config.local.json)
+- [rpa/browser_rpa.py](D:/script_files/ERP/furniture-uploader/rpa/browser_rpa.py)
+- [rpa/doctor.py](D:/script_files/ERP/furniture-uploader/rpa/doctor.py)
+- [templates/1688_corner_table_smoke.csv](D:/script_files/ERP/furniture-uploader/templates/1688_corner_table_smoke.csv)
+- [docs/PLATFORM_EXPERIENCE_KB.md](D:/script_files/ERP/furniture-uploader/docs/PLATFORM_EXPERIENCE_KB.md)
 
-## Important Local Files
+## 永久说明
 
-- `config/database.local.json`
-- `config/operator_config.local.json`
-- `config/systems/jushuitan.local.json`
-- `config/platforms/1688.local.json`
-- `docs/GO_LIVE_CHECKLIST.md`
-- `docs/SELECTOR_PROBE_GUIDE.md`
+新的人类同事或 AI 接手时，默认先读：
 
-## Permanent Note
-
-If a future session does not remember this project automatically, start by reading this file and `docs/GO_LIVE_CHECKLIST.md`.
+1. `docs/README.md`
+2. `docs/PROJECT_MEMORY.md`
+3. `docs/DIRECT_1688_PROGRESS.md`
+4. `docs/DELIVERY_HANDOVER_2026-03-24.md`
+5. `docs/AI_CONTINUITY_GUIDE.md`

@@ -1,56 +1,57 @@
 # Project Evolution
 
-Updated: 2026-03-18
+更新时间：2026-03-24
 
-## Purpose
+## 目的
 
-This file is the long-term evolution log for the project.
+记录项目的重要方向变化、能力演进、验证节点和策略调整。
 
-Use it to record:
-
-- major architecture changes
-- confirmed business rule changes
-- new blockers
-- removed blockers
-- go-live decisions
-- rollback notes
-
-## Current Stage
-
-- Stage: pre-go-live integration
-- Primary blocker: real selectors
-- Secondary blocker: real DB credential validation
-
-## Evolution Timeline
+## 演化时间线
 
 ### 2026-03-17
 
-- Project direction changed from direct 1688 publishing to 聚水潭 Web as the operational entry
-- First platform fixed to 1688
-- SQL Server 2012 adopted as shared knowledge base
-- Initial default was direct publish instead of draft
-
-### 2026-03-24
-
-- Added configurable draft-save support alongside direct submit
-- Default final action remains conservative: manual review first, then choose draft or submit by config
-- Match-history retry logic added
-- Emoji sanitization added
+- 项目从泛化“家具铺货工具”收敛到先做 `1688` 最小可落地方案
+- 保留未来接入聚水潭与多平台的结构设计
+- 确定基础技术栈为 `Python + Selenium`
+- 引入 SQL Server 作为长期结果沉淀和知识库方向
 
 ### 2026-03-18
 
-- Python dependencies fully installed
-- Bootstrap script verified
-- Offline tests added and passing
-- DB driver auto-detection added
-- Selector probe tool added
-- Project memory and go-live checklist added
+- 完成基础脚手架
+- 完成本地 bootstrap、环境体检、数据库预检
+- 增加离线单元测试
+- 增加 selector probe 工具
 
-## Next Evolution Trigger
+### 2026-03-20
 
-When the first live dry run is completed, update this file with:
+- 明确第一阶段不追求无人值守生产
+- 先做“人工登录 + 自动填表 + 人工复核”的 MVP
 
-- success or failure
-- failed step
-- selector fixes applied
-- final publish result capture status
+### 2026-03-23
+
+- 1688 发布页 live selector 采集完成
+- 主图上传切到页面 React bridge，稳定性明显提升
+- 详情图上传通过同一桥接链路完成
+- `title / price / quantity / main_image / detail_images / description` 完成真实 smoke
+
+### 2026-03-24
+
+- 类目路径自动化完成并通过 live 验证
+- 成功结果提取支持 `current_url / body_text / page_source`
+- 可选属性在当前类目不存在时可自动跳过
+- 增加标准 smoke 模板
+- 完成一次 `1688_direct --limit 1 --skip-login` 的真实干跑闭环
+- 发布最终动作改为 3 模式：`manual / draft / submit`
+- 增加草稿模式支持，但默认仍然保持保守的人工复核
+
+## 当前阶段
+
+- 阶段：pre-go-live
+- 重点：把“真实草稿”和“真实提交成功”两条最终动作补齐
+
+## 下一次必须记录的触发点
+
+- 抓到真实草稿按钮并验证成功
+- 完成一次真实提交
+- 成功页结果提取闭环打通
+- 自动提交进入可上线状态

@@ -1,68 +1,40 @@
-# 家具铺货工具 - 项目交接文档
+# Project Handover
 
-创建时间: 2026-03-17
+更新时间：2026-03-24
 
-## 一、项目概述
+## 项目定位
 
-- 项目名称: `furniture-uploader`（家具自动铺货工具）
-- 功能: 将 Excel/CSV 模板中的商品信息自动发布到电商平台
-- 当前优先平台: `1688（阿里巴巴）`
-- 技术栈: `Python + Selenium`
+- 项目名：`furniture-uploader`
+- 当前主线：`1688` 店铺后台自动上架
+- 当前方式：`Excel/CSV -> Python/Selenium -> 浏览器 RPA`
+- 当前策略：默认人工复核，支持后续切换到草稿或提交
 
-## 二、方案设计
+## 当前已经可用的能力
 
-### 1. 预设模板 + 配置分离
+- 1688 发布页自动填表
+- 类目自动选择
+- 主图/详情图上传
+- 描述写入 TinyMCE
+- 发布前错误检查
+- smoke 样本干跑
 
-#### Excel 预设模板
+## 当前最重要的未完成项
 
-- 创建万能模板，包含所有可能的列
-- 运营只需填写需要的列，不需要的留空
+1. 真实草稿按钮的 live 选择器确认
+2. 真实提交成功后的链接/ID 验证
+3. 自动草稿或自动提交的最终生产验证
 
-#### 配置文件分离
+## 接手建议
 
-```text
-项目目录/
-├── config/
-│   ├── furniture_categories.json
-│   ├── operator_config.json
-│   └── platforms/
-│       ├── 1688.json
-│       ├── jd.json
-│       ├── pdd.json
-│       └── taobao.json
-├── templates/
-│   └── furniture_template.csv
-└── rpa/
-    ├── main.py
-    ├── browser_rpa.py
-    └── parser.py
+1. 先看 [PROJECT_MEMORY.md](D:/script_files/ERP/furniture-uploader/docs/PROJECT_MEMORY.md)
+2. 再看 [DIRECT_1688_PROGRESS.md](D:/script_files/ERP/furniture-uploader/docs/DIRECT_1688_PROGRESS.md)
+3. 然后看 [DELIVERY_HANDOVER_2026-03-24.md](D:/script_files/ERP/furniture-uploader/docs/DELIVERY_HANDOVER_2026-03-24.md)
+4. 真正开始改代码前，跑一遍单测和 `doctor`
+
+## 验证命令
+
+```bash
+python -m unittest discover -s tests -p "test_*.py"
+python rpa/main.py --system 1688_direct --platform 1688 --file templates/1688_corner_table_smoke.csv --doctor
+python rpa/main.py --system 1688_direct --platform 1688 --file templates/1688_corner_table_smoke.csv --limit 1 --skip-login
 ```
-
-### 2. 平台更新流程
-
-1. 平台发布新规则
-2. 管理员更新配置文件，例如 `1688.json`
-3. 推送到配置服务器或 GitHub
-4. 运营打开工具后自动检测更新并一键同步
-
-## 三、当前交付内容
-
-- 已创建项目目录与基础模块
-- 已提供运营模板 `templates/furniture_template.csv`
-- 已提供 1688 的平台配置骨架
-- 已提供手动登录 + 配置驱动填写的首版自动化代码
-
-## 四、当前 MVP 范围
-
-1. 支持读取 CSV/XLSX 模板
-2. 支持校验必填字段、价格库存、类目和图片路径
-3. 支持打开 1688 登录页并等待人工完成登录
-4. 支持按平台配置执行输入、上传、点击和手动暂停
-5. 支持失败截图，方便联调定位问题
-
-## 五、建议的下一步
-
-1. 录制 1688 发布流程页面并补齐真实选择器
-2. 明确“保存草稿”还是“直接提交”作为默认发布策略
-3. 增加更细的类目选择、规格 SKU、运费模板等复杂逻辑
-4. 完成首轮真实样例联调后，再复制能力到其他平台
