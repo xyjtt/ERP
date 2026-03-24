@@ -128,3 +128,16 @@ AI 只读文档还不够，还要有标准回归入口：
 - 把更新动作流程化
 
 这样换任何一个新的 AI，会话一开始都能快速恢复上下文。
+
+## 制度化建议
+
+为了让“自动学习”长期有效，建议把文档维护也流程化：
+
+- 制度文件：[DOC_MAINTENANCE_POLICY.md](D:/script_files/ERP/furniture-uploader/docs/DOC_MAINTENANCE_POLICY.md)
+- 更新模板：[DOC_UPDATE_TEMPLATES.md](D:/script_files/ERP/furniture-uploader/docs/DOC_UPDATE_TEMPLATES.md)
+
+后续 AI 不应只知道“读哪些文档”，还应知道：
+
+- 什么时候必须改文档
+- 应该改哪份文档
+- 改文档时用什么模板

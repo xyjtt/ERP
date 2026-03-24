@@ -11,6 +11,7 @@ Before making changes, read these files in order:
 3. `docs/DIRECT_1688_PROGRESS.md`
 4. `docs/DELIVERY_HANDOVER_2026-03-24.md`
 5. `docs/AI_CONTINUITY_GUIDE.md`
+6. `docs/DOC_MAINTENANCE_POLICY.md`
 
 ## Project Scope
 
@@ -48,9 +49,15 @@ If you change AI onboarding or handoff conventions, also update:
 - `docs/AI_CONTINUITY_GUIDE.md`
 - `docs/DELIVERY_HANDOVER_2026-03-24.md`
 
+When making documentation updates, prefer reusing:
+
+- `docs/DOC_MAINTENANCE_POLICY.md`
+- `docs/DOC_UPDATE_TEMPLATES.md`
+
 ## Working Rules
 
 - Prefer the current effective docs over historical archive docs
 - Keep smoke templates stable
 - Do not enable automated final submit without explicit live validation
 - When selector behavior changes, record the live finding in the knowledge base
+- Do not finish a milestone without updating the corresponding docs

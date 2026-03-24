@@ -39,6 +39,10 @@
   - 平台经验知识库，记录 1688 可复用代码、踩坑和验证结论
 - [AI_CONTINUITY_GUIDE.md](D:/script_files/ERP/furniture-uploader/docs/AI_CONTINUITY_GUIDE.md)
   - 如何让后续 AI 自动读取、更新并延续项目上下文
+- [DOC_MAINTENANCE_POLICY.md](D:/script_files/ERP/furniture-uploader/docs/DOC_MAINTENANCE_POLICY.md)
+  - 文档维护制度，规定什么时候必须更新哪份文档
+- [DOC_UPDATE_TEMPLATES.md](D:/script_files/ERP/furniture-uploader/docs/DOC_UPDATE_TEMPLATES.md)
+  - 文档更新模板，便于人和 AI 快速补充
 
 ## 建议阅读顺序
 
