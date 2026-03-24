@@ -225,6 +225,12 @@ class BrowserRPA:
                 self._extract_value(step, context)
                 continue
 
+            if action == "category_path":
+                selector = self._resolve_selector(step.get("selector", {}), context)
+                self._select_category_path(step, selector, context)
+                self._pause(self.browser_config.get("action_wait_seconds", 0.5))
+                continue
+
             if action == "match_candidates":
                 self._match_candidates(step, context)
                 self._pause(self.browser_config.get("action_wait_seconds", 0.5))
@@ -391,23 +397,191 @@ class BrowserRPA:
 
         return changed_count
 
+    def _select_category_path(
+        self,
+        step: dict[str, Any],
+        selector: dict[str, str],
+        context: dict[str, Any],
+    ) -> None:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+
+        levels = self._resolve_category_levels(step, context)
+        if not levels:
+            if step.get("required", False):
+                raise ValueError(f"Required category levels missing for step '{step.get('name')}'")
+            return
+
+        if self._category_matches_current_page(levels):
+            return
+
+        select_url = self._build_category_select_url(step)
+        if "select.htm" not in (self.driver.current_url or ""):
+            self.driver.get(select_url)
+            self._pause(float(step.get("category_page_wait_seconds", 2)))
+
+        for index, level in enumerate(levels):
+            self._click_category_option(level)
+            if index < len(levels) - 1:
+                self._wait_for_category_level(levels[index + 1], timeout_seconds=float(step.get("category_level_timeout_seconds", 10)))
+            else:
+                self._wait_for_category_confirmation(levels, timeout_seconds=float(step.get("category_confirm_wait_seconds", 10)))
+
+        confirm_selector = self._resolve_selector(
+            step.get("confirm_selector", {"by": "css", "value": "#submitButton"}),
+            context,
+        )
+        confirm_button = self._wait_for_element(confirm_selector, clickable=True)
+        self.driver.execute_script("arguments[0].click();", confirm_button)
+        WebDriverWait(self.driver, float(step.get("category_return_timeout_seconds", 20))).until(
+            lambda driver: "publish.htm" in (driver.current_url or "")
+        )
+        self._pause(float(step.get("after_category_return_wait_seconds", 2)))
+
+    def _resolve_category_levels(self, step: dict[str, Any], context: dict[str, Any]) -> list[str]:
+        source = str(step.get("source", "resolved_category_levels")).strip()
+        value = context.get(source, [])
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+        if not value:
+            return []
+        return self._split_category_path(str(value))
+
+    def _category_matches_current_page(self, levels: list[str]) -> bool:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        if "publish.htm" not in (self.driver.current_url or ""):
+            return False
+        try:
+            text = self.driver.execute_script(
+                """
+                const root = document.querySelector('#guid-catNamer .current-namer');
+                return root ? (root.innerText || root.textContent || '') : '';
+                """
+            )
+        except Exception:
+            return False
+        current_text = str(text).replace("您选择的类目：", "").strip()
+        current = self._split_category_path(current_text)
+        if current == levels:
+            return True
+
+        normalized_current = re.sub(r"[\s>]+", "", current_text)
+        normalized_target = "".join(levels)
+        return normalized_current == normalized_target
+
+    def _build_category_select_url(self, step: dict[str, Any]) -> str:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+
+        configured = str(step.get("select_url", "")).strip()
+        if configured:
+            return configured
+
+        current_url = self.driver.current_url or ""
+        if "publish.htm" in current_url:
+            return re.sub(r"/popular/publish\.htm.*$", "/select.htm", current_url)
+        if "select.htm" in current_url:
+            return current_url
+        return "https://offer-new.1688.com/select.htm"
+
+    def _click_category_option(self, label: str) -> None:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+
+        clicked = self.driver.execute_script(
+            """
+            const label = arguments[0];
+            function norm(value) {
+              return (value || '').replace(/\\s+/g, ' ').trim();
+            }
+            const options = Array.from(document.querySelectorAll('.next-cascader-menu-wrapper li[role="option"]'));
+            const target = options.find((node) => norm(node.getAttribute('title') || node.innerText) === label);
+            if (!target) {
+              return false;
+            }
+            target.scrollIntoView({block: 'center', inline: 'nearest'});
+            target.click();
+            return true;
+            """,
+            label,
+        )
+        if not clicked:
+            raise TimeoutException(f"Category option not found: {label}")
+
+    def _wait_for_category_level(self, label: str, *, timeout_seconds: float) -> None:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        wait = WebDriverWait(self.driver, timeout_seconds)
+        wait.until(
+            lambda driver: driver.execute_script(
+                """
+                const label = arguments[0];
+                function norm(value) {
+                  return (value || '').replace(/\\s+/g, ' ').trim();
+                }
+                return Array.from(document.querySelectorAll('.next-cascader-menu-wrapper li[role="option"]'))
+                  .some((node) => norm(node.getAttribute('title') || node.innerText) === label);
+                """,
+                label,
+            )
+        )
+
+    def _wait_for_category_confirmation(self, levels: list[str], *, timeout_seconds: float) -> None:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        expected = ">".join(levels)
+        wait = WebDriverWait(self.driver, timeout_seconds)
+        wait.until(
+            lambda driver: driver.execute_script(
+                """
+                const expected = arguments[0];
+                const bodyText = document.body.innerText || '';
+                return bodyText.includes(`已选类目：${expected}`);
+                """,
+                expected,
+            )
+        )
+
     def _extract_value(self, step: dict[str, Any], context: dict[str, Any]) -> None:
         if not self.driver:
             raise RuntimeError("Browser has not been opened.")
 
-        selector = self._resolve_selector(step.get("selector", {}), context)
         target_key = step.get("target", step.get("name", "extracted_value"))
-        if not self._selector_is_configured(selector):
-            if step.get("required", False):
-                raise ValueError(f"Required selector not configured for extractor '{target_key}'")
+        source_mode = str(step.get("from", "selector")).strip().lower()
+        pattern = str(step.get("pattern", "")).strip()
+
+        if source_mode == "current_url":
+            raw_value = self.driver.current_url or ""
+        elif source_mode == "body_text":
+            raw_value = self._extract_error_text({})
+        elif source_mode == "page_source":
+            raw_value = self.driver.page_source or ""
+        else:
+            selector = self._resolve_selector(step.get("selector", {}), context)
+            if not self._selector_is_configured(selector):
+                if step.get("required", False):
+                    raise ValueError(f"Required selector not configured for extractor '{target_key}'")
+                return
+
+            element = self._wait_for_element(selector)
+            attribute = step.get("attribute", "").strip()
+            if attribute:
+                raw_value = (element.get_attribute(attribute) or "").strip()
+            else:
+                raw_value = " ".join(element.text.split())
+
+        if pattern:
+            match = re.search(pattern, raw_value)
+            if not match:
+                if step.get("required", False):
+                    raise ValueError(f"Extractor pattern did not match for '{target_key}'")
+                return
+            group_index = int(step.get("group", 1))
+            context[target_key] = (match.group(group_index) or "").strip()
             return
 
-        element = self._wait_for_element(selector)
-        attribute = step.get("attribute", "").strip()
-        if attribute:
-            context[target_key] = (element.get_attribute(attribute) or "").strip()
-        else:
-            context[target_key] = " ".join(element.text.split())
+        context[target_key] = str(raw_value).strip()
 
     def _apply_extractors(self, extractors: list[dict[str, Any]], context: dict[str, Any]) -> None:
         for extractor in extractors:
@@ -1425,7 +1599,7 @@ class BrowserRPA:
             return []
         return [
             item.strip()
-            for item in re.split(r"\s*>\s*|\s*/\s*|\s*-\s*", raw_value)
+            for item in re.split(r"\s*>\s*", raw_value)
             if item.strip()
         ]
 

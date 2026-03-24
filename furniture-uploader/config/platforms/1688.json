@@ -42,11 +42,11 @@
       ],
       "message_selector": {
         "by": "css",
-        "value": ""
+        "value": "#guid-assistBoard .info-list li div, .ant-message-notice-content, .ant-notification-notice-description, .ant-modal-body, .next-dialog-body"
       },
       "close_selector": {
         "by": "css",
-        "value": ""
+        "value": ".ant-modal-root .ant-modal-close, .next-dialog-close, .ui-dialog-titlebar-close"
       }
     },
     "submit_error_detection": {
@@ -60,11 +60,11 @@
       ],
       "message_selector": {
         "by": "css",
-        "value": ""
+        "value": "#guid-assistBoard .info-list li div, .ant-message-notice-content, .ant-notification-notice-description, .ant-modal-body, .next-dialog-body"
       },
       "close_selector": {
         "by": "css",
-        "value": ""
+        "value": ".ant-modal-root .ant-modal-close, .next-dialog-close, .ui-dialog-titlebar-close"
       }
     },
     "submit_selector": {
@@ -75,22 +75,22 @@
       {
         "name": "platform_link_id",
         "target": "platform_link_id",
-        "attribute": "value",
+        "action": "extract",
+        "from": "current_url",
+        "pattern": "/offer/(\\d+)",
+        "group": 1,
         "required": false,
-        "selector": {
-          "by": "css",
-          "value": ""
-        }
+        "selector": {}
       },
       {
         "name": "platform_link_url",
         "target": "platform_link_url",
-        "attribute": "href",
+        "action": "extract",
+        "from": "current_url",
+        "pattern": "(https?://[^\\s]*?/offer/\\d+[^\\s]*)",
+        "group": 1,
         "required": false,
-        "selector": {
-          "by": "css",
-          "value": ""
-        }
+        "selector": {}
       }
     ],
     "steps": [
@@ -98,6 +98,21 @@
         "name": "open_publish_page",
         "action": "manual",
         "message": "请先手动进入 1688 商家后台的商品发布页面，页面加载完成后按回车继续..."
+      },
+      {
+        "name": "category",
+        "action": "category_path",
+        "source": "resolved_category_levels",
+        "required": false,
+        "select_url": "https://offer-new.1688.com/select.htm",
+        "confirm_selector": {
+          "by": "css",
+          "value": "#submitButton"
+        },
+        "selector": {
+          "by": "css",
+          "value": "#guid-catNamer button"
+        }
       },
       {
         "name": "title",
@@ -127,16 +142,6 @@
         "selector": {
           "by": "css",
           "value": "#guid-totalSales input"
-        }
-      },
-      {
-        "name": "category",
-        "action": "input",
-        "source": "resolved_category_name",
-        "required": false,
-        "selector": {
-          "by": "css",
-          "value": ""
         }
       },
       {
@@ -254,11 +259,11 @@
           ],
           "message_selector": {
             "by": "css",
-            "value": ""
+            "value": "#guid-assistBoard .info-list li div, .ant-message-notice-content, .ant-notification-notice-description, .ant-modal-body, .next-dialog-body"
           },
           "close_selector": {
             "by": "css",
-            "value": ""
+            "value": ".ant-modal-root .ant-modal-close, .next-dialog-close, .ui-dialog-titlebar-close"
           }
         }
       },

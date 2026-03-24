@@ -15,6 +15,15 @@ if str(RPA_ROOT) not in sys.path:
 from browser_rpa import BrowserRPA
 
 
+class FakeDriver:
+    def __init__(self, *, current_url: str = "", page_source: str = "") -> None:
+        self.current_url = current_url
+        self.page_source = page_source
+
+    def execute_script(self, script: str, *args: object) -> str:
+        return ""
+
+
 class BrowserRPAHelperTests(unittest.TestCase):
     def setUp(self) -> None:
         self.browser = BrowserRPA({}, PROJECT_ROOT)
@@ -57,6 +66,51 @@ class BrowserRPAHelperTests(unittest.TestCase):
         self.assertEqual(self.browser._resolve_bridge_slot_index({}), 0)
         self.assertEqual(self.browser._resolve_bridge_slot_index({"bridge_slot_index": "3"}), 3)
         self.assertEqual(self.browser._resolve_bridge_slot_index({"bridge_slot_index": "-2"}), 0)
+
+    def test_resolve_category_levels_supports_list_and_path(self) -> None:
+        self.assertEqual(
+            self.browser._resolve_category_levels(
+                {"source": "resolved_category_levels"},
+                {"resolved_category_levels": ["家装建材", "客厅家具", "角几/边几"]},
+            ),
+            ["家装建材", "客厅家具", "角几/边几"],
+        )
+        self.assertEqual(
+            self.browser._resolve_category_levels(
+                {"source": "resolved_category_name"},
+                {"resolved_category_name": "家装建材 > 客厅家具 > 角几/边几"},
+            ),
+            ["家装建材", "客厅家具", "角几/边几"],
+        )
+
+    def test_extract_value_supports_current_url_regex(self) -> None:
+        self.browser.driver = FakeDriver(current_url="https://detail.1688.com/offer/1234567890123.html")
+        context: dict[str, str] = {}
+
+        self.browser._extract_value(
+            {
+                "name": "platform_link_id",
+                "target": "platform_link_id",
+                "action": "extract",
+                "from": "current_url",
+                "pattern": r"/offer/(\d+)",
+                "group": 1,
+            },
+            context,
+        )
+
+        self.assertEqual(context["platform_link_id"], "1234567890123")
+
+    def test_category_matches_current_page_without_delimiters(self) -> None:
+        class CategoryDriver(FakeDriver):
+            def execute_script(self, script: str, *args: object) -> str:
+                return "您选择的类目：家装建材客厅家具角几/边几"
+
+        self.browser.driver = CategoryDriver(current_url="https://offer-new.1688.com/popular/publish.htm")
+
+        self.assertTrue(
+            self.browser._category_matches_current_page(["家装建材", "客厅家具", "角几/边几"])
+        )
 
     def test_resolve_tinymce_editor_id_prefers_explicit_id(self) -> None:
         editor_id = self.browser._resolve_tinymce_editor_id(

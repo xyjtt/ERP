@@ -14,6 +14,7 @@ SELECTOR_ACTIONS = {
     "file",
     "select",
     "extract",
+    "category_path",
     "combobox",
     "picker_upload",
     "tinymce",
@@ -175,7 +176,10 @@ def inspect_step(step: dict[str, Any], report: DoctorReport, *, area: str) -> No
     step_name = step.get("name", "unnamed")
     required = bool(step.get("required", False))
 
-    if action in SELECTOR_ACTIONS:
+    needs_selector = action in SELECTOR_ACTIONS and not (
+        action == "extract" and str(step.get("from", "selector")).strip().lower() != "selector"
+    )
+    if needs_selector:
         selector = step.get("selector", {})
         if not selector_is_configured(selector):
             severity = "error" if required else "warning"
@@ -346,7 +350,10 @@ def _extract_step_template(step: dict[str, Any]) -> dict[str, Any]:
     template: dict[str, Any] = {"name": step.get("name", "")}
     added = False
 
-    if action in SELECTOR_ACTIONS:
+    needs_selector = action in SELECTOR_ACTIONS and not (
+        action == "extract" and str(step.get("from", "selector")).strip().lower() != "selector"
+    )
+    if needs_selector:
         selector = _extract_selector_template(step.get("selector", {}))
         if selector:
             template["selector"] = selector
