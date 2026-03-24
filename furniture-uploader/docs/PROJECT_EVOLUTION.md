@@ -28,7 +28,12 @@ Use it to record:
 - Project direction changed from direct 1688 publishing to 聚水潭 Web as the operational entry
 - First platform fixed to 1688
 - SQL Server 2012 adopted as shared knowledge base
-- Direct publish chosen instead of draft
+- Initial default was direct publish instead of draft
+
+### 2026-03-24
+
+- Added configurable draft-save support alongside direct submit
+- Default final action remains conservative: manual review first, then choose draft or submit by config
 - Match-history retry logic added
 - Emoji sanitization added
 

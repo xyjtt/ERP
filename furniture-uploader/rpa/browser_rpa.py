@@ -162,11 +162,28 @@ class BrowserRPA:
                 exception_cls=PublishValidationError,
             )
 
+            final_action_mode = self._resolve_publish_mode(publish_config)
             if publish_config.get("pause_before_submit", False):
-                input("请确认页面填写无误，准备继续提交流程时按回车...")
+                action_label = {
+                    "draft": "保存草稿",
+                    "submit": "提交发布",
+                }.get(final_action_mode, "继续后续流程")
+                input(f"请确认页面填写无误，准备{action_label}时按回车...")
 
-            submit_selector = publish_config.get("submit_selector", {})
-            if publish_config.get("auto_submit"):
+            if final_action_mode == "draft":
+                draft_selector = publish_config.get("draft_selector", {})
+                if not self._selector_is_configured(draft_selector):
+                    raise ValueError("Auto save draft is enabled but draft_selector is not configured.")
+                self._wait_for_element(draft_selector, clickable=True).click()
+                self._check_publish_error_state(
+                    publish_config.get("draft_error_detection", publish_config.get("submit_error_detection", {})),
+                    context=context,
+                    stage_name="post_draft",
+                    exception_cls=PublishSubmitError,
+                )
+                print(f"[INFO] Saved draft for product: {product.title}")
+            elif final_action_mode == "submit":
+                submit_selector = publish_config.get("submit_selector", {})
                 if not self._selector_is_configured(submit_selector):
                     raise ValueError("Auto submit is enabled but submit_selector is not configured.")
                 self._wait_for_element(submit_selector, clickable=True).click()
@@ -178,7 +195,7 @@ class BrowserRPA:
                 )
                 print(f"[INFO] Submitted product: {product.title}")
             else:
-                print(f"[INFO] Auto submit disabled for {product.title}.")
+                print(f"[INFO] Final action disabled for {product.title}.")
             self._apply_extractors(publish_config.get("success_extractors", []), context)
             self._record_page_metadata(context)
             self.last_result_context = context
@@ -343,6 +360,13 @@ class BrowserRPA:
             context[f"resolved_category_level_{index}"] = level
         context["detail_images_list"] = detail_images
         return context
+
+    def _resolve_publish_mode(self, publish_config: dict[str, Any]) -> str:
+        if publish_config.get("auto_save_draft", False):
+            return "draft"
+        if publish_config.get("auto_submit", False):
+            return "submit"
+        return "manual"
 
     def _resolve_value(self, step: dict[str, Any], context: dict[str, Any]) -> str:
         if "value" in step:

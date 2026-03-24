@@ -9,7 +9,7 @@ Updated: 2026-03-18
 - First target platform: 1688
 - Current execution engine: Python + Selenium
 - Future execution engine: OpenClaw
-- Publish strategy: direct publish, not draft
+- Publish strategy: manual review by default, with support for either save-draft or direct submit
 
 ## What Is Already Done
 

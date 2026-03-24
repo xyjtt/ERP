@@ -151,6 +151,16 @@ def inspect_platform_config(platform_config: dict[str, Any], report: DoctorRepor
                 "auto_submit is enabled but submit_selector is empty.",
             )
         )
+    draft_selector = publish_config.get("draft_selector", {})
+    if publish_config.get("auto_save_draft") and not selector_is_configured(draft_selector):
+        report.issues.append(
+            DoctorIssue(
+                "error",
+                "platform",
+                "draft_selector",
+                "auto_save_draft is enabled but draft_selector is empty.",
+            )
+        )
 
     inspect_error_detection(
         publish_config.get("pre_submit_error_detection", {}),
@@ -313,8 +323,12 @@ def _extract_platform_template(config: dict[str, Any]) -> dict[str, Any]:
     result = {
         "publish": {
             "submit_selector": _extract_selector_template(publish.get("submit_selector", {})),
+            "draft_selector": _extract_selector_template(publish.get("draft_selector", {})),
             "pre_submit_error_detection": _extract_error_detection_template(
                 publish.get("pre_submit_error_detection", {})
+            ),
+            "draft_error_detection": _extract_error_detection_template(
+                publish.get("draft_error_detection", {})
             ),
             "submit_error_detection": _extract_error_detection_template(
                 publish.get("submit_error_detection", {})

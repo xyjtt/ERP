@@ -131,6 +131,11 @@ class BrowserRPAHelperTests(unittest.TestCase):
             {"brand": "SmokeBrand"},
         )
 
+    def test_resolve_publish_mode_prefers_draft_then_submit(self) -> None:
+        self.assertEqual(self.browser._resolve_publish_mode({"auto_save_draft": True}), "draft")
+        self.assertEqual(self.browser._resolve_publish_mode({"auto_submit": True}), "submit")
+        self.assertEqual(self.browser._resolve_publish_mode({}), "manual")
+
     def test_resolve_tinymce_editor_id_prefers_explicit_id(self) -> None:
         editor_id = self.browser._resolve_tinymce_editor_id(
             {"editor_id": "custom-editor"},

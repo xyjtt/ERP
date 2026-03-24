@@ -29,6 +29,7 @@
   },
   "publish": {
     "open_each_product": true,
+    "auto_save_draft": false,
     "auto_submit": false,
     "pause_before_submit": true,
     "pre_submit_error_detection": {
@@ -70,6 +71,28 @@
     "submit_selector": {
       "by": "css",
       "value": "#submitFormButton"
+    },
+    "draft_selector": {
+      "by": "xpath",
+      "value": "//button[.//span[contains(normalize-space(.), '草稿') or contains(normalize-space(.), '暂存')]]"
+    },
+    "draft_error_detection": {
+      "enabled": true,
+      "timeout_seconds": 3,
+      "keywords": [
+        "鍙戝竷澶辫触",
+        "浜у搧瑙勬牸鍖呭惈琛ㄦ儏绗﹀彿",
+        "璧勬枡澶辨晥",
+        "鏃ュ織澶辨晥"
+      ],
+      "message_selector": {
+        "by": "css",
+        "value": "#guid-assistBoard .info-list li div, .ant-message-notice-content, .ant-notification-notice-description, .ant-modal-body, .next-dialog-body"
+      },
+      "close_selector": {
+        "by": "css",
+        "value": ".ant-modal-root .ant-modal-close, .next-dialog-close, .ui-dialog-titlebar-close"
+      }
     },
     "success_extractors": [
       {
