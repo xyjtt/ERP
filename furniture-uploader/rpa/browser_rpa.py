@@ -174,7 +174,8 @@ class BrowserRPA:
                 draft_selector = publish_config.get("draft_selector", {})
                 if not self._selector_is_configured(draft_selector):
                     raise ValueError("Auto save draft is enabled but draft_selector is not configured.")
-                self._wait_for_element(draft_selector, clickable=True).click()
+                self._click_with_javascript(draft_selector)
+                self._handle_optional_draft_confirmation(publish_config)
                 self._check_publish_error_state(
                     publish_config.get("draft_error_detection", publish_config.get("submit_error_detection", {})),
                     context=context,
@@ -266,78 +267,102 @@ class BrowserRPA:
                 print(f"[WARN] Skip step '{step.get('name')}' because selector is empty.")
                 continue
 
-            try:
-                if action in {"input", "textarea"}:
-                    value = self._resolve_value(step, context)
-                    if not value:
-                        if required:
-                            raise ValueError(f"Required value missing for step '{step.get('name')}'")
-                        continue
-                    element = self._wait_for_element(selector, clickable=True)
-                    self._fill_text_field(element, str(value), clear=bool(step.get("clear", True)))
-                elif action == "combobox":
-                    value = self._resolve_value(step, context)
-                    if not value:
-                        if required:
-                            raise ValueError(f"Required combobox value missing for step '{step.get('name')}'")
-                        continue
-                    self._fill_combobox(selector, step, value)
-                elif action == "select":
-                    value = self._resolve_value(step, context)
-                    if not value:
-                        if required:
-                            raise ValueError(f"Required select value missing for step '{step.get('name')}'")
-                        continue
-                    element = self._wait_for_element(selector, clickable=True)
-                    self._select_option(element, step, value)
-                elif action == "file":
-                    values = self._resolve_file_values(step, context)
-                    if not values:
-                        if required:
-                            raise ValueError(f"Required file value missing for step '{step.get('name')}'")
-                        continue
-                    element = self._wait_for_element(selector)
-                    payload = "\n".join(values) if step.get("multiple") else values[0]
-                    element.send_keys(payload)
-                elif action == "picker_upload":
-                    values = self._resolve_file_values(step, context)
-                    if not values:
-                        if required:
-                            raise ValueError(f"Required picker_upload value missing for step '{step.get('name')}'")
-                        continue
-                    self._run_picker_upload(step, selector, values, context)
-                elif action == "tinymce":
-                    value = self._resolve_value(step, context)
-                    if not value:
-                        if required:
-                            raise ValueError(f"Required TinyMCE value missing for step '{step.get('name')}'")
-                        continue
-                    self._write_tinymce_content(step, selector, value)
-                elif action == "tinymce_images":
-                    values = self._resolve_file_values(step, context)
-                    if not values:
-                        if required:
-                            raise ValueError(f"Required TinyMCE image value missing for step '{step.get('name')}'")
-                        continue
-                    self._insert_tinymce_images(step, selector, values)
-                elif action == "click":
-                    self._wait_for_element(selector, clickable=True).click()
-                    if step.get("check_errors_after"):
-                        self._check_publish_error_state(
-                            self._resolve_error_detection(step.get("error_detection", {}), context),
-                            stage_name=step.get("name", "click"),
-                            exception_cls=PublishValidationError,
+            retry_count = max(0, int(step.get("retry_count", 0) or 0))
+            retry_wait_seconds = float(step.get("retry_wait_seconds", 1.5))
+            completed = False
+            for attempt_index in range(retry_count + 1):
+                try:
+                    if action in {"input", "textarea"}:
+                        value = self._resolve_value(step, context)
+                        if not value:
+                            if required:
+                                raise ValueError(f"Required value missing for step '{step.get('name')}'")
+                            completed = True
+                            break
+                        element = self._wait_for_element(selector, clickable=True)
+                        self._fill_text_field(element, str(value), clear=bool(step.get("clear", True)))
+                    elif action == "combobox":
+                        value = self._resolve_value(step, context)
+                        if not value:
+                            if required:
+                                raise ValueError(f"Required combobox value missing for step '{step.get('name')}'")
+                            completed = True
+                            break
+                        self._fill_combobox(selector, step, value)
+                    elif action == "select":
+                        value = self._resolve_value(step, context)
+                        if not value:
+                            if required:
+                                raise ValueError(f"Required select value missing for step '{step.get('name')}'")
+                            completed = True
+                            break
+                        element = self._wait_for_element(selector, clickable=True)
+                        self._select_option(element, step, value)
+                    elif action == "file":
+                        values = self._resolve_file_values(step, context)
+                        if not values:
+                            if required:
+                                raise ValueError(f"Required file value missing for step '{step.get('name')}'")
+                            completed = True
+                            break
+                        element = self._wait_for_element(selector)
+                        payload = "\n".join(values) if step.get("multiple") else values[0]
+                        element.send_keys(payload)
+                    elif action == "picker_upload":
+                        values = self._resolve_file_values(step, context)
+                        if not values:
+                            if required:
+                                raise ValueError(f"Required picker_upload value missing for step '{step.get('name')}'")
+                            completed = True
+                            break
+                        self._run_picker_upload(step, selector, values, context)
+                    elif action == "tinymce":
+                        value = self._resolve_value(step, context)
+                        if not value:
+                            if required:
+                                raise ValueError(f"Required TinyMCE value missing for step '{step.get('name')}'")
+                            completed = True
+                            break
+                        self._write_tinymce_content(step, selector, value)
+                    elif action == "tinymce_images":
+                        values = self._resolve_file_values(step, context)
+                        if not values:
+                            if required:
+                                raise ValueError(f"Required TinyMCE image value missing for step '{step.get('name')}'")
+                            completed = True
+                            break
+                        self._insert_tinymce_images(step, selector, values)
+                    elif action == "click":
+                        self._wait_for_element(selector, clickable=True).click()
+                        if step.get("check_errors_after"):
+                            self._check_publish_error_state(
+                                self._resolve_error_detection(step.get("error_detection", {}), context),
+                                stage_name=step.get("name", "click"),
+                                exception_cls=PublishValidationError,
+                            )
+                    else:
+                        raise ValueError(f"Unsupported action type: {action}")
+                    completed = True
+                    break
+                except TimeoutException:
+                    if attempt_index < retry_count:
+                        print(
+                            f"[WARN] Retry step '{step_name}' after timeout "
+                            f"({attempt_index + 1}/{retry_count})."
                         )
-                else:
-                    raise ValueError(f"Unsupported action type: {action}")
-            except TimeoutException:
-                if required:
-                    raise TimeoutException(
-                        f"Step '{step_name}' timed out. selector={selector}"
+                        self._pause(retry_wait_seconds)
+                        continue
+                    if required:
+                        raise TimeoutException(
+                            f"Step '{step_name}' timed out. selector={selector}"
+                        )
+                    print(
+                        f"[WARN] Skip optional step '{step_name}' because the element did not appear in time."
                     )
-                print(
-                    f"[WARN] Skip optional step '{step_name}' because the element did not appear in time."
-                )
+                    completed = True
+                    break
+
+            if not completed:
                 continue
 
             self._pause(self.browser_config.get("action_wait_seconds", 0.5))
@@ -451,11 +476,12 @@ class BrowserRPA:
                 raise ValueError(f"Required category levels missing for step '{step.get('name')}'")
             return
 
-        if self._category_matches_current_page(levels):
+        force_reselect = bool(step.get("force_reselect", False))
+        if not force_reselect and self._category_matches_current_page(levels):
             return
 
         select_url = self._build_category_select_url(step)
-        if "select.htm" not in (self.driver.current_url or ""):
+        if force_reselect or "select.htm" not in (self.driver.current_url or ""):
             self.driver.get(select_url)
             self._pause(float(step.get("category_page_wait_seconds", 2)))
 
@@ -1720,6 +1746,57 @@ class BrowserRPA:
         if not selector:
             return False
         return bool(str(selector.get("value", "")).strip())
+
+    def _click_with_javascript(self, selector: dict[str, str]) -> None:
+        element = self._wait_for_element(selector, clickable=False)
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        self.driver.execute_script("arguments[0].click();", element)
+
+    def _handle_optional_draft_confirmation(self, publish_config: dict[str, Any]) -> None:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+
+        confirm_selector = publish_config.get(
+            "draft_confirm_selector",
+            {"by": "xpath", "value": "//button[normalize-space(.)='直接保存' or .//span[normalize-space(.)='直接保存']]"},
+        )
+        modal_selector = publish_config.get(
+            "draft_confirm_modal_selector",
+            {"by": "css", "value": ".ant-modal-wrap, .ant-modal-root, .next-dialog"},
+        )
+        wait_seconds = float(publish_config.get("draft_confirm_wait_seconds", 5))
+
+        if not self._selector_is_configured(confirm_selector):
+            return
+
+        end_time = time.time() + max(wait_seconds, 0)
+        while time.time() <= end_time:
+            if self._has_visible_modal(modal_selector):
+                try:
+                    self._click_with_javascript(confirm_selector)
+                    self._pause(float(publish_config.get("draft_confirm_settle_seconds", 0.6)))
+                except TimeoutException:
+                    pass
+                return
+            time.sleep(0.2)
+
+    def _has_visible_modal(self, selector: dict[str, str]) -> bool:
+        if not self.driver or not self._selector_is_configured(selector):
+            return False
+
+        by_key = selector.get("by", "css").strip().lower()
+        elements = self.driver.find_elements(
+            BY_MAPPING.get(by_key, By.CSS_SELECTOR),
+            selector.get("value", "").strip(),
+        )
+        for element in elements:
+            try:
+                if element.is_displayed():
+                    return True
+            except Exception:
+                continue
+        return False
 
     def _pause(self, seconds: float) -> None:
         if seconds > 0:
