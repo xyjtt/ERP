@@ -48,6 +48,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
         help="Path to the CSV/XLSX template file.",
     )
     parser.add_argument(
+        "--input-mode",
+        default="auto",
+        choices=["auto", "product", "variant"],
+        help="Template input mode. 'product' keeps the current CSV/XLSX flow, 'variant' consumes release variants.",
+    )
+    parser.add_argument(
         "--config-dir",
         default=str(Path(__file__).resolve().parents[1] / "config"),
         help="Path to the config directory.",
@@ -192,17 +198,18 @@ def main() -> None:
         )
         return
 
-    from parser import (
-        collect_sanitization_warnings,
-        load_products,
-        validate_products,
-    )
-
     system_config = load_json_with_local_override(config_dir / "systems" / f"{system_key}.json")
     platform_config = load_json_with_local_override(config_dir / "platforms" / f"{platform_key}.json")
     operator_config = load_json_with_local_override(config_dir / "operator_config.json")
     category_config = load_json_with_local_override(config_dir / "furniture_categories.json")
-    products = load_products(template_path)
+    from parser import collect_sanitization_warnings, validate_products
+
+    products = load_runtime_products(
+        template_path=template_path,
+        input_mode=args.input_mode,
+        operator_config=operator_config,
+        project_root=project_root,
+    )
     db_logger = build_db_logger(Path(args.db_config)) if args.db_config else None
     runtime_config = operator_config.get("runtime", {})
     run_report = RunReportWriter(
@@ -253,6 +260,7 @@ def main() -> None:
     print(f"[INFO] Project root: {project_root}")
     print(f"[INFO] System: {system_key}")
     print(f"[INFO] Loaded {len(products)} products for platform {platform_key}.")
+    print(f"[INFO] Input mode: {resolve_input_mode(template_path, args.input_mode)}")
     print(f"[INFO] Run report: {run_report.info()['report_path']}")
     print(f"[INFO] Run summary: {run_report.info()['summary_path']}")
 
@@ -421,6 +429,15 @@ def initialize_operator_local_config(config_dir: Path) -> str:
             "chrome_binary_path": "",
             "keep_browser_open_on_close": True,
         },
+        "runtime": {
+            "continue_on_error": True,
+            "run_report_dir": "logs/run_reports",
+            "image_api": {
+                "base_url": "https://sc.jiansun.vip/api/external",
+                "api_key_env": "AI_IMAGE_API_KEY",
+                "timeout_seconds": 30
+            }
+        },
     }
     target_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return str(target_path)
@@ -432,6 +449,45 @@ def build_db_logger(config_path: Path):
     logger = SQLServerLogger(DatabaseConfig.from_json(config_path))
     logger.connect()
     return logger
+
+
+def resolve_input_mode(template_path: Path, requested_mode: str) -> str:
+    normalized = requested_mode.strip().lower()
+    if normalized != "auto":
+        return normalized
+    if template_path.suffix.lower() == ".json":
+        return "variant"
+    return "product"
+
+
+def load_runtime_products(
+    *,
+    template_path: Path,
+    input_mode: str,
+    operator_config: dict[str, object],
+    project_root: Path,
+):
+    resolved_mode = resolve_input_mode(template_path, input_mode)
+    if resolved_mode == "product":
+        from parser import load_products
+
+        return load_products(template_path)
+
+    if resolved_mode == "variant":
+        from image_asset_api import AIImageAssetClient
+        from variant_pipeline import build_products_from_variants, load_release_variants
+
+        variants = load_release_variants(template_path)
+        image_client = AIImageAssetClient.from_runtime_config(operator_config.get("runtime", {}))
+        if not image_client.is_configured():
+            image_client = None
+        return build_products_from_variants(
+            variants,
+            image_client=image_client,
+            project_root=project_root,
+        )
+
+    raise ValueError(f"Unsupported input mode: {resolved_mode}")
 
 
 def build_runtime_context(product, platform_key: str) -> dict[str, str]:

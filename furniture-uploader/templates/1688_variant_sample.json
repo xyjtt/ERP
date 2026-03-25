@@ -1,0 +1,31 @@
+[
+  {
+    "variant_id": "V1688-0001",
+    "source_product_id": "SPU001",
+    "platform": "1688",
+    "channel": "1688",
+    "shop_id": "SHOP001",
+    "shop_name": "1688测试店",
+    "operator_id": "OP001",
+    "operator_name": "张三",
+    "title": "北欧简约餐边柜轻奢储物柜",
+    "style_name": "奶油风三门款",
+    "sell_points": "轻奢风格 大容量收纳",
+    "attributes": {
+      "材质": "人造板",
+      "风格": "北欧",
+      "颜色": "奶油白",
+      "尺寸": "120x40x90cm"
+    },
+    "platform_category": "living_room",
+    "price_rule_id": "PRICE001",
+    "price_value": "299",
+    "quantity": "50",
+    "publish_route": "platform-direct",
+    "publish_mode": "draft",
+    "image_source_type": "task-detail",
+    "image_source_spu": "SPU001",
+    "image_source_sku": "SKU001",
+    "description": "用于1688发布变体接入演示的样例数据"
+  }
+]

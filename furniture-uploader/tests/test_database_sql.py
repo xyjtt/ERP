@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -170,6 +171,31 @@ class DatabaseSqlTests(unittest.TestCase):
             driver = choose_preferred_sqlserver_driver()
 
         self.assertEqual(driver, "SQL Server Native Client 10.0")
+
+    def test_database_config_from_json_falls_back_when_requested_driver_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "database.local.json"
+            config_path.write_text(
+                """
+                {
+                  "driver": "ODBC Driver 17 for SQL Server",
+                  "host": "192.168.151.76",
+                  "port": 1433,
+                  "database": "JianSun",
+                  "username": "sa",
+                  "password": "secret"
+                }
+                """.strip(),
+                encoding="utf-8",
+            )
+
+            fake_pyodbc = mock.Mock()
+            fake_pyodbc.drivers.return_value = ["SQL Server", "SQL Server Native Client 10.0"]
+
+            with mock.patch("database._require_pyodbc", return_value=fake_pyodbc):
+                config = DatabaseConfig.from_json(config_path)
+
+        self.assertEqual(config.driver, "SQL Server Native Client 10.0")
 
 
 if __name__ == "__main__":

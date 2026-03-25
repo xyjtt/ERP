@@ -18,7 +18,7 @@
   "bedroom": {
     "display_name": "\u5367\u5ba4\u5bb6\u5177",
     "platform_categories": {
-      "1688": "\u5bb6\u5177 > \u5367\u5ba4\u5bb6\u5177",
+      "1688": "\u5bb6\u88c5\u5efa\u6750 > \u5367\u5ba4\u5bb6\u5177",
       "taobao": "\u4f4f\u5b85\u5bb6\u5177/\u5367\u5ba4\u5bb6\u5177",
       "jd": "\u5bb6\u5177/\u5367\u5ba4\u5bb6\u5177",
       "pdd": "\u5bb6\u88c5\u5bb6\u5177/\u5367\u5ba4\u5bb6\u5177"
@@ -38,6 +38,70 @@
       "taobao": "\u4f4f\u5b85\u5bb6\u5177/\u5ba2\u5385\u5bb6\u5177/\u89d2\u51e0",
       "jd": "\u5bb6\u5177/\u5ba2\u5385\u5bb6\u5177/\u89d2\u51e0",
       "pdd": "\u5bb6\u88c5\u5bb6\u5177/\u5ba2\u5385\u5bb6\u5177/\u89d2\u51e0"
+    },
+    "required_fields": [
+      "title",
+      "brand",
+      "material",
+      "price",
+      "quantity"
+    ]
+  },
+  "bedside_table": {
+    "display_name": "\u5e8a\u5934\u67dc",
+    "platform_categories": {
+      "1688": "\u5bb6\u88c5\u5efa\u6750 > \u5367\u5ba4\u5bb6\u5177 > \u5e8a\u5934\u67dc",
+      "taobao": "\u4f4f\u5b85\u5bb6\u5177/\u5367\u5ba4\u5bb6\u5177/\u5e8a\u5934\u67dc",
+      "jd": "\u5bb6\u5177/\u5367\u5ba4\u5bb6\u5177/\u5e8a\u5934\u67dc",
+      "pdd": "\u5bb6\u88c5\u5bb6\u5177/\u5367\u5ba4\u5bb6\u5177/\u5e8a\u5934\u67dc"
+    },
+    "required_fields": [
+      "title",
+      "brand",
+      "material",
+      "price",
+      "quantity"
+    ]
+  },
+  "shoe_cabinet": {
+    "display_name": "\u978b\u67dc",
+    "platform_categories": {
+      "1688": "\u5bb6\u88c5\u5efa\u6750 > \u5ba2\u5385\u5bb6\u5177 > \u978b\u67dc",
+      "taobao": "\u4f4f\u5b85\u5bb6\u5177/\u5ba2\u5385\u5bb6\u5177/\u978b\u67dc",
+      "jd": "\u5bb6\u5177/\u5ba2\u5385\u5bb6\u5177/\u978b\u67dc",
+      "pdd": "\u5bb6\u88c5\u5bb6\u5177/\u5ba2\u5385\u5bb6\u5177/\u978b\u67dc"
+    },
+    "required_fields": [
+      "title",
+      "brand",
+      "material",
+      "price",
+      "quantity"
+    ]
+  },
+  "bookshelf": {
+    "display_name": "\u4e66\u67dc",
+    "platform_categories": {
+      "1688": "\u5bb6\u88c5\u5efa\u6750 > \u4e66\u623f\u5bb6\u5177 > \u4e66\u67dc",
+      "taobao": "\u4f4f\u5b85\u5bb6\u5177/\u4e66\u623f\u5bb6\u5177/\u4e66\u67dc",
+      "jd": "\u5bb6\u5177/\u4e66\u623f\u5bb6\u5177/\u4e66\u67dc",
+      "pdd": "\u5bb6\u88c5\u5bb6\u5177/\u4e66\u623f\u5bb6\u5177/\u4e66\u67dc"
+    },
+    "required_fields": [
+      "title",
+      "brand",
+      "material",
+      "price",
+      "quantity"
+    ]
+  },
+  "computer_desk": {
+    "display_name": "\u7535\u8111\u684c",
+    "platform_categories": {
+      "1688": "\u5bb6\u88c5\u5efa\u6750 > \u4e66\u623f\u5bb6\u5177 > \u7535\u8111\u684c",
+      "taobao": "\u4f4f\u5b85\u5bb6\u5177/\u4e66\u623f\u5bb6\u5177/\u7535\u8111\u684c",
+      "jd": "\u5bb6\u5177/\u4e66\u623f\u5bb6\u5177/\u7535\u8111\u684c",
+      "pdd": "\u5bb6\u88c5\u5bb6\u5177/\u4e66\u623f\u5bb6\u5177/\u7535\u8111\u684c"
     },
     "required_fields": [
       "title",

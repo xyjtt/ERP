@@ -1,0 +1,36 @@
+[
+  {
+    "variant_id": "DB-CTG014918N382V01",
+    "source_product_id": "CTG0149",
+    "platform": "1688",
+    "channel": "1688",
+    "shop_name": "阿里巴巴-常州速班达家居有限公司",
+    "title": "款式四 40/30/53 大象灰色+石墨灰色+大象灰色抽面 大象灰色+石墨灰色+大象灰色抽面 床头柜",
+    "style_name": "款式四 40/30/53 大象灰色+石墨灰色+大象灰色抽面 大象灰色+石墨灰色+",
+    "sell_points": "款式四 40/30/53 大象灰色+石墨灰色+大象灰色抽面 住宅家具 - 床头柜 大象灰色+石墨灰色+大象灰色抽面",
+    "attributes": {
+      "brand": "大货",
+      "material": "人造板",
+      "材质": "人造板",
+      "category": "住宅家具 - 床头柜",
+      "商品类目": "住宅家具 - 床头柜",
+      "board_type": "正常板材",
+      "color": "大象灰色+石墨灰色+大象灰色抽面",
+      "颜色": "大象灰色+石墨灰色+大象灰色抽面",
+      "size": "51.000/31.500/13.000",
+      "尺寸": "51.000/31.500/13.000"
+    },
+    "attributes_json": "{\"brand\": \"大货\", \"material\": \"人造板\", \"材质\": \"人造板\", \"category\": \"住宅家具 - 床头柜\", \"商品类目\": \"住宅家具 - 床头柜\", \"board_type\": \"正常板材\", \"color\": \"大象灰色+石墨灰色+大象灰色抽面\", \"颜色\": \"大象灰色+石墨灰色+大象灰色抽面\", \"size\": \"51.000/31.500/13.000\", \"尺寸\": \"51.000/31.500/13.000\"}",
+    "platform_category": "bedside_table",
+    "price_rule_id": "cost_div_0_75_v1",
+    "price_value": "46.67",
+    "quantity": "50",
+    "publish_route": "platform-direct",
+    "publish_mode": "draft",
+    "image_source_type": "white-background",
+    "image_source_spu": "CTG0149",
+    "image_source_sku": "CTG014918N382V01",
+    "main_images": [],
+    "description": "款式四 40/30/53 大象灰色+石墨灰色+大象灰色抽面 住宅家具 - 床头柜 大象灰色+石墨灰色+大象灰色抽面"
+  }
+]

@@ -88,7 +88,7 @@ class BrowserRPA:
                 "completion_prompt",
                 f"Complete login for {platform_config['platform']} and press Enter to continue...",
             )
-            input(prompt)
+            self._wait_for_manual_confirmation(prompt)
             return
 
         username = account_config.get("username", "").strip()
@@ -121,7 +121,7 @@ class BrowserRPA:
 
         login_config = system_config.get("login", {})
         if login_config.get("mode", "manual") == "manual":
-            input(
+            self._wait_for_manual_confirmation(
                 login_config.get(
                     "completion_prompt",
                     f"Complete login for {system_config.get('display_name', system_config.get('system', 'system'))} and press Enter to continue...",
@@ -168,7 +168,7 @@ class BrowserRPA:
                     "draft": "保存草稿",
                     "submit": "提交发布",
                 }.get(final_action_mode, "继续后续流程")
-                input(f"请确认页面填写无误，准备{action_label}时按回车...")
+                self._wait_for_manual_confirmation(f"请确认页面填写无误，准备{action_label}时按回车...")
 
             if final_action_mode == "draft":
                 draft_selector = publish_config.get("draft_selector", {})
@@ -208,12 +208,17 @@ class BrowserRPA:
 
     def _run_publish_steps(self, steps: list[dict[str, Any]], context: dict[str, Any]) -> None:
         for step in steps:
+            step_name = str(step.get("name", "")).strip() or "unnamed_step"
             action = step.get("action", "").strip()
             if not action:
                 continue
 
+            print(f"[INFO] Running step: {step_name} ({action})")
+
             if action == "manual":
-                input(step.get("message", "Manual check required. Press Enter to continue..."))
+                self._wait_for_manual_confirmation(
+                    step.get("message", "Manual check required. Press Enter to continue...")
+                )
                 continue
 
             if action == "sleep":
@@ -327,9 +332,11 @@ class BrowserRPA:
                     raise ValueError(f"Unsupported action type: {action}")
             except TimeoutException:
                 if required:
-                    raise
+                    raise TimeoutException(
+                        f"Step '{step_name}' timed out. selector={selector}"
+                    )
                 print(
-                    f"[WARN] Skip optional step '{step.get('name')}' because the element did not appear in time."
+                    f"[WARN] Skip optional step '{step_name}' because the element did not appear in time."
                 )
                 continue
 
@@ -768,6 +775,7 @@ class BrowserRPA:
             raise RuntimeError("Browser has not been opened.")
 
         next_value = str(value)
+        target_value = next_value if clear else f"{element.get_attribute('value') or ''}{next_value}"
         self.driver.execute_script(
             """
             const element = arguments[0];
@@ -784,17 +792,41 @@ class BrowserRPA:
             } else {
               element.value = nextValue;
             }
-            element.dispatchEvent(new Event('input', {bubbles: true}));
+            element.dispatchEvent(new InputEvent('input', {bubbles: true, data: nextValue}));
             element.dispatchEvent(new Event('change', {bubbles: true}));
-            element.dispatchEvent(new Event('blur', {bubbles: true}));
-            if (typeof element.blur === 'function') {
-              element.blur();
-            }
             """,
             element,
-            next_value if clear else f"{element.get_attribute('value') or ''}{next_value}",
+            target_value,
         )
         self._pause(0.2)
+
+        current_value = str(element.get_attribute("value") or "")
+        if current_value == target_value:
+            return
+
+        element.click()
+        self._pause(0.1)
+        if clear:
+            element.send_keys(Keys.CONTROL, "a")
+            element.send_keys(Keys.DELETE)
+        if next_value:
+            element.send_keys(next_value)
+        self._pause(0.3)
+
+        current_value = str(element.get_attribute("value") or "")
+        if current_value != target_value:
+            raise ValueError(
+                f"Failed to set text field value. Expected '{target_value}', got '{current_value}'."
+            )
+
+        self.driver.execute_script(
+            """
+            const element = arguments[0];
+            element.dispatchEvent(new Event('change', {bubbles: true}));
+            """,
+            element,
+        )
+        self._pause(0.1)
 
     def _fill_combobox(self, selector: dict[str, str], step: dict[str, Any], value: str) -> None:
         if not self.driver:
@@ -1192,7 +1224,7 @@ class BrowserRPA:
         blocks = [
             f'<p><img src="{html.escape(str(image_url).strip(), quote=True)}" /></p>'
             for image_url in image_urls
-            if str(image_url).strip()
+            if str(image_url).strip().lower().startswith(("http://", "https://"))
         ]
         return "".join(blocks)
 
@@ -1235,19 +1267,30 @@ class BrowserRPA:
             wait = WebDriverWait(self.driver, upload_timeout_seconds)
             wait.until(
                 lambda _driver: bool(
-                    str(
-                        self._read_primary_picture_bridge_slot(
-                            bridge_selector,
-                            slot_index,
-                        ).get("url", "")
-                    ).strip()
+                    (
+                        str(
+                            self._read_primary_picture_bridge_slot(
+                                bridge_selector,
+                                slot_index,
+                            ).get("url", "")
+                        ).strip()
+                        or str(
+                            self._read_primary_picture_bridge_slot(
+                                bridge_selector,
+                                slot_index,
+                            ).get("key", "")
+                        ).strip()
+                    )
                 )
             )
 
             slot_state = self._read_primary_picture_bridge_slot(bridge_selector, slot_index)
             remote_url = str(slot_state.get("url", "")).strip()
-            if not remote_url:
-                raise TimeoutException("Primary picture bridge upload completed without a remote image URL.")
+            remote_key = str(slot_state.get("key", "")).strip()
+            if not remote_url and not remote_key:
+                raise TimeoutException("Primary picture bridge upload completed without a remote image reference.")
+            if not remote_url and remote_key:
+                remote_url = f"bridge-key:{remote_key}"
             uploaded_urls.append(remote_url)
 
             if clear_after_upload:
@@ -1522,17 +1565,50 @@ class BrowserRPA:
         timeout_seconds = float(detection_config.get("timeout_seconds", 0))
         deadline = time.time() + max(timeout_seconds, 0)
         keywords = [str(item).strip() for item in detection_config.get("keywords", []) if str(item).strip()]
+        validation_keywords = [
+            str(item).strip() for item in detection_config.get("validation_keywords", []) if str(item).strip()
+        ]
         error_text = ""
 
         while True:
             error_text = self._extract_error_text(detection_config)
+            if self._contains_any_keyword(error_text, validation_keywords):
+                self._close_error_dialog(detection_config)
+                self._annotate_page_error_context(
+                    context,
+                    stage_name=stage_name,
+                    error_text=error_text,
+                    error_category="business_validation",
+                )
+                raise PublishValidationError(f"{stage_name} blocked by page validation: {error_text}")
+
             if self._contains_any_keyword(error_text, keywords):
                 self._close_error_dialog(detection_config)
+                self._annotate_page_error_context(
+                    context,
+                    stage_name=stage_name,
+                    error_text=error_text,
+                    error_category="page_error",
+                )
                 raise exception_cls(f"{stage_name} blocked by page error: {error_text}")
 
             if time.time() >= deadline:
                 break
             time.sleep(0.2)
+
+    def _annotate_page_error_context(
+        self,
+        context: dict[str, Any] | None,
+        *,
+        stage_name: str,
+        error_text: str,
+        error_category: str,
+    ) -> None:
+        if context is None:
+            return
+        context["page_error_stage"] = stage_name
+        context["page_error_text"] = error_text
+        context["page_error_category"] = error_category
 
     def _extract_error_text(self, detection_config: dict[str, Any]) -> str:
         if not self.driver:
@@ -1541,13 +1617,18 @@ class BrowserRPA:
         message_selector = detection_config.get("message_selector", {})
         if self._selector_is_configured(message_selector):
             try:
-                element = self.driver.find_element(
+                elements = self.driver.find_elements(
                     BY_MAPPING.get(message_selector.get("by", "css").strip().lower(), By.CSS_SELECTOR),
                     message_selector.get("value", "").strip(),
                 )
-                return " ".join(element.text.split())
+                visible_texts = [
+                    " ".join((element.text or "").split())
+                    for element in elements
+                    if " ".join((element.text or "").split())
+                ]
+                return " | ".join(visible_texts)
             except Exception:
-                pass
+                return ""
 
         try:
             body_text = self.driver.find_element(By.TAG_NAME, "body").text
@@ -1643,6 +1724,13 @@ class BrowserRPA:
     def _pause(self, seconds: float) -> None:
         if seconds > 0:
             time.sleep(seconds)
+
+    def _wait_for_manual_confirmation(self, message: str) -> None:
+        prompt = str(message or "").strip() or "Manual check required. Press Enter to continue..."
+        if self.browser_config.get("auto_continue_manual_steps", False):
+            print(f"[INFO] Auto-continue manual step: {prompt}")
+            return
+        input(prompt)
 
     def _record_page_metadata(self, context: dict[str, Any]) -> None:
         if not self.driver:

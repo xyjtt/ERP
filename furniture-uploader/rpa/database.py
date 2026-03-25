@@ -35,7 +35,8 @@ class DatabaseConfig:
         if not password:
             raise ValueError("Database password is missing. Set it in env or local config.")
 
-        driver = str(payload.get("driver", "")).strip() or choose_preferred_sqlserver_driver()
+        requested_driver = str(payload.get("driver", "")).strip()
+        driver = resolve_sqlserver_driver(requested_driver)
 
         return cls(
             driver=driver,
@@ -469,12 +470,7 @@ def _require_pyodbc():
 
 
 def choose_preferred_sqlserver_driver() -> str:
-    try:
-        pyodbc = _require_pyodbc()
-    except ModuleNotFoundError:
-        return "ODBC Driver 17 for SQL Server"
-
-    drivers = [str(driver).strip() for driver in pyodbc.drivers()]
+    drivers = list_installed_sqlserver_drivers()
     preferred_order = [
         "ODBC Driver 18 for SQL Server",
         "ODBC Driver 17 for SQL Server",
@@ -492,3 +488,19 @@ def choose_preferred_sqlserver_driver() -> str:
             return driver
 
     return "ODBC Driver 17 for SQL Server"
+
+
+def resolve_sqlserver_driver(requested_driver: str) -> str:
+    requested = str(requested_driver or "").strip()
+    installed = list_installed_sqlserver_drivers()
+    if requested and (not installed or requested in installed):
+        return requested
+    return choose_preferred_sqlserver_driver()
+
+
+def list_installed_sqlserver_drivers() -> list[str]:
+    try:
+        pyodbc = _require_pyodbc()
+    except ModuleNotFoundError:
+        return []
+    return [str(driver).strip() for driver in pyodbc.drivers()]
