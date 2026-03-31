@@ -36,3 +36,23 @@ class PublishValidationError(UploaderError):
 
 class PublishSubmitError(UploaderError):
     pass
+
+
+class OfflineTaskError(UploaderError):
+    pass
+
+
+class OfflineTaskNotFoundError(OfflineTaskError):
+    pass
+
+
+class OfflineTaskStateError(OfflineTaskError):
+    pass
+
+
+class OfflineStoreMismatchError(OfflineTaskError):
+    pass
+
+
+class OfflineLoginRequiredError(OfflineTaskError):
+    pass

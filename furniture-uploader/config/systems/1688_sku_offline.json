@@ -1,0 +1,162 @@
+{
+  "system": "1688_sku_offline",
+  "display_name": "1688 SKU 下架",
+  "login_url": "https://login.1688.com/",
+  "management_url": "https://work.1688.com/?spm=a2638g.u_12_1013.framenav.du_73ecd.206117687kZq9R&_path_=sellerPro/2017sellerbase_offer/shasngpinguanlinew",
+  "login": {
+    "mode": "manual",
+    "completion_prompt": "请先登录目标 1688 店铺并进入商品管理页，确认当前店铺无误后按回车继续..."
+  },
+  "input": {
+    "sheet_name": "停产下架通知-链接维度",
+    "filters": {
+      "platform": "Alibaba",
+      "handling": "全渠道下架"
+    },
+    "columns": {
+      "store_name": "店铺名称",
+      "platform": "平台",
+      "product_id": "商品ID",
+      "platform_store_item_code": "平台店铺商品编码",
+      "online_sku": "线上商品编码",
+      "handling": "处理说明",
+      "replacement_sku": "可替换商品编码",
+      "change_image": "是否换图"
+    }
+  },
+  "execution": {
+    "max_retry": 1,
+    "allow_multi_store_batch": false
+  },
+  "scan": {
+    "watch_dir": "D:/script_files/1688/shared/sample-data",
+    "processed_dir": "D:/script_files/1688/archive/processed",
+    "failed_dir": "D:/script_files/1688/archive/failed",
+    "registry_path": "D:/script_files/1688/archive/processed/registry.jsonl"
+  },
+  "reporting": {
+    "run_report_dir": "logs/sku_offline/run_reports"
+  },
+  "notifications": {
+    "dingtalk": {
+      "enabled": false,
+      "webhook": "",
+      "secret": ""
+    }
+  },
+  "workflow": {
+    "selectors": {
+      "current_store_name": {
+        "by": "xpath",
+        "value": "//*[contains(@class, 'user-name')]//a | //*[contains(@class, 'user-name-box')]//a"
+      },
+      "management_iframe": {
+        "by": "xpath",
+        "value": "//iframe[contains(@src, 'offer.1688.com/app/pages-group/manage-home/index.html')]"
+      },
+      "product_id_input": {
+        "by": "xpath",
+        "value": "//div[contains(concat(' ', normalize-space(@class), ' '), ' search-field ')][.//span[contains(concat(' ', normalize-space(@class), ' '), ' search-label ') and (contains(normalize-space(.), '商品 ID') or contains(normalize-space(.), '商品ID'))]]//input[contains(concat(' ', normalize-space(@class), ' '), ' ant-input ') and @type='text']"
+      },
+      "title_sku_input": {
+        "by": "xpath",
+        "value": "//div[contains(concat(' ', normalize-space(@class), ' '), ' search-field ')][.//span[contains(concat(' ', normalize-space(@class), ' '), ' search-label ') and contains(normalize-space(.), '标题/货号')]]//input[contains(concat(' ', normalize-space(@class), ' '), ' ant-input ') and @type='text']"
+      },
+      "search_button": {
+        "by": "xpath",
+        "value": "//button[@data-click='search' or normalize-space(.)='搜索' or .//span[contains(normalize-space(.), '搜索')]]"
+      },
+      "product_result_row": {
+        "by": "xpath",
+        "value": "//tr[@data-row-key='{product_id}' or .//*[contains(normalize-space(.), 'ID：{product_id}') or contains(normalize-space(.), 'ID:{product_id}') or contains(normalize-space(.), '{product_id}')]]"
+      },
+      "edit_button_in_row": {
+        "by": "xpath",
+        "value": ".//a[contains(@class, 'modify-link') or contains(normalize-space(.), '修改详情')]"
+      },
+      "edit_button": {
+        "by": "xpath",
+        "value": "//a[contains(normalize-space(.), '修改详情')]"
+      },
+      "sales_info_anchor": {
+        "by": "xpath",
+        "value": "//*[contains(normalize-space(.), '销售信息')]"
+      },
+      "sku_row": {
+        "by": "xpath",
+        "value": "//tr[.//input[@value='{online_sku}'] or .//td[contains(normalize-space(.), '{online_sku}')] or .//*[contains(normalize-space(.), '{online_sku}')]]"
+      },
+      "sku_switch": {
+        "by": "xpath",
+        "value": ".//*[@role='switch' or self::button][contains(normalize-space(.), '上架') or contains(normalize-space(.), '下架') or contains(@class, 'switch')]"
+      },
+      "submit_button": {
+        "by": "id",
+        "value": "submitFormButton"
+      },
+      "confirm_button": {
+        "by": "xpath",
+        "value": "//button[contains(normalize-space(.), '确定') or contains(normalize-space(.), '确认')]"
+      }
+    },
+    "success_detection": {
+      "enabled": true,
+      "required": false,
+      "timeout_seconds": 8,
+      "keywords": [
+        "成功",
+        "发布成功",
+        "保存成功",
+        "提交成功"
+      ],
+      "page_keywords": [
+        "修改成功",
+        "商品已提交审核",
+        "未上架产品-审核中"
+      ],
+      "message_selector": {
+        "by": "css",
+        "value": ".ant-message-notice-content, .next-message-wrapper, .next-toast-notice, .ant-notification-notice-description"
+      }
+    },
+    "error_detection": {
+      "enabled": true,
+      "timeout_seconds": 2,
+      "validation_keywords": [
+        "不能为空",
+        "请完善",
+        "请填写",
+        "请选择",
+        "必填",
+        "请先完善"
+      ],
+      "keywords": [
+        "失败",
+        "错误",
+        "验证码",
+        "风控",
+        "请稍后再试",
+        "无权限"
+      ],
+      "message_selector": {
+        "by": "css",
+        "value": ".ant-message-notice-content, .ant-notification-notice-description, .ant-modal-body, .next-dialog-body"
+      },
+      "close_selector": {
+        "by": "css",
+        "value": ".ant-modal-close, .next-dialog-close"
+      }
+    },
+    "post_submit_verification": {
+      "enabled": true,
+      "accept_review_submission": true,
+      "review_submission_keywords": [
+        "修改成功",
+        "商品已提交审核"
+      ],
+      "timeout_seconds": 150,
+      "refresh_interval_seconds": 15,
+      "initial_wait_seconds": 8
+    }
+  }
+}

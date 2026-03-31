@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from config_loader import load_json_with_local_override
+from dingtalk import post_dingtalk_text_message
 from doctor import build_doctor_report, report_to_json, write_local_selector_templates
 from exceptions import UploaderError
 from preflight import build_db_report, build_env_report
@@ -118,6 +119,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--validate-only",
         action="store_true",
         help="Validate template data and exit without opening the browser.",
+    )
+    parser.add_argument(
+        "--no-notify",
+        action="store_true",
+        help="Do not send DingTalk notifications for this run.",
     )
     parser.add_argument(
         "--init-db-config",
@@ -265,6 +271,8 @@ def main() -> None:
     print(f"[INFO] Run summary: {run_report.info()['summary_path']}")
 
     browser.open()
+    success_payloads: list[dict[str, object]] = []
+    failure_payloads: list[dict[str, object]] = []
     try:
         if not args.skip_login:
             browser.run_system_workflow(system_config, build_runtime_context(products[0], platform_key))
@@ -277,6 +285,12 @@ def main() -> None:
                 )
             try:
                 result_context = browser.publish_product(platform_config, product, category_config)
+                success_payload = build_publish_success_notification_payload(
+                    product=product,
+                    platform_key=platform_key,
+                    result_context=result_context,
+                )
+                success_payloads.append(success_payload)
                 run_report.append(
                     build_run_report_payload(
                         product=product,
@@ -312,8 +326,22 @@ def main() -> None:
                         db_logger.log_match_candidate(
                             build_match_candidate_payload(product, platform_key, attempt)
                         )
+                send_publish_success_notification(
+                    system_config,
+                    success_payload,
+                    disabled=args.no_notify,
+                )
             except Exception as exc:
                 print(f"[ERROR] Product failed: {product.title} -> {exc}")
+                failure_payload = build_publish_failure_notification_payload(
+                    product=product,
+                    platform_key=platform_key,
+                    result_context=browser.last_result_context,
+                    exc=exc,
+                    screenshot_path=browser.last_screenshot_path,
+                    html_snapshot_path=browser.last_html_snapshot_path,
+                )
+                failure_payloads.append(failure_payload)
                 run_report.append(
                     build_run_report_payload(
                         product=product,
@@ -358,16 +386,32 @@ def main() -> None:
                 ):
                     if db_logger:
                         db_logger.log_match_candidate(attempt)
+                send_publish_failure_notification(
+                    system_config,
+                    failure_payload,
+                    disabled=args.no_notify,
+                )
                 if not runtime_config.get("continue_on_error", True):
                     raise
     finally:
-        run_report.write_summary(
-            {
-                "system": system_key,
-                "platform": platform_key,
-                "total_products": len(products),
-                "doctor_ok": doctor_report.ok,
-            }
+        summary_payload = {
+            "system": system_key,
+            "platform": platform_key,
+            "total_products": len(products),
+            "doctor_ok": doctor_report.ok,
+            "success_items": len(success_payloads),
+            "failed_items": len(failure_payloads),
+        }
+        run_report.write_summary(summary_payload)
+        send_publish_summary_notification(
+            system_config,
+            build_publish_summary_notification_payload(
+                summary=summary_payload,
+                run_report=run_report,
+                success_payloads=success_payloads,
+                failure_payloads=failure_payloads,
+            ),
+            disabled=args.no_notify,
         )
         if db_logger:
             db_logger.close()
@@ -674,6 +718,191 @@ def build_publish_task_payload(
     }
 
 
+def localize_publish_mode(raw_value: str) -> str:
+    normalized = str(raw_value or "").strip().lower()
+    if normalized == "draft":
+        return "保存草稿"
+    if normalized == "submit":
+        return "正式上架"
+    return normalized or "未知模式"
+
+
+def localize_error_type(exc: Exception) -> str:
+    raw_type = exc.error_type if isinstance(exc, UploaderError) else exc.__class__.__name__
+    mapping = {
+        "PublishValidationError": "页面校验失败",
+        "PublishSubmitError": "提交失败",
+        "ProductMatchNotFoundError": "未找到匹配商品",
+        "MatchCandidateInvalidError": "匹配候选无效",
+        "TemplateSelectionError": "模板选择失败",
+        "ValueError": "参数或页面数据异常",
+    }
+    return mapping.get(raw_type, raw_type)
+
+
+def build_publish_success_notification_payload(
+    *,
+    product,
+    platform_key: str,
+    result_context: dict[str, object],
+) -> dict[str, object]:
+    return {
+        "task_id": product.task_id or fallback_task_id(product),
+        "platform": platform_key,
+        "store_name": product.store_name,
+        "outer_sku": product.outer_sku,
+        "title": product.title,
+        "link_owner": product.link_owner,
+        "operator_name": product.operator_name,
+        "action_mode": result_context.get("final_action_mode", ""),
+        "platform_link_id": result_context.get("platform_link_id", ""),
+        "platform_link_url": result_context.get("platform_link_url", ""),
+        "current_url": result_context.get("current_url", ""),
+        "resolved_category_name": result_context.get("resolved_category_name", ""),
+    }
+
+
+def build_publish_failure_notification_payload(
+    *,
+    product,
+    platform_key: str,
+    result_context: dict[str, object],
+    exc: Exception,
+    screenshot_path: str,
+    html_snapshot_path: str,
+) -> dict[str, object]:
+    step_name = exc.step_name if isinstance(exc, UploaderError) else ""
+    return {
+        "task_id": product.task_id or fallback_task_id(product),
+        "platform": platform_key,
+        "store_name": product.store_name,
+        "outer_sku": product.outer_sku,
+        "title": product.title,
+        "link_owner": product.link_owner,
+        "operator_name": product.operator_name,
+        "action_mode": result_context.get("final_action_mode", ""),
+        "step_name": step_name,
+        "error_type": localize_error_type(exc),
+        "error_message": str(exc),
+        "current_url": result_context.get("current_url", ""),
+        "screenshot_path": screenshot_path,
+        "html_snapshot_path": html_snapshot_path,
+    }
+
+
+def build_publish_summary_notification_payload(
+    *,
+    summary: dict[str, object],
+    run_report: RunReportWriter,
+    success_payloads: list[dict[str, object]],
+    failure_payloads: list[dict[str, object]],
+) -> dict[str, object]:
+    modes = sorted(
+        {
+            localize_publish_mode(str(item.get("action_mode", "")).strip())
+            for item in success_payloads + failure_payloads
+            if str(item.get("action_mode", "")).strip()
+        }
+    )
+    return {
+        "system": summary.get("system", ""),
+        "platform": summary.get("platform", ""),
+        "total_products": int(summary.get("total_products", 0) or 0),
+        "success_items": int(summary.get("success_items", 0) or 0),
+        "failed_items": int(summary.get("failed_items", 0) or 0),
+        "action_modes": modes,
+        "report_path": run_report.info().get("report_path", ""),
+        "summary_path": run_report.info().get("summary_path", ""),
+        "first_success_title": str((success_payloads[0] if success_payloads else {}).get("title", "")).strip(),
+        "first_failure_title": str((failure_payloads[0] if failure_payloads else {}).get("title", "")).strip(),
+    }
+
+
+def build_publish_success_notification_content(payload: dict[str, object]) -> str:
+    action_label = localize_publish_mode(str(payload.get("action_mode", "")).strip())
+    return (
+        f"1688商品{action_label}成功\n"
+        f"店铺：{payload.get('store_name', '')}\n"
+        f"商品标题：{payload.get('title', '')}\n"
+        f"外部SKU：{payload.get('outer_sku', '')}\n"
+        f"任务ID：{payload.get('task_id', '')}\n"
+        f"类目：{payload.get('resolved_category_name', '')}\n"
+        f"运营归属：{payload.get('link_owner', '')}\n"
+        f"执行人：{payload.get('operator_name', '')}\n"
+        f"平台链接：{payload.get('platform_link_url', '')}\n"
+        f"当前页面：{payload.get('current_url', '')}"
+    )
+
+
+def build_publish_failure_notification_content(payload: dict[str, object]) -> str:
+    action_label = localize_publish_mode(str(payload.get("action_mode", "")).strip())
+    return (
+        f"1688商品{action_label}失败\n"
+        f"店铺：{payload.get('store_name', '')}\n"
+        f"商品标题：{payload.get('title', '')}\n"
+        f"外部SKU：{payload.get('outer_sku', '')}\n"
+        f"任务ID：{payload.get('task_id', '')}\n"
+        f"运营归属：{payload.get('link_owner', '')}\n"
+        f"执行人：{payload.get('operator_name', '')}\n"
+        f"失败阶段：{payload.get('step_name', '')}\n"
+        f"错误分类：{payload.get('error_type', '')}\n"
+        f"错误详情：{payload.get('error_message', '')}\n"
+        f"当前页面：{payload.get('current_url', '')}\n"
+        f"截图路径：{payload.get('screenshot_path', '')}\n"
+        f"页面快照：{payload.get('html_snapshot_path', '')}"
+    )
+
+
+def build_publish_summary_notification_content(payload: dict[str, object]) -> str:
+    action_modes = "、".join([str(item).strip() for item in payload.get("action_modes", []) if str(item).strip()])
+    return (
+        "1688上架批次执行完成\n"
+        f"系统：{payload.get('system', '')}\n"
+        f"平台：{payload.get('platform', '')}\n"
+        f"执行模式：{action_modes}\n"
+        f"总任务数：{payload.get('total_products', 0)}\n"
+        f"成功数：{payload.get('success_items', 0)}\n"
+        f"失败数：{payload.get('failed_items', 0)}\n"
+        f"首个成功商品：{payload.get('first_success_title', '')}\n"
+        f"首个失败商品：{payload.get('first_failure_title', '')}\n"
+        f"运行报告：{payload.get('report_path', '')}\n"
+        f"汇总报告：{payload.get('summary_path', '')}"
+    )
+
+
+def send_publish_success_notification(
+    system_config: dict[str, object],
+    payload: dict[str, object],
+    *,
+    disabled: bool,
+) -> None:
+    if disabled:
+        return
+    post_dingtalk_text_message(system_config, build_publish_success_notification_content(payload))
+
+
+def send_publish_failure_notification(
+    system_config: dict[str, object],
+    payload: dict[str, object],
+    *,
+    disabled: bool,
+) -> None:
+    if disabled:
+        return
+    post_dingtalk_text_message(system_config, build_publish_failure_notification_content(payload))
+
+
+def send_publish_summary_notification(
+    system_config: dict[str, object],
+    payload: dict[str, object],
+    *,
+    disabled: bool,
+) -> None:
+    if disabled:
+        return
+    post_dingtalk_text_message(system_config, build_publish_summary_notification_content(payload))
+
+
 def build_run_report_payload(
     *,
     product,
@@ -709,6 +938,33 @@ def build_run_report_payload(
         "match_source_id": result_context.get("match_source_id", ""),
         "current_url": result_context.get("current_url", ""),
         "page_title": result_context.get("page_title", ""),
+        "draft_page_state_patch": result_context.get("draft_page_state_patch"),
+        "draft_submit_trace": result_context.get("draft_submit_trace"),
+        "draft_main_image_present": result_context.get("draft_main_image_present"),
+        "draft_description_present": result_context.get("draft_description_present"),
+        "draft_spec_values": result_context.get("draft_spec_values"),
+        "draft_send_address_value": result_context.get("draft_send_address_value"),
+        "draft_logistics_dimensions": result_context.get("draft_logistics_dimensions"),
+        "draft_buyer_protection_value": result_context.get("draft_buyer_protection_value"),
+        "draft_buyer_protection_schedule": result_context.get("draft_buyer_protection_schedule"),
+        "draft_assist_messages": result_context.get("draft_assist_messages"),
+        "draft_required_field_labels": result_context.get("draft_required_field_labels"),
+        "draft_submit_response_status": result_context.get("draft_submit_response_status"),
+        "draft_submit_backend_message": result_context.get("draft_submit_backend_message"),
+        "draft_submit_retry_count": result_context.get("draft_submit_retry_count"),
+        "draft_submit_retry_reason": result_context.get("draft_submit_retry_reason"),
+        "draft_submit_retry_errors": result_context.get("draft_submit_retry_errors"),
+        "draft_request_patch_mode": result_context.get("draft_request_patch_mode"),
+        "draft_request_patch_mode_history": result_context.get("draft_request_patch_mode_history"),
+        "draft_submit_backend_reject_consecutive_count": result_context.get(
+            "draft_submit_backend_reject_consecutive_count"
+        ),
+        "draft_submit_fast_fail_triggered": result_context.get("draft_submit_fast_fail_triggered"),
+        "draft_submit_fast_fail_threshold": result_context.get("draft_submit_fast_fail_threshold"),
+        "submit_request_trace_present": result_context.get("submit_request_trace_present"),
+        "submit_request_trace_complete": result_context.get("submit_request_trace_complete"),
+        "submit_request_trace": result_context.get("submit_request_trace"),
+        "post_submit_verified": result_context.get("post_submit_verified"),
         "screenshot_path": screenshot_path,
         "html_snapshot_path": html_snapshot_path,
     }

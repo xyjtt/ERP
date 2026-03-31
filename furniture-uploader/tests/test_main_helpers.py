@@ -13,9 +13,15 @@ if str(RPA_ROOT) not in sys.path:
     sys.path.insert(0, str(RPA_ROOT))
 
 from browser_rpa import BrowserRPA
+from dingtalk import build_signed_webhook
 from main import (
     apply_category_history,
     build_category_mapping_payload,
+    build_publish_failure_notification_content,
+    build_run_report_payload,
+    build_publish_success_notification_content,
+    build_publish_summary_notification_content,
+    build_publish_summary_notification_payload,
     build_publish_task_payload,
     build_store_default_template_payload,
     initialize_db_config_template,
@@ -102,6 +108,38 @@ class MainHelperTests(unittest.TestCase):
         self.assertEqual(payload["weight_g"], "37600")
         self.assertEqual(payload["category_hint"], "living_room")
 
+    def test_build_run_report_payload_includes_draft_verification_fields(self) -> None:
+        product = self.build_product()
+        payload = build_run_report_payload(
+            product=product,
+            platform_key="1688",
+            status="success",
+            result_context={
+                "draft_send_address_value": "861873672",
+                "draft_submit_retry_count": 2,
+                "draft_request_patch_mode_history": ["full", "capture_only"],
+                "draft_logistics_dimensions": {
+                    "length": "120",
+                    "width": "60",
+                    "height": "75",
+                    "weight": "37600",
+                },
+            },
+        )
+
+        self.assertEqual(payload["draft_send_address_value"], "861873672")
+        self.assertEqual(
+            payload["draft_logistics_dimensions"],
+            {
+                "length": "120",
+                "width": "60",
+                "height": "75",
+                "weight": "37600",
+            },
+        )
+        self.assertEqual(payload["draft_submit_retry_count"], 2)
+        self.assertEqual(payload["draft_request_patch_mode_history"], ["full", "capture_only"])
+
     def test_build_store_default_template_payload_uses_store_level_defaults(self) -> None:
         product = self.build_product()
         payload = build_store_default_template_payload(product, "1688")
@@ -166,6 +204,88 @@ class MainHelperTests(unittest.TestCase):
 
         self.assertEqual(selector["by"], "xpath")
         self.assertEqual(selector["value"], "//span[contains(., '客厅家具')]")
+
+    def test_build_publish_success_notification_content_uses_chinese_labels(self) -> None:
+        content = build_publish_success_notification_content(
+            {
+                "action_mode": "draft",
+                "store_name": "阿里巴巴-测试店",
+                "title": "测试床头柜",
+                "outer_sku": "SKU-001",
+                "task_id": "TASK-001",
+                "resolved_category_name": "家装建材 > 卧室家具 > 床头柜",
+                "link_owner": "张三",
+                "operator_name": "系统联调",
+                "platform_link_url": "https://example.com/item/1",
+                "current_url": "https://offer-new.1688.com/popular/publish.htm",
+            }
+        )
+
+        self.assertIn("1688商品保存草稿成功", content)
+        self.assertIn("店铺：阿里巴巴-测试店", content)
+        self.assertIn("运营归属：张三", content)
+
+    def test_build_publish_failure_notification_content_uses_chinese_labels(self) -> None:
+        content = build_publish_failure_notification_content(
+            {
+                "action_mode": "submit",
+                "store_name": "阿里巴巴-测试店",
+                "title": "测试床头柜",
+                "outer_sku": "SKU-001",
+                "task_id": "TASK-001",
+                "link_owner": "张三",
+                "operator_name": "系统联调",
+                "step_name": "post_submit",
+                "error_type": "提交失败",
+                "error_message": "平台校验未通过",
+                "current_url": "https://offer-new.1688.com/popular/publish.htm",
+                "screenshot_path": "D:/shots/1.png",
+                "html_snapshot_path": "D:/html/1.html",
+            }
+        )
+
+        self.assertIn("1688商品正式上架失败", content)
+        self.assertIn("错误分类：提交失败", content)
+        self.assertIn("截图路径：D:/shots/1.png", content)
+
+    def test_build_publish_summary_notification_payload_contains_report_paths(self) -> None:
+        run_report = SimpleNamespace(
+            info=lambda: {
+                "report_path": "D:/logs/run.jsonl",
+                "summary_path": "D:/logs/run.summary.json",
+            }
+        )
+
+        payload = build_publish_summary_notification_payload(
+            summary={
+                "system": "1688_direct",
+                "platform": "1688",
+                "total_products": 3,
+                "success_items": 2,
+                "failed_items": 1,
+            },
+            run_report=run_report,
+            success_payloads=[{"action_mode": "draft", "title": "成功商品"}],
+            failure_payloads=[{"action_mode": "draft", "title": "失败商品"}],
+        )
+
+        self.assertEqual(payload["report_path"], "D:/logs/run.jsonl")
+        self.assertEqual(payload["summary_path"], "D:/logs/run.summary.json")
+        self.assertEqual(payload["action_modes"], ["保存草稿"])
+
+        content = build_publish_summary_notification_content(payload)
+        self.assertIn("1688上架批次执行完成", content)
+        self.assertIn("成功数：2", content)
+
+    def test_build_signed_webhook_appends_timestamp_and_sign(self) -> None:
+        signed = build_signed_webhook(
+            "https://oapi.dingtalk.com/robot/send?access_token=test-token",
+            "SECtest",
+        )
+
+        self.assertIn("access_token=test-token", signed)
+        self.assertIn("timestamp=", signed)
+        self.assertIn("sign=", signed)
 
 
 if __name__ == "__main__":

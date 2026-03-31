@@ -68,13 +68,41 @@
         "value": ".ant-modal-root .ant-modal-close, .next-dialog-close, .ui-dialog-titlebar-close"
       }
     },
+    "submit_request_trace": {
+      "enabled": true,
+      "timeout_seconds": 5,
+      "capture_body_chars": 4000,
+      "response_failure_keywords": [
+        "绯荤粺閿欒",
+        "鍙戝竷澶辫触",
+        "淇濆瓨澶辫触"
+      ]
+    },
+    "submit_verification": {
+      "enabled": false,
+      "settle_seconds": 1.2,
+      "check_page_text": true,
+      "require_leave_publish_page": false,
+      "require_success_signal": false,
+      "forbidden_url_keywords": [
+        "login.1688.com"
+      ],
+      "success_url_keywords": [
+        "/popular/result.htm",
+        "/offer/"
+      ],
+      "success_text_keywords": [
+        "鍙戝竷鎴愬姛",
+        "鎻愪氦鎴愬姛"
+      ]
+    },
     "submit_selector": {
       "by": "css",
       "value": "#submitFormButton"
     },
     "draft_selector": {
-      "by": "xpath",
-      "value": "//button[.//span[contains(normalize-space(.), '草稿') or contains(normalize-space(.), '暂存')]]"
+      "by": "css",
+      "value": "#saveDraftButton"
     },
     "draft_error_detection": {
       "enabled": true,
@@ -93,6 +121,112 @@
         "by": "css",
         "value": ".ant-modal-root .ant-modal-close, .next-dialog-close, .ui-dialog-titlebar-close"
       }
+    },
+    "draft_confirm_blocker_keywords": [
+      "规格数据会被清空",
+      "规格有必填项未填写",
+      "必填项未填写"
+    ],
+    "draft_request_patch_retry_modes": [
+      "full",
+      "capture_only"
+    ],
+    "draft_verification": {
+      "enabled": true,
+      "refresh_after_save": true,
+      "settle_seconds": 1.2,
+      "refresh_wait_seconds": 4,
+      "require_main_image": true,
+      "require_description": true,
+      "require_buyer_protection": true,
+      "buyer_protection_source": "buyer_protection_ship_time",
+      "buyer_protection_default_value": "30天发货",
+      "buyer_protection_step_template": [
+        {
+          "from": 1,
+          "end": 2,
+          "service_name": "30天发货"
+        },
+        {
+          "from": 3,
+          "service_name": "45天发货"
+        }
+      ],
+      "require_specs": true,
+      "required_spec_labels": [
+        "颜色"
+      ],
+      "forbidden_assist_keywords": [
+        "商品主图为必填项",
+        "请填写图文详情",
+        "第一个区间的购买数量必须",
+        "第1行的发货时间为必填项"
+      ]
+    },
+    "draft_request_patch": {
+      "enabled": true,
+      "timeout_seconds": 5,
+      "capture_body_chars": 4000,
+      "buyer_protection_include_sps_code": false,
+      "buyer_protection_source": "buyer_protection_ship_time",
+      "buyer_protection_default_value": "30天发货",
+      "buyer_protection_step_template": [
+        {
+          "from": 1,
+          "end": 2,
+          "service_name": "30天发货"
+        },
+        {
+          "from": 3,
+          "service_name": "45天发货"
+        }
+      ],
+      "delivery_service_default_ids": [
+        3385307
+      ],
+      "delivery_service_label_id_map": {
+        "市区物流点自提": 3385307
+      },
+      "response_failure_keywords": [
+        "系统错误",
+        "发布失败",
+        "保存失败"
+      ]
+    },
+    "draft_page_state_patch": {
+      "enabled": true,
+      "buyer_protection_include_sps_code": false,
+      "buyer_protection_source": "buyer_protection_ship_time",
+      "buyer_protection_default_value": "30天发货",
+      "buyer_protection_step_template": [
+        {
+          "from": 1,
+          "end": 2,
+          "service_name": "30天发货"
+        },
+        {
+          "from": 3,
+          "service_name": "45天发货"
+        }
+      ],
+      "delivery_service_default_ids": [
+        3385307
+      ],
+      "delivery_service_label_id_map": {
+        "市区物流点自提": 3385307
+      },
+      "cat_props": [
+        {
+          "label": "材质",
+          "source": "material",
+          "default_value": "人造板"
+        },
+        {
+          "label": "台面材质",
+          "source": "material",
+          "default_value": "人造板"
+        }
+      ]
     },
     "success_extractors": [
       {
@@ -127,6 +261,8 @@
         "action": "category_path",
         "source": "resolved_category_levels",
         "required": false,
+        "force_reselect": true,
+        "retry": 2,
         "select_url": "https://offer-new.1688.com/select.htm",
         "confirm_selector": {
           "by": "css",
@@ -155,6 +291,16 @@
         "selector": {
           "by": "css",
           "value": "#guid-priceRange td[data-next-table-col=\"2\"] input"
+        }
+      },
+      {
+        "name": "price_begin_amount",
+        "action": "input",
+        "value": "1",
+        "required": true,
+        "selector": {
+          "by": "css",
+          "value": "#guid-priceRange td[data-next-table-col=\"1\"] input"
         }
       },
       {
@@ -188,15 +334,174 @@
         }
       },
       {
+        "name": "category_defaults",
+        "action": "category_prop_defaults",
+        "required": false,
+        "profiles": {
+          "bedside_table": {
+            "rules": [
+              {
+                "label": "风格",
+                "value": "现代简约",
+                "select_first_option_if_unmatched": true
+              },
+              {
+                "label": "品牌",
+                "source": "brand",
+                "type": "input",
+                "default_value": "速班达"
+              },
+              {
+                "label": "空间",
+                "value": "卧室",
+                "select_first_option_if_unmatched": false
+              },
+              {
+                "label": "是否配送上门",
+                "value": "送货至楼下",
+                "select_first_option_if_unmatched": true
+              },
+              {
+                "label": "是否提供安装服务",
+                "value": "否",
+                "select_first_option_if_unmatched": true
+              },
+              {
+                "label": "适用场所",
+                "value": "卧室",
+                "select_first_option_if_unmatched": false
+              },
+              {
+                "label": "是否一般纳税人",
+                "value": "否",
+                "select_first_option_if_unmatched": true
+              },
+              {
+                "label": "是否有专利",
+                "value": "否",
+                "select_first_option_if_unmatched": true
+              },
+              {
+                "label": "适用对象",
+                "value": "成人",
+                "type": "multiselect",
+                "select_first_if_empty": true,
+                "select_first_option_if_unmatched": true
+              },
+              {
+                "label": "功能",
+                "value": "收纳储物",
+                "type": "multiselect",
+                "select_first_if_empty": true,
+                "select_first_option_if_unmatched": true
+              },
+              {
+                "label": "是否有3D模型",
+                "value": "否",
+                "select_first_option_if_unmatched": true
+              },
+              {
+                "label": "台面材质",
+                "source": "material",
+                "default_value": "人造板",
+                "select_first_option_if_unmatched": true
+              },
+              {
+                "label": "是否组装",
+                "value": "组装",
+                "select_first_option_if_unmatched": true
+              },
+              {
+                "label": "设计元素",
+                "value": "其它",
+                "select_first_option_if_unmatched": true
+              },
+              {
+                "label": "是否带滚轮",
+                "value": "否",
+                "select_first_option_if_unmatched": true
+              }
+            ]
+          },
+          "*": {
+            "rules": [
+              {
+                "label": "品牌",
+                "source": "brand",
+                "type": "input",
+                "default_value": "速班达"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "name": "spec_values",
+        "action": "spec_values",
+        "required": false,
+        "profiles": {
+          "bedside_table": {
+            "rules": [
+              {
+                "label": "颜色",
+                "source": "color"
+              },
+              {
+                "label": "尺寸",
+                "source": "size"
+              }
+            ]
+          },
+          "*": {
+            "rules": [
+              {
+                "label": "颜色",
+                "source": "color"
+              },
+              {
+                "label": "尺寸",
+                "source": "size"
+              }
+            ]
+          }
+        }
+      },
+      {
         "name": "main_image",
         "action": "picker_upload",
         "source": "main_image",
         "required": true,
-        "upload_via_react_bridge": true,
-        "bridge_slot_index": 0,
         "selector": {
           "by": "xpath",
           "value": "(//div[@id='guid-primaryPicture']//div[contains(@class,'picture-sort-item')]//div[contains(@class,'module-picture-cover-wrapper')])[1]"
+        },
+        "dialog_selector": {
+          "by": "css",
+          "value": "div.ibank-picker-dialog, div.ui-dialog"
+        },
+        "frame_selector": {
+          "by": "css",
+          "value": "iframe.picker-frame"
+        },
+        "upload_tab_selector": {
+          "by": "css",
+          "value": "li.tab-upload"
+        },
+        "album_select_selector": {
+          "by": "css",
+          "value": "select"
+        },
+        "file_input_selector": {
+          "by": "css",
+          "value": ".tabs-content.upload input[type='file']"
+        },
+        "insert_selector": {
+          "by": "css",
+          "value": "a.button.submit"
+        },
+        "insert_count_selector": {
+          "by": "css",
+          "value": ".insert-header"
         }
       },
       {
@@ -205,12 +510,29 @@
         "source": "detail_images",
         "multiple": true,
         "required": false,
-        "upload_via_react_bridge": true,
-        "bridge_slot_index": 1,
-        "clear_bridge_slot_after_upload": true,
-        "bridge_selector": {
+        "fallback_picker_selector": {
           "by": "xpath",
           "value": "(//div[@id='guid-primaryPicture']//div[contains(@class,'picture-sort-item')]//div[contains(@class,'module-picture-cover-wrapper')])[1]"
+        },
+        "dialog_selector": {
+          "by": "css",
+          "value": "div.ibank-picker-dialog, div.ui-dialog"
+        },
+        "frame_selector": {
+          "by": "css",
+          "value": "iframe.picker-frame"
+        },
+        "upload_tab_selector": {
+          "by": "css",
+          "value": "li.tab-upload"
+        },
+        "file_input_selector": {
+          "by": "css",
+          "value": ".tabs-content.upload input[type='file']"
+        },
+        "insert_selector": {
+          "by": "css",
+          "value": "a.button.submit"
         },
         "selector": {
           "by": "css",
@@ -256,6 +578,18 @@
         "selector": {
           "by": "css",
           "value": "#rc_select_7"
+        }
+      },
+      {
+        "name": "buyer_protection_ship_time",
+        "action": "ant_select",
+        "source": "buyer_protection_ship_time",
+        "default_value": "30天发货",
+        "required": false,
+        "select_first_option_if_unmatched": true,
+        "selector": {
+          "by": "xpath",
+          "value": "//div[@id='guid-buyerProtection']//div[contains(@class,'ant-select-selector')]"
         }
       },
       {

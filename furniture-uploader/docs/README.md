@@ -44,6 +44,15 @@
 - [DOC_UPDATE_TEMPLATES.md](D:/script_files/ERP/furniture-uploader/docs/DOC_UPDATE_TEMPLATES.md)
   - 文档更新模板，便于人和 AI 快速补充
 
+### 5. 1688 SKU 下架相关入口
+
+- [D:\script_files\1688\README.md](D:/script_files/1688/README.md)
+  - 1688 项目统一入口
+- [D:\script_files\1688\docs\requirements\1688_SKU_OFFLINE_REQUIREMENTS_V1.md](D:/script_files/1688/docs/requirements/1688_SKU_OFFLINE_REQUIREMENTS_V1.md)
+  - 1688 SKU 下架需求说明
+- [D:\script_files\ERP\furniture-uploader\rpa\sku_offline_main.py](D:/script_files/ERP/furniture-uploader/rpa/sku_offline_main.py)
+  - 1688 SKU 下架执行入口
+
 ## 建议阅读顺序
 
 1. `PROJECT_MEMORY.md`
@@ -51,6 +60,7 @@
 3. `DELIVERY_HANDOVER_2026-03-24.md`
 4. `PLATFORM_EXPERIENCE_KB.md`
 5. `AI_CONTINUITY_GUIDE.md`
+6. `D:\script_files\1688\README.md`
 
 ## 历史档案
 

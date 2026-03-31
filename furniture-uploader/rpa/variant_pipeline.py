@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,8 @@ VARIANT_MANDATORY_FIELDS = {
     "price_value",
     "platform_category",
 }
+
+DIMENSION_NUMBER_PATTERN = re.compile(r"-?\d+(?:\.\d+)?")
 
 
 @dataclass
@@ -80,6 +83,15 @@ class ReleaseVariant:
         if missing:
             raise ValueError(f"Missing mandatory variant fields: {', '.join(missing)}")
 
+        attributes = _normalize_attributes(normalized.get("attributes", {}))
+        size_text = _first_non_empty(
+            normalized.get("size", ""),
+            normalized.get("尺寸", ""),
+            attributes.get("size", ""),
+            attributes.get("尺寸", ""),
+        )
+        inferred_length, inferred_width, inferred_height = _infer_dimensions_from_size_text(size_text)
+
         return cls(
             variant_id=str(normalized.get("variant_id", "")).strip(),
             source_product_id=str(normalized.get("source_product_id", "")).strip(),
@@ -95,7 +107,7 @@ class ReleaseVariant:
             main_images=_normalize_string_list(normalized.get("main_images", [])),
             sku_images=_normalize_string_list(normalized.get("sku_images", [])),
             detail_images=_normalize_string_list(normalized.get("detail_images", [])),
-            attributes=_normalize_attributes(normalized.get("attributes", {})),
+            attributes=attributes,
             detail_template_id=str(normalized.get("detail_template_id", "")).strip(),
             attribute_template_id=str(normalized.get("attribute_template_id", "")).strip(),
             price_rule_id=str(normalized.get("price_rule_id", "")).strip(),
@@ -121,9 +133,9 @@ class ReleaseVariant:
             ship_from_template=str(normalized.get("ship_from_template", "")).strip(),
             freight_template=str(normalized.get("freight_template", "")).strip(),
             ship_time_template=str(normalized.get("ship_time_template", "")).strip(),
-            length_cm=str(normalized.get("length_cm", "")).strip(),
-            width_cm=str(normalized.get("width_cm", "")).strip(),
-            height_cm=str(normalized.get("height_cm", "")).strip(),
+            length_cm=_first_non_empty(normalized.get("length_cm", ""), inferred_length),
+            width_cm=_first_non_empty(normalized.get("width_cm", ""), inferred_width),
+            height_cm=_first_non_empty(normalized.get("height_cm", ""), inferred_height),
             weight_g=str(normalized.get("weight_g", "")).strip(),
             description=str(normalized.get("description", "")).strip(),
             raw=normalized,
@@ -135,7 +147,7 @@ def load_release_variants(path: str | Path) -> list[ReleaseVariant]:
     suffix = file_path.suffix.lower()
 
     if suffix == ".json":
-        payload = json.loads(file_path.read_text(encoding="utf-8"))
+        payload = json.loads(file_path.read_text(encoding="utf-8-sig"))
         if isinstance(payload, dict):
             rows = payload.get("variants", [])
         else:
@@ -174,14 +186,19 @@ def build_products_from_variants(
     for variant in variants:
         image_enrichment_error = ""
         try:
-            local_main_images, local_detail_images = _resolve_variant_images(
+            local_main_images, local_detail_images, remote_main_images, remote_detail_images = _resolve_variant_images(
                 variant,
                 image_client=image_client,
                 project_root=project_root,
             )
         except (ImageAssetApiError, ValueError) as exc:
             local_main_images, local_detail_images = [], []
+            remote_main_images, remote_detail_images = [], []
             image_enrichment_error = str(exc)
+        if remote_main_images and not remote_detail_images:
+            remote_detail_images = list(remote_main_images)
+        if local_main_images and not local_detail_images:
+            local_detail_images = list(local_main_images)
         products.append(
             ProductRecord.from_row(
                 {
@@ -200,7 +217,9 @@ def build_products_from_variants(
                     "quantity": variant.quantity or "999",
                     "platform_category": variant.platform_category,
                     "main_image": local_main_images[0] if local_main_images else "",
+                    "main_image_remote": remote_main_images[0] if remote_main_images else "",
                     "detail_images": "|".join(local_detail_images),
+                    "detail_images_remote": "|".join(remote_detail_images),
                     "description": variant.description or variant.sell_points,
                     "ship_from_template": variant.ship_from_template,
                     "freight_template": variant.freight_template,
@@ -229,7 +248,7 @@ def _resolve_variant_images(
     *,
     image_client: AIImageAssetClient | None,
     project_root: Path,
-) -> tuple[list[str], list[str]]:
+) -> tuple[list[str], list[str], list[str], list[str]]:
     main_images = list(variant.main_images)
     detail_images = list(variant.detail_images)
 
@@ -248,6 +267,8 @@ def _resolve_variant_images(
             detail_images = bundle.detail_urls
 
     asset_dir = project_root / ".tmp" / "variant_assets" / variant.variant_id
+    remote_main_images = [str(value).strip() for value in main_images if _is_remote_url(value)]
+    remote_detail_images = [str(value).strip() for value in detail_images if _is_remote_url(value)]
     local_main_images = _materialize_image_values(
         main_images,
         asset_dir=asset_dir / "main",
@@ -260,7 +281,7 @@ def _resolve_variant_images(
         prefix="detail",
         image_client=image_client,
     )
-    return local_main_images, local_detail_images
+    return local_main_images, local_detail_images, remote_main_images, remote_detail_images
 
 
 def _materialize_image_values(
@@ -319,6 +340,24 @@ def _normalize_attributes(raw_value: Any) -> dict[str, Any]:
     if isinstance(parsed, dict):
         return {str(key).strip(): value for key, value in parsed.items()}
     return {}
+
+
+def _first_non_empty(*values: Any) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _infer_dimensions_from_size_text(size_text: str) -> tuple[str, str, str]:
+    text = str(size_text or "").strip()
+    if not text:
+        return "", "", ""
+    numbers = [token.strip() for token in DIMENSION_NUMBER_PATTERN.findall(text) if token.strip()]
+    if len(numbers) < 3:
+        return "", "", ""
+    return numbers[0], numbers[1], numbers[2]
 
 
 def _is_remote_url(value: str) -> bool:

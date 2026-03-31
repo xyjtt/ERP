@@ -63,6 +63,13 @@
 - 不提交日志、缓存、打包产物
 - 不提交 `node_modules`、`dist`、`build`、`__pycache__`
 
+## 当前工作约定
+
+- `D:\script_files\ERP` 是 ERP 正式仓库
+- ERP 项目的正式开发、运行、交接，都以本仓库内目录为准
+- `C:\Users\Administrator\Documents\Playground` 只保留临时资料或历史副本，不再作为 ERP 正式代码真源
+- 如果历史文档里仍出现 `Playground` 路径，默认视为旧路径，执行时请以本仓库对应目录替代
+
 ## 建议接手顺序
 
 1. 看各项目根目录 `README.md`

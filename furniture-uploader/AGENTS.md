@@ -12,11 +12,13 @@ Before making changes, read these files in order:
 4. `docs/DELIVERY_HANDOVER_2026-03-24.md`
 5. `docs/AI_CONTINUITY_GUIDE.md`
 6. `docs/DOC_MAINTENANCE_POLICY.md`
+7. `D:\script_files\1688\README.md`
 
 ## Project Scope
 
 - Current mainline is `1688_direct`
-- The current goal is stable 1688 publish automation
+- Current secondary line is `1688_sku_offline`
+- The current goal is stable 1688 automation for publish and sku offline
 - Default final behavior is conservative manual review
 - Code supports `manual`, `draft`, and `submit`, but live validation is still required before enabling automated final actions
 
@@ -33,6 +35,7 @@ If you are working on the live 1688 flow, also prefer:
 
 ```bash
 python rpa/main.py --system 1688_direct --platform 1688 --file templates/1688_corner_table_smoke.csv --limit 1 --skip-login
+python rpa/sku_offline_main.py --mode preview --file templates/1688_sku_offline_sample.csv
 ```
 
 ## Documentation Update Rules
@@ -57,6 +60,7 @@ When making documentation updates, prefer reusing:
 ## Working Rules
 
 - Prefer the current effective docs over historical archive docs
+- Treat `D:\script_files\1688` as the current 1688 document hub
 - Keep smoke templates stable
 - Do not enable automated final submit without explicit live validation
 - When selector behavior changes, record the live finding in the knowledge base

@@ -70,6 +70,7 @@ AI 不会像人一样“天然记住”历史，所以必须把项目记忆外�
 3. `docs/PROJECT_MEMORY.md`
 4. `docs/DIRECT_1688_PROGRESS.md`
 5. `docs/PLATFORM_EXPERIENCE_KB.md`
+6. `D:\script_files\1688\README.md`
 
 ### 方法 3：把“更新文档”设成流程动作
 
@@ -85,6 +86,7 @@ AI 不会像人一样“天然记住”历史，所以必须把项目记忆外�
 AI 只读文档还不够，还要有标准回归入口：
 
 - [templates/1688_corner_table_smoke.csv](D:/script_files/ERP/furniture-uploader/templates/1688_corner_table_smoke.csv)
+- [templates/1688_sku_offline_sample.csv](D:/script_files/ERP/furniture-uploader/templates/1688_sku_offline_sample.csv)
 
 这样 AI 接手后可以马上复跑，不需要重新找样本。
 
@@ -116,6 +118,7 @@ AI 只读文档还不够，还要有标准回归入口：
 
 - 如果工具支持仓库规则文件，优先指向 `AGENTS.md`
 - 如果工具支持额外上下文文件，把 `docs/PROJECT_MEMORY.md` 设为必读文件
+- 如果是 1688 项目管理或需求会话，把 `D:\script_files\1688\README.md` 也设为必读文件
 - 如果工具支持启动脚本或工作流模板，把单测和 `doctor` 命令写进去
 
 ## 结论

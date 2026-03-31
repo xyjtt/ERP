@@ -1,0 +1,32 @@
+[
+  {
+    "variant_id": "V1688-QUICK-001",
+    "source_product_id": "SPU-QUICK-001",
+    "platform": "1688",
+    "channel": "1688",
+    "shop_name": "demo_store",
+    "operator_id": "operator_demo",
+    "operator_name": "operator_demo",
+    "title": "Nordic corner table quickstart",
+    "style_name": "quickstart",
+    "sell_points": "quickstart variant template",
+    "attributes": {
+      "brand": "DemoBrand",
+      "material": "Wood board",
+      "color": "Natural",
+      "size": "50x50x55cm"
+    },
+    "platform_category": "corner_table",
+    "price_value": "199",
+    "quantity": "20",
+    "publish_mode": "draft",
+    "main_images": [
+      "D:\\script_files\\ecommerce-platform-scripts\\extracted\\1688_docx_unzip\\word\\media\\image1.png"
+    ],
+    "detail_images": [
+      "D:\\script_files\\ecommerce-platform-scripts\\extracted\\1688_docx_unzip\\word\\media\\image2.png",
+      "D:\\script_files\\ecommerce-platform-scripts\\extracted\\1688_docx_unzip\\word\\media\\image3.png"
+    ],
+    "description": "quickstart variant template for local launcher"
+  }
+]

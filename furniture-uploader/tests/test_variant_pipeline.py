@@ -77,6 +77,87 @@ class VariantPipelineTests(unittest.TestCase):
         self.assertEqual(variants[0].variant_id, "V1")
         self.assertEqual(variants[0].attributes["材质"], "人造板")
 
+    def test_load_release_variants_infers_dimensions_from_size(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "variants.json"
+            path.write_text(
+                """
+                [
+                  {
+                    "variant_id": "V1-DIM",
+                    "source_product_id": "SPU001",
+                    "platform": "1688",
+                    "shop_name": "测试店",
+                    "title": "测试标题",
+                    "price_value": "299",
+                    "platform_category": "living_room",
+                    "attributes": {"size": "50x60x70cm"}
+                  }
+                ]
+                """,
+                encoding="utf-8",
+            )
+            variants = load_release_variants(path)
+
+        self.assertEqual(len(variants), 1)
+        self.assertEqual(variants[0].length_cm, "50")
+        self.assertEqual(variants[0].width_cm, "60")
+        self.assertEqual(variants[0].height_cm, "70")
+
+    def test_load_release_variants_prefers_explicit_dimensions(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "variants.json"
+            path.write_text(
+                """
+                [
+                  {
+                    "variant_id": "V1-DIM-EXPLICIT",
+                    "source_product_id": "SPU001",
+                    "platform": "1688",
+                    "shop_name": "测试店",
+                    "title": "测试标题",
+                    "price_value": "299",
+                    "platform_category": "living_room",
+                    "length_cm": "120",
+                    "width_cm": "50",
+                    "height_cm": "40",
+                    "attributes": {"size": "10x20x30cm"}
+                  }
+                ]
+                """,
+                encoding="utf-8",
+            )
+            variants = load_release_variants(path)
+
+        self.assertEqual(len(variants), 1)
+        self.assertEqual(variants[0].length_cm, "120")
+        self.assertEqual(variants[0].width_cm, "50")
+        self.assertEqual(variants[0].height_cm, "40")
+
+    def test_load_release_variants_supports_utf8_bom_json(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "variants.json"
+            path.write_text(
+                """
+                [
+                  {
+                    "variant_id": "V1-BOM",
+                    "source_product_id": "SPU001",
+                    "platform": "1688",
+                    "shop_name": "测试店",
+                    "title": "测试标题",
+                    "price_value": "299",
+                    "platform_category": "living_room"
+                  }
+                ]
+                """,
+                encoding="utf-8-sig",
+            )
+            variants = load_release_variants(path)
+
+        self.assertEqual(len(variants), 1)
+        self.assertEqual(variants[0].variant_id, "V1-BOM")
+
     def test_build_products_from_variants_enriches_remote_images(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "variants.json"
@@ -110,6 +191,11 @@ class VariantPipelineTests(unittest.TestCase):
         self.assertEqual(len(products), 1)
         self.assertTrue(products[0].raw["main_image"].endswith("main_01.jpg"))
         self.assertIn("detail_01.jpg", products[0].raw["detail_images"])
+        self.assertEqual(products[0].raw["main_image_remote"], "https://example.com/main-1.jpg")
+        self.assertEqual(
+            products[0].raw["detail_images_remote"],
+            "https://example.com/detail-1.jpg|https://example.com/detail-2.jpg",
+        )
 
     def test_image_client_uses_runtime_config(self) -> None:
         client = AIImageAssetClient.from_runtime_config(
@@ -218,6 +304,7 @@ class VariantPipelineTests(unittest.TestCase):
 
         self.assertEqual(len(products), 1)
         self.assertEqual(products[0].raw["main_image"], "")
+        self.assertEqual(products[0].raw["main_image_remote"], "")
         self.assertIn("image lookup failed", products[0].raw["image_enrichment_error"])
 
 

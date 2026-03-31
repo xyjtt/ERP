@@ -9,6 +9,7 @@ from pathlib import Path
 
 MANDATORY_COLUMNS = {"title", "price", "quantity", "platform_category"}
 IMAGE_FIELDS = {"main_image": False, "detail_images": True}
+CSV_ENCODING_CANDIDATES = ("utf-8-sig", "utf-8", "gb18030", "gbk")
 SANITIZE_EXACT_FIELDS = {
     "title",
     "subtitle",
@@ -117,7 +118,7 @@ def load_products(path: str | Path) -> list[ProductRecord]:
     suffix = file_path.suffix.lower()
 
     if suffix == ".csv":
-        dataframe = pd.read_csv(file_path, dtype=str).fillna("")
+        dataframe = _read_csv_with_fallback(file_path, pd)
     elif suffix in {".xlsx", ".xls"}:
         dataframe = pd.read_excel(file_path, dtype=str).fillna("")
     else:
@@ -136,6 +137,24 @@ def load_products(path: str | Path) -> list[ProductRecord]:
         records.append(ProductRecord.from_row(normalized))
 
     return records
+
+
+def _read_csv_with_fallback(file_path: Path, pd_module):
+    last_error: Exception | None = None
+    for encoding in CSV_ENCODING_CANDIDATES:
+        try:
+            return pd_module.read_csv(file_path, dtype=str, encoding=encoding).fillna("")
+        except UnicodeDecodeError as exc:
+            last_error = exc
+            continue
+
+    message = (
+        f"Failed to decode CSV file '{file_path}'. "
+        f"Tried encodings: {', '.join(CSV_ENCODING_CANDIDATES)}."
+    )
+    if last_error is not None:
+        raise ValueError(message) from last_error
+    raise ValueError(message)
 
 
 def validate_products(

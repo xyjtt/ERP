@@ -44,3 +44,9 @@
 - 推进聚水潭编码修改需求时，以 `jushuitan-sku-offline-batch` 为主
 - 需要抽象平台化能力时，再参考 `jushuitan-link-ops`
 - `furniture-uploader` 独立维护，不和聚水潭编码修改线混在一起
+
+## 路径约定
+
+- ERP 正式仓库路径：`D:\script_files\ERP`
+- `jushuitan-sku-offline-batch` 正式路径：`D:\script_files\ERP\jushuitan-sku-offline-batch`
+- 历史上若存在 `C:\Users\Administrator\Documents\Playground\...` 副本，统一视为旧工作副本，不再作为后续迭代真源
