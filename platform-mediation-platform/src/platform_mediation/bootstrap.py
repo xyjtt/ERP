@@ -10,12 +10,14 @@ from platform_mediation.application.services.lock_service import InMemoryLockSer
 from platform_mediation.application.services.task_service import TaskService
 from platform_mediation.config import Settings, get_settings
 from platform_mediation.repositories.in_memory import InMemoryPlatformMediationRepository
+from platform_mediation.repositories.interfaces import PlatformMediationRepository
+from platform_mediation.repositories.sqlalchemy_repo import SqlAlchemyPlatformMediationRepository
 
 
 @dataclass(frozen=True)
 class AppContainer:
     settings: Settings
-    repository: InMemoryPlatformMediationRepository
+    repository: PlatformMediationRepository
     task_service: TaskService
     dispatch_service: DispatchService
     adapter_registry: AdapterRegistry
@@ -25,7 +27,13 @@ class AppContainer:
 @lru_cache(maxsize=1)
 def get_container() -> AppContainer:
     settings = get_settings()
-    repository = InMemoryPlatformMediationRepository()
+    if settings.repository_backend == "sqlalchemy":
+        repository = SqlAlchemyPlatformMediationRepository.from_database_url(
+            settings.database_url,
+            auto_create_schema=settings.auto_create_schema,
+        )
+    else:
+        repository = InMemoryPlatformMediationRepository()
     lock_service = InMemoryLockService()
     adapter_registry = AdapterRegistry([Alibaba1688Adapter(settings)])
     task_service = TaskService(repository)

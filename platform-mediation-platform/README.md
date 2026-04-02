@@ -54,20 +54,30 @@ pip install -r requirements.txt
 
 - `http://127.0.0.1:8000/docs`
 
+如果要切到 `sqlalchemy` 仓储做本地持久化，可先执行：
+
+```powershell
+$env:PYTHONPATH="D:\script_files\ERP\platform-mediation-platform\src"
+python .\scripts\init_sqlalchemy_db.py
+```
+
 ## 环境变量
 
 参考 `.env.example`：
 
 - `PLATFORM_MEDIATION_ENV`
 - `PLATFORM_MEDIATION_ADAPTER_MODE`
+- `PLATFORM_MEDIATION_REPOSITORY`
+- `PLATFORM_MEDIATION_DATABASE_URL`
+- `PLATFORM_MEDIATION_AUTO_CREATE_SCHEMA`
 - `PLATFORM_MEDIATION_ENABLE_REAL_1688_EXECUTION`
 - `PLATFORM_MEDIATION_FURNITURE_UPLOADER_ROOT`
 
 默认情况下，`1688 adapter v1` 运行在 `mock` 模式，只返回标准化结果，不直接调用真实执行器。
+默认仓储是 `memory`，也可以切到 `sqlalchemy`。
 
 ## 当前说明
 
 - `sql/001_init_schema.sql` 是从当前草案 schema 同步过来的第一阶段建库副本
 - 第一阶段真实数据库仓储、调度器后台 worker 和回流同步器后续继续接入
 - 真实 `1688` 执行链路后续通过 `Alibaba1688Adapter` 与 `furniture-uploader` 对接
-

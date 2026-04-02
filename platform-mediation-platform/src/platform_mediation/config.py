@@ -22,6 +22,9 @@ class Settings:
     environment: str
     api_prefix: str
     adapter_mode: str
+    repository_backend: str
+    database_url: str
+    auto_create_schema: bool
     enable_real_1688_execution: bool
     furniture_uploader_root: Path
 
@@ -33,6 +36,15 @@ def get_settings() -> Settings:
         environment=os.getenv("PLATFORM_MEDIATION_ENV", "local"),
         api_prefix="/api/v1",
         adapter_mode=os.getenv("PLATFORM_MEDIATION_ADAPTER_MODE", "mock"),
+        repository_backend=os.getenv("PLATFORM_MEDIATION_REPOSITORY", "memory"),
+        database_url=os.getenv(
+            "PLATFORM_MEDIATION_DATABASE_URL",
+            f"sqlite:///{PROJECT_ROOT / 'platform_mediation.db'}",
+        ),
+        auto_create_schema=_as_bool(
+            os.getenv("PLATFORM_MEDIATION_AUTO_CREATE_SCHEMA"),
+            default=True,
+        ),
         enable_real_1688_execution=_as_bool(
             os.getenv("PLATFORM_MEDIATION_ENABLE_REAL_1688_EXECUTION"),
         ),
