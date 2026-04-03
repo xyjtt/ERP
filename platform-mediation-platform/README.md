@@ -17,6 +17,17 @@
 - 第一阶段 API 契约实现
 - SQL Server 建库草案同步副本
 
+## 文档真源
+
+项目正式文档位于 `docs/`：
+
+- `docs/requirements/`
+- `docs/plans/`
+- `docs/architecture/`
+- `docs/decisions/`
+- `docs/roadmap/`
+- `docs/checklists/`
+
 ## 目录结构
 
 ```text
