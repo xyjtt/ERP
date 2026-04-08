@@ -7,16 +7,18 @@
 3. 本脚本会给运行账号授予表级权限
 4. 不会给运行账号授予 CREATE TABLE / ALTER / CREATE INDEX 等建库权限
 
-执行前请先修改：
-- [YourDatabaseName] -> 实际数据库名
-- N'platform_mediation_app' -> 实际运行账号数据库用户
+当前默认值已预填为本项目现有环境：
+- 数据库名：`JSDataMiddlePlatform`
+- 运行账号：`shaoyou`
+
+只有在目标环境变化时才需要修改。
 
 推荐方式：
 - DBA 先执行本脚本完成建表与授权
 - 应用运行账号只负责后续读写，不负责建表
 */
 
-USE [YourDatabaseName];
+USE [JSDataMiddlePlatform];
 GO
 
 -- 全平台上架下架任务与数据中台 - 数据库表结构
@@ -411,7 +413,7 @@ GO
 - 运行时业务表：给 SELECT, INSERT, UPDATE, DELETE
 - 不给运行账号 CREATE TABLE / ALTER / CREATE INDEX 权限
 */
-DECLARE @RuntimeUser SYSNAME = N'platform_mediation_app';
+DECLARE @RuntimeUser SYSNAME = N'shaoyou';
 
 IF USER_ID(@RuntimeUser) IS NULL
 BEGIN

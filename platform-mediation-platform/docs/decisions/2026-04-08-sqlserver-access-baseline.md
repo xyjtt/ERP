@@ -36,6 +36,8 @@
 
 - 建表与授权脚本：
   - `D:\script_files\ERP\platform-mediation-platform\sql\platform_mediation_ddl_all_tables_with_permissions.sql`
+  - 当前已预填数据库：`JSDataMiddlePlatform`
+  - 当前已预填运行账号：`shaoyou`
 - 本地检查脚本：
   - `D:\script_files\ERP\platform-mediation-platform\scripts\check_sqlserver_access.py`
 
@@ -44,4 +46,3 @@
 - 动作 1：请 DBA 在目标库执行建表与授权脚本
 - 动作 2：把脚本中的运行账号改为实际应用数据库用户
 - 动作 3：建表完成后继续跑真实 SQL Server 仓储闭环测试
-
