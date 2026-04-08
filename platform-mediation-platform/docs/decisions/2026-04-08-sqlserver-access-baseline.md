@@ -38,6 +38,9 @@
   - `D:\script_files\ERP\platform-mediation-platform\sql\platform_mediation_ddl_all_tables_with_permissions.sql`
   - 当前已预填数据库：`JSDataMiddlePlatform`
   - 当前已预填运行账号：`shaoyou`
+- 中文注释回填脚本：
+  - `D:\script_files\ERP\platform-mediation-platform\sql\platform_mediation_002_extended_properties.sql`
+  - 用于给已建好的表补充 `MS_Description` 表注释和字段注释
 - 本地检查脚本：
   - `D:\script_files\ERP\platform-mediation-platform\scripts\check_sqlserver_access.py`
 
