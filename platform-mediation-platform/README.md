@@ -72,6 +72,13 @@ $env:PYTHONPATH="D:\script_files\ERP\platform-mediation-platform\src"
 python .\scripts\init_sqlalchemy_db.py
 ```
 
+如果要检查真实 SQL Server 联通性、现有表和建表权限，可执行：
+
+```powershell
+$env:PYTHONPATH="D:\script_files\ERP\platform-mediation-platform\src"
+python .\scripts\check_sqlserver_access.py --server 218.93.191.16 --database JSDataMiddlePlatform --username <db_user> --password <db_password>
+```
+
 ## 环境变量
 
 参考 `.env.example`：
@@ -91,5 +98,6 @@ python .\scripts\init_sqlalchemy_db.py
 
 - `sql/platform_mediation_001_init_schema.sql` 是平台中台项目专用的第一阶段建库副本
 - `sql/platform_mediation_ddl_all_tables_with_permissions.sql` 是平台中台项目专用的“建表 + 运行账号授权”脚本
+- 已验证真实环境可通过 `SQL Server Native Client 10.0` 连接 SQL Server 2012
 - 第一阶段真实数据库仓储、调度器后台 worker 和回流同步器后续继续接入
 - 真实 `1688` 执行链路后续通过 `Alibaba1688Adapter` 与 `furniture-uploader` 对接
