@@ -29,6 +29,10 @@
   - 已完成建表与运行账号授权
   - 已完成中文表/字段注释脚本
   - 已跑通真实 SQL Server 仓储烟雾测试
+- `1688 adapter v1` 已进入受控桥接阶段：
+  - 已支持 `mock / preview / validate / execute` 模式
+  - 已跑通真实 `furniture-uploader --validate-only` 桥接
+  - 已确认 `validate/preview` 不会错误地产生 `reflow_event`
 - 建库脚本已同步到项目仓：
   - `sql/platform_mediation_001_init_schema.sql`
   - `sql/platform_mediation_002_extended_properties.sql`
@@ -47,7 +51,7 @@
 
 ## 当前建议的继续顺序
 
-1. 先把 `1688 adapter v1` 从 `mock/preview` 推进到受控真实执行桥接。
+1. 先把 `1688 adapter v1` 从 `validate` 推进到受控真实 `execute` 桥接。
 2. 再补队列调度、回流处理器和失败重试。
 3. 然后补 `mapping_version / mapping_rule` 的实际装载与执行。
 4. 最后再推进简版运营入口。

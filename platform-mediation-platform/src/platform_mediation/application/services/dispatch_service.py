@@ -105,6 +105,7 @@ class DispatchService:
         attempt.error_type = result.error_type
         attempt.error_message = result.error_message
         attempt.raw_result_json = result.raw_result
+        execution_mode = str(result.result_payload.get("execution_mode", "")).strip().lower()
 
         if result.status == "success":
             attempt.status = AttemptStatus.SUCCESS
@@ -112,6 +113,9 @@ class DispatchService:
             item.platform_item_id = result.platform_item_id
             item.platform_sku_id = result.platform_sku_id
             item.result_json = result.result_payload
+            if execution_mode:
+                item.verification_status = execution_mode
+                item.verification_message = f"adapter finished in {execution_mode} mode"
         else:
             attempt.status = AttemptStatus.FAILED
             item.status = TaskItemStatus.FAILED
@@ -135,7 +139,7 @@ class DispatchService:
                 )
             )
 
-        if item.status == TaskItemStatus.SUCCESS:
+        if item.status == TaskItemStatus.SUCCESS and execution_mode not in {"preview", "validate"}:
             self._repository.save_reflow_event(
                 ReflowEvent(
                     event_id=build_event_id(),
