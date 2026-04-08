@@ -26,7 +26,7 @@
   - `sqlalchemy` 仓储
   - SQLite 初始化脚本
 - 建库脚本已同步到项目仓：
-  - `sql/001_init_schema.sql`
+  - `sql/platform_mediation_001_init_schema.sql`
 - 当前基础测试已通过：
   - `test_api_contract.py`
   - `test_task_flow.py`
@@ -61,4 +61,3 @@
 - 动作 1：继续以 `ERP/platform-mediation-platform/docs/` 作为正式真源。
 - 动作 2：每完成一个阶段性能力，补一条新的 dated 决策或进度记录。
 - 动作 3：待真实数据库和 1688 桥接完成后，再更新第一阶段验收口径。
-

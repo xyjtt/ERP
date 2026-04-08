@@ -89,7 +89,7 @@ python .\scripts\init_sqlalchemy_db.py
 
 ## 当前说明
 
-- `sql/001_init_schema.sql` 是从当前草案 schema 同步过来的第一阶段建库副本
-- `sql/ddl_all_tables_with_permissions.sql` 是给 DBA/运维使用的“建表 + 运行账号授权”脚本
+- `sql/platform_mediation_001_init_schema.sql` 是平台中台项目专用的第一阶段建库副本
+- `sql/platform_mediation_ddl_all_tables_with_permissions.sql` 是平台中台项目专用的“建表 + 运行账号授权”脚本
 - 第一阶段真实数据库仓储、调度器后台 worker 和回流同步器后续继续接入
 - 真实 `1688` 执行链路后续通过 `Alibaba1688Adapter` 与 `furniture-uploader` 对接
