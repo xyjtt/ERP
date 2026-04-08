@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 from platform_mediation.adapters.alibaba_1688_adapter import Alibaba1688Adapter
@@ -8,6 +9,8 @@ from platform_mediation.application.services.dispatch_service import DispatchSer
 from platform_mediation.application.services.lock_service import InMemoryLockService
 from platform_mediation.application.services.task_service import TaskService
 from platform_mediation.config import Settings
+from platform_mediation.domain.enums import ExecutorType, TaskStatus, TaskType
+from platform_mediation.domain.models import Task
 from platform_mediation.repositories.sqlalchemy_repo import SqlAlchemyPlatformMediationRepository
 from platform_mediation.schemas.task import CreateTaskItemRequest, CreateTaskRequest
 
@@ -66,3 +69,29 @@ def test_sqlalchemy_repository_supports_task_flow(tmp_path: Path) -> None:
     assert len(task_service.get_task_artifacts(task.task_id)) == 1
     assert len(repository.list_reflow_events(result.pk)) == 1
 
+
+def test_sqlalchemy_repository_round_trips_utc_datetimes(tmp_path: Path) -> None:
+    settings = build_settings(tmp_path)
+    repository = SqlAlchemyPlatformMediationRepository.from_database_url(
+        settings.database_url,
+        auto_create_schema=True,
+    )
+    created_at = datetime(2026, 4, 8, 9, 30, tzinfo=UTC)
+
+    task = repository.save_task(
+        Task(
+            task_id="UTC-TASK-001",
+            task_type=TaskType.LISTING,
+            platform="1688",
+            shop_id=20002,
+            status=TaskStatus.CREATED,
+            created_by="pytest",
+            executor_type=ExecutorType.RPA,
+            created_at=created_at,
+        )
+    )
+    loaded = repository.get_task(task.task_id)
+
+    assert loaded is not None
+    assert loaded.created_at == created_at
+    assert loaded.created_at.tzinfo == UTC

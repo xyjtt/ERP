@@ -25,8 +25,14 @@
   - 内存仓储
   - `sqlalchemy` 仓储
   - SQLite 初始化脚本
+- 真实 SQL Server 基线已确认：
+  - 已完成建表与运行账号授权
+  - 已完成中文表/字段注释脚本
+  - 已跑通真实 SQL Server 仓储烟雾测试
 - 建库脚本已同步到项目仓：
   - `sql/platform_mediation_001_init_schema.sql`
+  - `sql/platform_mediation_002_extended_properties.sql`
+  - `sql/platform_mediation_ddl_all_tables_with_permissions.sql`
 - 当前基础测试已通过：
   - `test_api_contract.py`
   - `test_task_flow.py`
@@ -34,8 +40,6 @@
 
 ## 当前未完成
 
-- 真实 SQL Server 建表与授权落地
-- 真实 SQL Server 仓储联调
 - `1688 adapter v1` 与 `furniture-uploader` 真实执行链路桥接
 - 后台调度 worker 与回流处理器
 - `mapping_version / mapping_rule` 的实际装载与执行
@@ -43,9 +47,9 @@
 
 ## 当前建议的继续顺序
 
-1. 先由 DBA 执行平台中台建表与授权脚本，再完成真实数据库接入，至少跑通 SQL Server 测试环境闭环。
-2. 再把 `1688 adapter v1` 从 `mock/preview` 推进到受控真实执行桥接。
-3. 然后补队列调度、回流处理器和失败重试。
+1. 先把 `1688 adapter v1` 从 `mock/preview` 推进到受控真实执行桥接。
+2. 再补队列调度、回流处理器和失败重试。
+3. 然后补 `mapping_version / mapping_rule` 的实际装载与执行。
 4. 最后再推进简版运营入口。
 
 ## 影响评估

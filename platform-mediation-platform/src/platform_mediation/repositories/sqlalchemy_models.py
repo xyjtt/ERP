@@ -26,18 +26,18 @@ class TaskRecord(Base):
     total_count: Mapped[int] = mapped_column(Integer, default=0)
     success_count: Mapped[int] = mapped_column(Integer, default=0)
     failed_count: Mapped[int] = mapped_column(Integer, default=0)
-    scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(), nullable=True, index=True)
     priority: Mapped[int] = mapped_column(Integer, default=0)
-    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(), nullable=True, index=True)
     idempotency_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     executor_type: Mapped[str | None] = mapped_column(Text, nullable=True)
     adapter_code: Mapped[str | None] = mapped_column(Text, nullable=True)
     mapping_version: Mapped[str | None] = mapped_column(Text, nullable=True)
     payload_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_by: Mapped[str] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
-    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(), default=utc_now)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(), nullable=True)
     remark: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
@@ -59,8 +59,8 @@ class TaskItemRecord(Base):
     verification_status: Mapped[str | None] = mapped_column(Text, nullable=True)
     verification_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
-    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(), nullable=True)
 
 
 class SourceSnapshotRecord(Base):
@@ -75,7 +75,7 @@ class SourceSnapshotRecord(Base):
     source_record_key: Mapped[str] = mapped_column(Text, index=True)
     snapshot_json: Mapped[str] = mapped_column(Text)
     version: Mapped[str] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    created_at: Mapped[datetime] = mapped_column(DateTime(), default=utc_now)
 
 
 class TaskAttemptRecord(Base):
@@ -97,8 +97,8 @@ class TaskAttemptRecord(Base):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     retry_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     raw_result_json: Mapped[str | None] = mapped_column(Text, nullable=True)
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
-    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(), default=utc_now)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(), nullable=True)
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
@@ -113,7 +113,7 @@ class TaskArtifactRecord(Base):
     artifact_type: Mapped[str] = mapped_column(Text)
     artifact_path: Mapped[str] = mapped_column(Text)
     metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    created_at: Mapped[datetime] = mapped_column(DateTime(), default=utc_now)
 
 
 class ReflowEventRecord(Base):
@@ -133,8 +133,7 @@ class ReflowEventRecord(Base):
     payload_json: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(Text, index=True)
     retry_count: Mapped[int] = mapped_column(Integer, default=0)
-    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
-
+    created_at: Mapped[datetime] = mapped_column(DateTime(), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(), default=utc_now)

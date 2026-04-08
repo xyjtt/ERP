@@ -8,6 +8,7 @@ import pyodbc
 
 TARGET_TABLES = [
     "platform_adapter",
+    "platform_category_mapping",
     "mapping_version",
     "mapping_rule",
     "worker_node",
@@ -17,7 +18,13 @@ TARGET_TABLES = [
     "task_attempt",
     "task_artifact",
     "worker_lock",
+    "operation_log",
+    "knowledge_base",
+    "system_config",
+    "sync_log",
     "reflow_event",
+    "user",
+    "shop_config",
 ]
 
 
@@ -71,6 +78,7 @@ def main() -> None:
         f"SELECT name FROM sys.tables WHERE name IN ({table_list}) ORDER BY name"
     )
     existing_tables = [row[0] for row in cursor.fetchall()]
+    missing_tables = [name for name in TARGET_TABLES if name not in existing_tables]
 
     cursor.execute("SELECT HAS_PERMS_BY_NAME(DB_NAME(), 'DATABASE', 'CREATE TABLE')")
     can_create_table = bool(cursor.fetchone()[0])
@@ -80,6 +88,7 @@ def main() -> None:
     print(f"database={args.database}")
     print(f"create_table_permission={can_create_table}")
     print(f"existing_tables={','.join(existing_tables) if existing_tables else '<none>'}")
+    print(f"missing_tables={','.join(missing_tables) if missing_tables else '<none>'}")
     print("version=")
     print(version)
 
@@ -88,4 +97,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

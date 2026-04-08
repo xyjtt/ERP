@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from contextlib import contextmanager
+from datetime import UTC, datetime
 
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
@@ -44,6 +45,22 @@ def _load_json(value: str | None) -> dict:
     if not value:
         return {}
     return json.loads(value)
+
+
+def _dump_datetime(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(UTC).replace(tzinfo=None)
+
+
+def _load_datetime(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is not None:
+        return value.astimezone(UTC)
+    return value.replace(tzinfo=UTC)
 
 
 class SqlAlchemyPlatformMediationRepository(PlatformMediationRepository):
@@ -90,18 +107,18 @@ class SqlAlchemyPlatformMediationRepository(PlatformMediationRepository):
             record.total_count = task.total_count
             record.success_count = task.success_count
             record.failed_count = task.failed_count
-            record.scheduled_at = task.scheduled_at
+            record.scheduled_at = _dump_datetime(task.scheduled_at)
             record.priority = task.priority
-            record.next_retry_at = task.next_retry_at
+            record.next_retry_at = _dump_datetime(task.next_retry_at)
             record.idempotency_key = task.idempotency_key
             record.executor_type = task.executor_type.value
             record.adapter_code = task.adapter_code
             record.mapping_version = task.mapping_version
             record.payload_json = _dump_json(task.payload_json)
             record.created_by = task.created_by
-            record.created_at = task.created_at
-            record.started_at = task.started_at
-            record.completed_at = task.completed_at
+            record.created_at = _dump_datetime(task.created_at)
+            record.started_at = _dump_datetime(task.started_at)
+            record.completed_at = _dump_datetime(task.completed_at)
             record.remark = task.remark
             session.add(record)
             session.flush()
@@ -125,8 +142,8 @@ class SqlAlchemyPlatformMediationRepository(PlatformMediationRepository):
             record.verification_status = item.verification_status
             record.verification_message = item.verification_message
             record.error_message = item.error_message
-            record.started_at = item.started_at
-            record.completed_at = item.completed_at
+            record.started_at = _dump_datetime(item.started_at)
+            record.completed_at = _dump_datetime(item.completed_at)
             session.add(record)
             session.flush()
             item.pk = record.id
@@ -143,7 +160,7 @@ class SqlAlchemyPlatformMediationRepository(PlatformMediationRepository):
             record.source_record_key = snapshot.source_record_key
             record.snapshot_json = _dump_json(snapshot.snapshot_json) or "{}"
             record.version = snapshot.version
-            record.created_at = snapshot.created_at
+            record.created_at = _dump_datetime(snapshot.created_at)
             session.add(record)
             session.flush()
             snapshot.pk = record.id
@@ -167,8 +184,8 @@ class SqlAlchemyPlatformMediationRepository(PlatformMediationRepository):
             record.error_message = attempt.error_message
             record.retry_reason = attempt.retry_reason
             record.raw_result_json = _dump_json(attempt.raw_result_json)
-            record.started_at = attempt.started_at
-            record.completed_at = attempt.completed_at
+            record.started_at = _dump_datetime(attempt.started_at)
+            record.completed_at = _dump_datetime(attempt.completed_at)
             record.duration_ms = attempt.duration_ms
             session.add(record)
             session.flush()
@@ -185,7 +202,7 @@ class SqlAlchemyPlatformMediationRepository(PlatformMediationRepository):
             record.artifact_type = artifact.artifact_type
             record.artifact_path = artifact.artifact_path
             record.metadata_json = _dump_json(artifact.metadata_json)
-            record.created_at = artifact.created_at
+            record.created_at = _dump_datetime(artifact.created_at)
             session.add(record)
             session.flush()
             artifact.pk = record.id
@@ -207,10 +224,10 @@ class SqlAlchemyPlatformMediationRepository(PlatformMediationRepository):
             record.payload_json = _dump_json(event.payload_json) or "{}"
             record.status = event.status.value
             record.retry_count = event.retry_count
-            record.next_retry_at = event.next_retry_at
+            record.next_retry_at = _dump_datetime(event.next_retry_at)
             record.error_message = event.error_message
-            record.created_at = event.created_at
-            record.updated_at = event.updated_at
+            record.created_at = _dump_datetime(event.created_at)
+            record.updated_at = _dump_datetime(event.updated_at)
             session.add(record)
             session.flush()
             event.pk = record.id
@@ -267,8 +284,8 @@ class SqlAlchemyPlatformMediationRepository(PlatformMediationRepository):
             created_by=record.created_by,
             executor_type=ExecutorType(record.executor_type or "rpa"),
             priority=record.priority,
-            scheduled_at=record.scheduled_at,
-            next_retry_at=record.next_retry_at,
+            scheduled_at=_load_datetime(record.scheduled_at),
+            next_retry_at=_load_datetime(record.next_retry_at),
             idempotency_key=record.idempotency_key,
             adapter_code=record.adapter_code,
             mapping_version=record.mapping_version,
@@ -277,9 +294,9 @@ class SqlAlchemyPlatformMediationRepository(PlatformMediationRepository):
             total_count=record.total_count,
             success_count=record.success_count,
             failed_count=record.failed_count,
-            created_at=record.created_at,
-            started_at=record.started_at,
-            completed_at=record.completed_at,
+            created_at=_load_datetime(record.created_at) or datetime.now(UTC),
+            started_at=_load_datetime(record.started_at),
+            completed_at=_load_datetime(record.completed_at),
             pk=record.id,
         )
 
@@ -299,8 +316,8 @@ class SqlAlchemyPlatformMediationRepository(PlatformMediationRepository):
             verification_message=record.verification_message,
             error_message=record.error_message,
             attempt_count=record.attempt_count,
-            started_at=record.started_at,
-            completed_at=record.completed_at,
+            started_at=_load_datetime(record.started_at),
+            completed_at=_load_datetime(record.completed_at),
             pk=record.id,
         )
 
@@ -314,7 +331,7 @@ class SqlAlchemyPlatformMediationRepository(PlatformMediationRepository):
             source_record_key=record.source_record_key,
             snapshot_json=_load_json(record.snapshot_json),
             version=record.version,
-            created_at=record.created_at,
+            created_at=_load_datetime(record.created_at) or datetime.now(UTC),
             pk=record.id,
         )
 
@@ -335,8 +352,8 @@ class SqlAlchemyPlatformMediationRepository(PlatformMediationRepository):
             error_message=record.error_message,
             retry_reason=record.retry_reason,
             raw_result_json=_load_json(record.raw_result_json),
-            started_at=record.started_at,
-            completed_at=record.completed_at,
+            started_at=_load_datetime(record.started_at) or datetime.now(UTC),
+            completed_at=_load_datetime(record.completed_at),
             duration_ms=record.duration_ms,
             pk=record.id,
         )
@@ -350,7 +367,7 @@ class SqlAlchemyPlatformMediationRepository(PlatformMediationRepository):
             artifact_type=record.artifact_type,
             artifact_path=record.artifact_path,
             metadata_json=_load_json(record.metadata_json),
-            created_at=record.created_at,
+            created_at=_load_datetime(record.created_at) or datetime.now(UTC),
             pk=record.id,
         )
 
@@ -369,9 +386,9 @@ class SqlAlchemyPlatformMediationRepository(PlatformMediationRepository):
             payload_json=_load_json(record.payload_json),
             status=ReflowStatus(record.status),
             retry_count=record.retry_count,
-            next_retry_at=record.next_retry_at,
+            next_retry_at=_load_datetime(record.next_retry_at),
             error_message=record.error_message,
-            created_at=record.created_at,
-            updated_at=record.updated_at,
+            created_at=_load_datetime(record.created_at) or datetime.now(UTC),
+            updated_at=_load_datetime(record.updated_at) or datetime.now(UTC),
             pk=record.id,
         )

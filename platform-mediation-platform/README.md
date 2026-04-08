@@ -79,6 +79,13 @@ $env:PYTHONPATH="D:\script_files\ERP\platform-mediation-platform\src"
 python .\scripts\check_sqlserver_access.py --server 218.93.191.16 --database JSDataMiddlePlatform --username <db_user> --password <db_password>
 ```
 
+如果要验证真实 SQL Server 仓储的写入、读取和清理闭环，可执行：
+
+```powershell
+$env:PYTHONPATH="D:\script_files\ERP\platform-mediation-platform\src"
+python .\scripts\smoke_test_sqlserver_repository.py --server 218.93.191.16 --database JSDataMiddlePlatform --username <db_user> --password <db_password>
+```
+
 ## 环境变量
 
 参考 `.env.example`：
@@ -100,5 +107,6 @@ python .\scripts\check_sqlserver_access.py --server 218.93.191.16 --database JSD
 - `sql/platform_mediation_002_extended_properties.sql` 是平台中台项目专用的中文注释脚本，可给已建好的表补充 `MS_Description` 表注释和字段注释
 - `sql/platform_mediation_ddl_all_tables_with_permissions.sql` 是平台中台项目专用的“建表 + 运行账号授权”脚本，当前已预填数据库 `JSDataMiddlePlatform` 和运行账号 `shaoyou`，并内置中文注释写入
 - 已验证真实环境可通过 `SQL Server Native Client 10.0` 连接 SQL Server 2012
+- 已跑通真实 SQL Server 仓储烟雾测试，覆盖 `task -> task_item -> source_snapshot -> task_attempt -> task_artifact -> reflow_event`
 - 第一阶段真实数据库仓储、调度器后台 worker 和回流同步器后续继续接入
 - 真实 `1688` 执行链路后续通过 `Alibaba1688Adapter` 与 `furniture-uploader` 对接
