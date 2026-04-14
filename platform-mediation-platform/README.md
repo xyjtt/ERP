@@ -27,6 +27,13 @@
 - `docs/decisions/`
 - `docs/roadmap/`
 - `docs/checklists/`
+- `docs/handoff/`
+
+如果是首次接手，优先从下面 3 份开始：
+
+- `docs/handoff/PLATFORM_MEDIATION_HANDOFF_2026-04-14.md`
+- `docs/handoff/PLATFORM_MEDIATION_QUICKSTART_FOR_NEXT_DEV.md`
+- `docs/handoff/PLATFORM_MEDIATION_VERIFICATION_RUNBOOK.md`
 
 ## 目录结构
 
