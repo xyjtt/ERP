@@ -244,6 +244,11 @@ class SqlAlchemyPlatformMediationRepository(PlatformMediationRepository):
             statement = select(TaskRecord).order_by(TaskRecord.created_at.desc())
             return [self._to_task(record) for record in session.execute(statement).scalars()]
 
+    def list_tasks_by_status(self, status: TaskStatus) -> list[Task]:
+        with self._session_scope() as session:
+            statement = select(TaskRecord).where(TaskRecord.status == status.value).order_by(TaskRecord.priority.asc(), TaskRecord.created_at.asc())
+            return [self._to_task(record) for record in session.execute(statement).scalars()]
+
     def list_task_items(self, task_pk: int) -> list[TaskItem]:
         with self._session_scope() as session:
             statement = select(TaskItemRecord).where(TaskItemRecord.task_id == task_pk).order_by(TaskItemRecord.id.asc())
@@ -272,6 +277,11 @@ class SqlAlchemyPlatformMediationRepository(PlatformMediationRepository):
     def list_reflow_events(self, task_pk: int) -> list[ReflowEvent]:
         with self._session_scope() as session:
             statement = select(ReflowEventRecord).where(ReflowEventRecord.task_id == task_pk).order_by(ReflowEventRecord.id.asc())
+            return [self._to_reflow_event(record) for record in session.execute(statement).scalars()]
+
+    def list_reflow_events_by_status(self, status: ReflowStatus) -> list[ReflowEvent]:
+        with self._session_scope() as session:
+            statement = select(ReflowEventRecord).where(ReflowEventRecord.status == status.value).order_by(ReflowEventRecord.created_at.asc())
             return [self._to_reflow_event(record) for record in session.execute(statement).scalars()]
 
     def _to_task(self, record: TaskRecord) -> Task:

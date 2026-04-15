@@ -38,6 +38,9 @@ class PlatformMediationRepository(ABC):
     def list_tasks(self) -> list[Task]: ...
 
     @abstractmethod
+    def list_tasks_by_status(self, status) -> list[Task]: ...
+
+    @abstractmethod
     def list_task_items(self, task_pk: int) -> list[TaskItem]: ...
 
     @abstractmethod
@@ -54,6 +57,9 @@ class PlatformMediationRepository(ABC):
 
     @abstractmethod
     def list_reflow_events(self, task_pk: int) -> list[ReflowEvent]: ...
+
+    @abstractmethod
+    def list_reflow_events_by_status(self, status) -> list[ReflowEvent]: ...
 
     @abstractmethod
     def next_pk(self, entity_name: str) -> int: ...

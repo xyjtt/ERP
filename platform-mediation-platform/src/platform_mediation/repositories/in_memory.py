@@ -83,6 +83,12 @@ class InMemoryPlatformMediationRepository(PlatformMediationRepository):
     def list_tasks(self) -> list[Task]:
         return sorted(self._tasks_by_pk.values(), key=lambda task: task.created_at, reverse=True)
 
+    def list_tasks_by_status(self, status) -> list[Task]:
+        return sorted(
+            [task for task in self._tasks_by_pk.values() if task.status == status],
+            key=lambda task: (task.priority, task.created_at),
+        )
+
     def list_task_items(self, task_pk: int) -> list[TaskItem]:
         return [self._items_by_pk[item_pk] for item_pk in self._item_pks_by_task_pk.get(task_pk, [])]
 
@@ -102,4 +108,11 @@ class InMemoryPlatformMediationRepository(PlatformMediationRepository):
         return [
             self._reflow_events_by_pk[event_pk]
             for event_pk in self._reflow_event_pks_by_task_pk.get(task_pk, [])
+        ]
+
+    def list_reflow_events_by_status(self, status) -> list[ReflowEvent]:
+        return [
+            event
+            for event in self._reflow_events_by_pk.values()
+            if event.status == status
         ]

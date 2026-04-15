@@ -98,3 +98,41 @@ class ActionResultResponse(BaseModel):
     status: TaskStatus
     changed_count: int = 0
 
+
+class BatchCreateTaskRequest(BaseModel):
+    tasks: list[CreateTaskRequest]
+
+
+class BatchCreateTaskResponse(BaseModel):
+    task_ids: list[str]
+    total_tasks: int
+    total_items: int
+
+
+class TaskListQuery(BaseModel):
+    status: TaskStatus | None = None
+    platform: str | None = None
+    shop_id: int | None = None
+    limit: int = Field(default=20, ge=1, le=100)
+    offset: int = Field(default=0, ge=0)
+
+
+class TaskDetailResponse(BaseModel):
+    task_id: str
+    task_type: TaskType
+    platform: str
+    shop_id: int
+    status: TaskStatus
+    total_count: int
+    success_count: int
+    failed_count: int
+    mapping_version: str | None = None
+    executor_type: ExecutorType
+    created_at: datetime
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    created_by: str
+    items: list[TaskItemResponse] = []
+    attempts: list[TaskAttemptResponse] = []
+    artifacts: list[TaskArtifactResponse] = []
+
