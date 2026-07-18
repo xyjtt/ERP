@@ -4,6 +4,7 @@ import argparse
 import copy
 import hashlib
 import json
+import re
 import shutil
 import sys
 import urllib.request
@@ -91,20 +92,32 @@ def build_argument_parser() -> argparse.ArgumentParser:
         default="",
         help="Optional JSONL path for exact Jushuitan 1688 link-cleanup tasks.",
     )
+    parser.add_argument(
+        "--run-id",
+        default="",
+        help="Optional externally assigned run ID used for deterministic audit report paths.",
+    )
     return parser
 
 
 def main() -> None:
     args = build_argument_parser().parse_args()
+    if args.run_id and not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", str(args.run_id)):
+        raise ValueError("--run-id must contain only letters, numbers, dot, underscore, or dash")
     project_root = Path(__file__).resolve().parents[1]
     config_dir = Path(args.config_dir)
     system_key = args.system.strip().lower()
     system_config = load_json_with_local_override(config_dir / "systems" / f"{system_key}.json")
     operator_config = load_json_with_local_override(config_dir / "operator_config.json")
-    run_report = RunReportWriter(
-        project_root=project_root,
-        report_dir=system_config.get("reporting", {}).get("run_report_dir", "logs/sku_offline/run_reports"),
-    )
+    run_report_options = {
+        "project_root": project_root,
+        "report_dir": system_config.get("reporting", {}).get(
+            "run_report_dir", "logs/sku_offline/run_reports"
+        ),
+    }
+    if str(args.run_id or "").strip():
+        run_report_options["session_id"] = str(args.run_id).strip()
+    run_report = RunReportWriter(**run_report_options)
 
     try:
         if args.mode == "preview":
@@ -650,6 +663,7 @@ def build_run_report_payload(
         "platform": task.platform,
         "product_id": task.product_id,
         "online_sku": task.online_sku,
+        "platform_store_item_code": task.platform_store_item_code,
         "handling": task.handling,
         "source_file": task.source_file,
         "source_sheet": task.source_sheet,

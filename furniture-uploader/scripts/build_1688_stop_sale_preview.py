@@ -29,6 +29,14 @@ DEFAULT_TABLE = "dbo.op_stop_sale"
 DEFAULT_DATABASE = "JSDataMiddlePlatform"
 DEFAULT_OUTPUT_DIR = Path("logs/sku_offline/db_previews")
 
+SOURCE_ENV_FALLBACKS = {
+    "STOP_SALE_SOURCE_SQLSERVER_HOST": "STOP_SALE_SQLSERVER_HOST",
+    "STOP_SALE_SOURCE_SQLSERVER_PORT": "STOP_SALE_SQLSERVER_PORT",
+    "STOP_SALE_SOURCE_SQLSERVER_USER": "STOP_SALE_SQLSERVER_USER",
+    "STOP_SALE_SOURCE_SQLSERVER_PASSWORD": "STOP_SALE_SQLSERVER_PASSWORD",
+    "STOP_SALE_SOURCE_SQLSERVER_DRIVER": "STOP_SALE_SQLSERVER_DRIVER",
+}
+
 DEFAULT_TARGET_STORES = [
     "阿里巴巴-广州淘淘家居有限公司",
     "阿里巴巴-广州沃来贸易有限公司",
@@ -131,12 +139,19 @@ def mask_network_endpoint(value: str) -> str:
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Read BI stop-sale rows and generate 1688 SKU offline preview CSV files."
+        description="Read the legacy BI stop-sale source without writes and generate preview CSV files."
     )
     parser.add_argument("--date", default=date.today().isoformat(), help="Metric date in YYYY-MM-DD format.")
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR), help="Output directory for CSV/JSON files.")
     parser.add_argument("--table", default=DEFAULT_TABLE, help="Source table name, defaults to dbo.op_stop_sale.")
-    parser.add_argument("--database", default=os.getenv("STOP_SALE_SQLSERVER_DATABASE", DEFAULT_DATABASE))
+    parser.add_argument(
+        "--database",
+        default=(
+            os.getenv("STOP_SALE_SOURCE_SQLSERVER_DATABASE")
+            or os.getenv("STOP_SALE_SQLSERVER_DATABASE")
+            or DEFAULT_DATABASE
+        ),
+    )
     parser.add_argument("--platform", default=DEFAULT_PLATFORM)
     parser.add_argument("--handling", default=DEFAULT_HANDLING)
     parser.add_argument(
@@ -146,19 +161,33 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Target store name. Repeat to override the default four stores.",
     )
     parser.add_argument("--limit", type=int, default=0, help="Limit deduped selected rows for controlled previews.")
-    parser.add_argument("--driver", default=os.getenv("STOP_SALE_SQLSERVER_DRIVER", "SQL Server Native Client 10.0"))
-    parser.add_argument("--server-env", default="STOP_SALE_SQLSERVER_HOST")
-    parser.add_argument("--port-env", default="STOP_SALE_SQLSERVER_PORT")
-    parser.add_argument("--user-env", default="STOP_SALE_SQLSERVER_USER")
-    parser.add_argument("--password-env", default="STOP_SALE_SQLSERVER_PASSWORD")
+    parser.add_argument(
+        "--driver",
+        default=(
+            os.getenv("STOP_SALE_SOURCE_SQLSERVER_DRIVER")
+            or os.getenv("STOP_SALE_SQLSERVER_DRIVER")
+            or "SQL Server Native Client 10.0"
+        ),
+    )
+    parser.add_argument("--server-env", default="STOP_SALE_SOURCE_SQLSERVER_HOST")
+    parser.add_argument("--port-env", default="STOP_SALE_SOURCE_SQLSERVER_PORT")
+    parser.add_argument("--user-env", default="STOP_SALE_SOURCE_SQLSERVER_USER")
+    parser.add_argument("--password-env", default="STOP_SALE_SOURCE_SQLSERVER_PASSWORD")
     parser.add_argument("--timeout", type=int, default=60, help="ODBC query timeout seconds.")
     return parser.parse_args(argv)
 
 
 def config_from_env(args: argparse.Namespace) -> SqlServerConfig:
-    server = str(os.getenv(args.server_env, "")).strip()
-    user = str(os.getenv(args.user_env, "")).strip()
-    password = str(os.getenv(args.password_env, "")).strip()
+    def read_runtime_env(name: str, default: str = "") -> str:
+        primary = str(os.getenv(name, "")).strip()
+        if primary:
+            return primary
+        fallback = SOURCE_ENV_FALLBACKS.get(name, "")
+        return str(os.getenv(fallback, default) if fallback else default).strip()
+
+    server = read_runtime_env(args.server_env)
+    user = read_runtime_env(args.user_env)
+    password = read_runtime_env(args.password_env)
     missing = [
         name
         for name, value in (
@@ -175,7 +204,7 @@ def config_from_env(args: argparse.Namespace) -> SqlServerConfig:
             + ". Do not pass secrets on the command line."
         )
 
-    raw_port = str(os.getenv(args.port_env, "1433")).strip() or "1433"
+    raw_port = read_runtime_env(args.port_env, "1433") or "1433"
     try:
         port = int(raw_port)
     except ValueError as exc:
@@ -464,6 +493,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "mode": "preview_only",
         "connection": config.safe_dict(),
         "source": {
+            "role": "read_only_business_source",
             "database": config.database,
             "table": args.table,
             "column_count": len(columns),

@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from datetime import date
 from pathlib import Path
+from unittest.mock import patch
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -21,11 +22,13 @@ from build_1688_stop_sale_preview import (  # noqa: E402
     PRODUCT_ID,
     STORE_NAME,
     build_preview_outputs,
+    config_from_env,
     dedupe_rows,
     mask_network_endpoint,
     normalize_value,
     safe_filename,
     task_key,
+    parse_args,
 )
 
 
@@ -128,6 +131,23 @@ class Build1688StopSalePreviewTests(unittest.TestCase):
 
     def test_mask_network_endpoint_redacts_ip_address(self) -> None:
         self.assertEqual(mask_network_endpoint("218.93.191.16"), "218.93.***.***")
+
+    def test_source_environment_names_fall_back_to_legacy_variables(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "STOP_SALE_SQLSERVER_HOST": "legacy-source",
+                "STOP_SALE_SQLSERVER_USER": "reader",
+                "STOP_SALE_SQLSERVER_PASSWORD": "secret",
+            },
+            clear=True,
+        ):
+            config = config_from_env(parse_args([]))
+
+        self.assertEqual(config.server, "legacy-source")
+        self.assertEqual(config.database, "JSDataMiddlePlatform")
+        self.assertEqual(config.user, "reader")
+
 
 
 if __name__ == "__main__":

@@ -17,6 +17,7 @@ import { ensureDir } from "./utils";
 interface CliOptions {
   file: string;
   mode: CleanupMode;
+  runId: string;
   yes: boolean;
   noNotify: boolean;
   limit: number;
@@ -47,10 +48,15 @@ export function parseCliOptions(args: string[]): CliOptions {
   if (!Number.isInteger(limit) || limit < 0) {
     throw new Error("--limit must be a non-negative integer");
   }
+  const runId = valueAfter(args, "--run-id");
+  if (runId && !/^[A-Za-z0-9_.-]{1,64}$/.test(runId)) {
+    throw new Error("--run-id must contain only letters, numbers, dot, underscore, or dash");
+  }
 
   return {
     file: path.resolve(file),
     mode,
+    runId,
     yes: args.includes("--yes"),
     noNotify: args.includes("--no-notify"),
     limit,
@@ -102,7 +108,7 @@ async function main(): Promise<void> {
     throw new Error("execute mode requires --yes");
   }
 
-  const runId = format(new Date(), "yyyyMMdd-HHmmss");
+  const runId = options.runId || format(new Date(), "yyyyMMdd-HHmmss");
   const allTasks = await loadCleanupTasks(options.file);
   const tasks = options.limit > 0 ? allTasks.slice(0, options.limit) : allTasks;
   assertTasksAllowedForMode(options.mode, tasks);

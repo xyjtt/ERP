@@ -49,6 +49,7 @@ class SkuOfflineMainTests(unittest.TestCase):
             platform="Alibaba",
             product_id="963374911361",
             online_sku="SZ018003N371V01",
+            platform_store_item_code="ziluo02",
             handling="全渠道下架",
             source_file="demo.xlsx",
             source_sheet="停产下架通知-链接维度",
@@ -72,6 +73,7 @@ class SkuOfflineMainTests(unittest.TestCase):
         )
 
         self.assertEqual(payload["error_category"], "business_validation")
+        self.assertEqual(payload["platform_store_item_code"], "ziluo02")
         self.assertEqual(payload["page_error_stage"], "post_offline_submit")
         self.assertEqual(payload["page_error_text"], "“加工方式”不能为空")
 
