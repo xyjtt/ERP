@@ -79,6 +79,16 @@ async function assertNoRiskControl(page: Page): Promise<void> {
   }
 }
 
+function assertLoginCredentialsAvailable(): void {
+  if (!appConfig.username || !appConfig.password) {
+    throw new CleanupBrowserError(
+      "login_required",
+      "Jushuitan stored login session is unavailable and login credentials are not configured",
+      "all",
+    );
+  }
+}
+
 async function saveGlobalFailureEvidence(
   page: Page,
   options: BrowserRunOptions,
@@ -393,9 +403,11 @@ export async function runBrowserCleanup(
       await page.waitForTimeout(2500);
       await assertNoRiskControl(page);
       if (/login/i.test(page.url()) || (await anyVisible(page, selectors.login.username, 2000))) {
+        assertLoginCredentialsAvailable();
         await login(page, { allowManualWait: false });
       }
     } else {
+      assertLoginCredentialsAvailable();
       await login(page, { allowManualWait: false });
     }
     await assertNoRiskControl(page);

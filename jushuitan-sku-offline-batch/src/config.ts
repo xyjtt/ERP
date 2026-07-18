@@ -7,8 +7,8 @@ import { PlatformKey, SUPPORTED_PLATFORM_KEYS } from "./types";
 const envSchema = z.object({
   JST_LOGIN_URL: z.string().min(1, "JST_LOGIN_URL 未配置"),
   JST_PRODUCT_URL: z.string().min(1, "JST_PRODUCT_URL 未配置"),
-  JST_USERNAME: z.string().min(1, "JST_USERNAME 未配置"),
-  JST_PASSWORD: z.string().min(1, "JST_PASSWORD 未配置"),
+  JST_USERNAME: z.string().optional().default(""),
+  JST_PASSWORD: z.string().optional().default(""),
   EXCEL_PATH: z.string().min(1, "EXCEL_PATH 未配置"),
   EXCEL_SHEET_NAME: z.string().optional(),
   TARGET_DATE: z.string().optional(),

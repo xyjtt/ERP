@@ -124,6 +124,16 @@ python scripts\build_1688_stop_sale_preview.py --date <当天日期> --limit 1
 python scripts\run_1688_stop_sale_pipeline.py --mode preview --file <单店CSV>
 ```
 
+使用已有 CSV 做受控重试时，preflight 可跳过当前不参与执行的旧源数据库读取检查：
+
+```powershell
+python scripts\preflight_1688_stop_sale_executor.py `
+  --existing-input `
+  --script-1688-root E:\1688\1688-script-new
+```
+
+该参数只豁免旧源读取检查，不豁免新库审计、共享锁、Profile、聚水潭认证或钉钉检查。聚水潭可复用 `storage/jushuitan.json` 中的已有登录态；登录态失效且未配置 `JST_USERNAME/JST_PASSWORD` 时，execute 必须以 `login_required` 停止整个聚水潭会话。
+
 3. 确认店铺、商品 ID、SKU 和平台店铺商品编码后，运行单条 execute：
 
 ```powershell

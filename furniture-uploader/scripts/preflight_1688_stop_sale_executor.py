@@ -46,6 +46,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--script-1688-root", default=os.getenv("SCRIPT_1688_ROOT", "D:/script_1688"))
     parser.add_argument("--config-dir", default=str(PROJECT_ROOT / "config"))
     parser.add_argument("--jushuitan-root", default=str(PROJECT_ROOT.parent / "jushuitan-sku-offline-batch"))
+    parser.add_argument(
+        "--existing-input",
+        action="store_true",
+        help="Preflight execution from an existing CSV/JSONL without requiring the legacy source database.",
+    )
     return parser.parse_args()
 
 
@@ -69,6 +74,22 @@ def check_plaintext_env_file(path: Path) -> list[str]:
         } and value.strip():
             forbidden.append(key.strip())
     return forbidden
+
+
+def check_jushuitan_storage_state(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    cookies = payload.get("cookies")
+    origins = payload.get("origins")
+    return bool(isinstance(cookies, list) and cookies) or bool(
+        isinstance(origins, list) and origins
+    )
 
 
 def build_report(args: argparse.Namespace) -> dict[str, Any]:
@@ -107,6 +128,29 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         )
         for name in EXECUTION_SECRET_ENV_NAMES
     }
+    storage_state_value = str(os.getenv("STORAGE_STATE_PATH", "")).strip()
+    storage_state_path = (
+        Path(storage_state_value).expanduser()
+        if storage_state_value
+        else jushuitan_root / "storage" / "jushuitan.json"
+    )
+    if not storage_state_path.is_absolute():
+        storage_state_path = jushuitan_root / storage_state_path
+    storage_state_path = storage_state_path.resolve()
+    jushuitan_credentials_configured = all(
+        execution_secret_env[name] for name in ("JST_USERNAME", "JST_PASSWORD")
+    )
+    jushuitan_storage_state_available = check_jushuitan_storage_state(storage_state_path)
+    jushuitan_auth_available = (
+        jushuitan_credentials_configured or jushuitan_storage_state_available
+    )
+    dingtalk_configured = all(
+        execution_secret_env[name]
+        for name in ("DINGTALK_WEBHOOK", "DINGTALK_SECRET")
+    )
+    execution_auth_available = jushuitan_auth_available and dingtalk_configured
+    source_read_available = all(source_env.values())
+    source_read_ready = source_read_available or bool(args.existing_input)
     app_audit_config = None
     app_audit_contract = None
     app_audit_error = ""
@@ -125,15 +169,15 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         "shared_lock_module": lock_module.exists(),
         "jushuitan_package": (jushuitan_root / "package.json").exists(),
         "jushuitan_dependencies": (jushuitan_root / "node_modules").exists(),
-        "source_read_configured": all(source_env.values()),
-        "execution_secrets_configured": all(execution_secret_env.values()),
+        "source_read_configured": source_read_ready,
+        "execution_secrets_configured": execution_auth_available,
         "app_audit_configured": app_audit_config is not None,
         "app_audit_tables_exist": bool(
             app_audit_contract and app_audit_contract.get("ready")
         ),
         "all_secret_env_set": (
-            all(source_env.values())
-            and all(execution_secret_env.values())
+            source_read_ready
+            and execution_auth_available
             and app_audit_config is not None
         ),
         "all_profiles_exist": bool(profile_checks) and all(item["profile_exists"] for item in profile_checks),
@@ -144,6 +188,15 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         "checks": checks,
         "source_environment": source_env,
         "execution_secret_environment": execution_secret_env,
+        "source_read": {
+            "required": not bool(args.existing_input),
+            "configured": source_read_available,
+        },
+        "jushuitan_auth": {
+            "credentials_configured": jushuitan_credentials_configured,
+            "storage_state_available": jushuitan_storage_state_available,
+            "storage_state_path": str(storage_state_path),
+        },
         "app_audit": {
             "configured": app_audit_config is not None,
             "target": app_audit_config.safe_dict() if app_audit_config is not None else None,
