@@ -17,6 +17,7 @@ if str(SCRIPTS_ROOT) not in sys.path:
 
 from run_1688_stop_sale_pipeline import (
     assert_crawler_worker_paused,
+    build_argument_parser,
     build_1688_command,
     build_jushuitan_command,
     derive_audit_status,
@@ -53,6 +54,18 @@ class Run1688StopSalePipelineTests(unittest.TestCase):
         self.assertEqual(command_jst[command_jst.index("--run-id") + 1], args.run_id)
         self.assertIn("--yes", command_1688)
         self.assertIn("--yes", command_jst)
+
+    def test_production_pipeline_reuses_logged_in_profile_by_default(self) -> None:
+        args = build_argument_parser().parse_args(["--file", "tasks.csv"])
+
+        self.assertTrue(args.skip_login)
+
+    def test_manual_login_requires_an_explicit_override(self) -> None:
+        args = build_argument_parser().parse_args(
+            ["--file", "tasks.csv", "--require-manual-login"]
+        )
+
+        self.assertFalse(args.skip_login)
 
     def test_audit_status_is_partial_when_some_items_succeeded(self) -> None:
         status = derive_audit_status(

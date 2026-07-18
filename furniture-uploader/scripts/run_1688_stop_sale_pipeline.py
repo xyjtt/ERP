@@ -35,7 +35,20 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mode", choices=("preview", "execute"), default="preview")
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--yes", action="store_true", help="Required for live execute mode")
-    parser.add_argument("--skip-login", action="store_true")
+    login_mode = parser.add_mutually_exclusive_group()
+    login_mode.add_argument(
+        "--skip-login",
+        dest="skip_login",
+        action="store_true",
+        default=True,
+        help="Reuse the mapped logged-in Profile (default for the production pipeline).",
+    )
+    login_mode.add_argument(
+        "--require-manual-login",
+        dest="skip_login",
+        action="store_false",
+        help="Run the legacy interactive login prompt before opening product management.",
+    )
     parser.add_argument("--no-notify", action="store_true")
     parser.add_argument("--jushuitan-root", default=str(DEFAULT_JUSHUITAN_ROOT))
     parser.add_argument("--shared-runtime-root", default=str(DEFAULT_SHARED_RUNTIME_ROOT))

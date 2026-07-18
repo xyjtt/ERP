@@ -135,6 +135,8 @@ python scripts\run_1688_stop_sale_pipeline.py `
 
 execute 使用统一 `run_id` 关联 1688 JSONL、聚水潭 JSONL 和新库两张审计表。preview 不创建新库记录。
 
+正式 pipeline 默认复用店铺映射中的已登录 Profile，相当于 `--skip-login`。它仍会检查登录跳转、验证码/风控、当前店铺、商品 ID 和 SKU 身份；登录态失效时停止对应店铺。只有人工调试时才显式使用 `--require-manual-login` 恢复旧的回车确认流程。
+
 ## 共机 Worker 门禁
 
 `YYDD-1688-Crawler-Worker` 不使用全局锁。真实下架前必须先确认 `app.crawler_task` 中没有 `claimed/preflight/running/persisted/validating` 的 task/variant，再暂停计划任务：
