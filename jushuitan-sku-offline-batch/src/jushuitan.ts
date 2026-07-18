@@ -211,35 +211,78 @@ async function waitForVisibleTargetLocator(
 }
 
 export async function dismissVisibleModals(page: Page): Promise<void> {
-  const modalLocator = page.locator(".ant-modal-wrap, [role='dialog']");
-  const modalCount = await modalLocator.count();
+  for (let pass = 0; pass < 4; pass += 1) {
+    let dismissedInPass = false;
 
-  for (let index = 0; index < modalCount; index += 1) {
-    const modal = modalLocator.nth(index);
-    const visible = await modal.isVisible().catch(() => false);
-    if (!visible) {
-      continue;
+    for (const target of allTargets(page)) {
+      const modalLocator = target.locator(
+        ".ant-modal-wrap, .ant-modal, [role='dialog'], .ant-drawer, .el-dialog",
+      );
+      const modalCount = await modalLocator.count().catch(() => 0);
+
+      for (let index = modalCount - 1; index >= 0; index -= 1) {
+        const modal = modalLocator.nth(index);
+        if (!(await modal.isVisible().catch(() => false))) {
+          continue;
+        }
+
+        const modalText = (await modal.innerText().catch(() => "")).replace(/\s+/g, " ").trim();
+        if (/请选择平台.?店铺/.test(modalText)) {
+          continue;
+        }
+
+        const closeButton = modal
+          .locator(
+            [
+              ".ant-modal-close",
+              ".ant-modal-close-x",
+              ".ant-drawer-close",
+              ".el-dialog__headerbtn",
+              '[aria-label="Close"]',
+              '[aria-label="close"]',
+              'button[aria-label*="关闭"]',
+              'button:has-text("我知道了")',
+              'button:has-text("知道了")',
+              'button:has-text("以后再说")',
+              'button:has-text("稍后处理")',
+              'button:has-text("暂不处理")',
+              'button:has-text("不再提醒")',
+              'button:has-text("忽略")',
+              'button:has-text("取消")',
+              'button:has-text("关闭")',
+              'button:has-text("同意")',
+              'button:has-text("确定")',
+            ].join(","),
+          )
+          .or(
+            modal.getByRole("button", {
+              name: /我?\s*知\s*道\s*了|以\s*后\s*再\s*说|稍\s*后\s*处\s*理|暂\s*不\s*处\s*理|不\s*再\s*提\s*醒|忽\s*略|取\s*消|关\s*闭|确\s*定/,
+            }),
+          )
+          .first();
+
+        if ((await closeButton.count().catch(() => 0)) === 0) {
+          continue;
+        }
+
+        const clicked = await closeButton
+          .click({ timeout: 2500 })
+          .then(() => true)
+          .catch(async () =>
+            closeButton
+              .click({ timeout: 2500, force: true })
+              .then(() => true)
+              .catch(() => false),
+          );
+        if (clicked) {
+          dismissedInPass = true;
+          await page.waitForTimeout(400);
+        }
+      }
     }
 
-    const closeButton = modal
-      .locator(
-        [
-          ".ant-modal-close",
-          ".ant-modal-close-x",
-          'button:has-text("知道了")',
-          'button:has-text("取消")',
-          'button:has-text("关闭")',
-          'button:has-text("同意")',
-          'button:has-text("确定")',
-        ].join(","),
-      )
-      .or(modal.getByRole("button", { name: /确\s*定|知\s*道\s*了|关\s*闭/ }))
-      .or(modal.locator(".ant-modal-footer button.ant-btn-primary"))
-      .first();
-
-    if ((await closeButton.count()) > 0) {
-      await closeButton.click({ force: true }).catch(() => undefined);
-      await page.waitForTimeout(500);
+    if (!dismissedInPass) {
+      break;
     }
   }
 }
