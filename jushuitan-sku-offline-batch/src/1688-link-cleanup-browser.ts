@@ -13,11 +13,13 @@ import {
 import {
   dismissQuickSaveModal,
   dismissVisibleModals,
+  collectStorePickerDiagnostics,
   ensureProductPage,
   login,
   selectExactStore,
   Target,
 } from "./jushuitan";
+import { normalizeStoreSelectionError } from "./store-picker";
 import { selectors } from "./selectors";
 import { ensureDir, resolveFirstVisibleLocator, sanitizeFileName } from "./utils";
 
@@ -26,6 +28,7 @@ class CleanupBrowserError extends Error {
     readonly category: string,
     message: string,
     readonly stopScope: "task" | "store" | "all" = "task",
+    readonly details: Record<string, unknown> = {},
   ) {
     super(message);
     this.name = "CleanupBrowserError";
@@ -124,6 +127,7 @@ async function saveTaskEvidence(
   options: BrowserRunOptions,
   task: CleanupTask,
   stage: string,
+  error?: unknown,
 ): Promise<string> {
   const baseName = sanitizeFileName(`${task.task_id.slice(0, 12)}-${stage}`);
   const baseDir = path.join(options.artifactsDir, options.runId);
@@ -131,6 +135,7 @@ async function saveTaskEvidence(
   const screenshotPath = path.join(baseDir, `${baseName}.png`);
   const evidencePath = path.join(baseDir, `${baseName}.json`);
   const { rows } = await collectRows(target);
+  const pickerDiagnostics = stage === "failed" ? await collectStorePickerDiagnostics(page, target).catch(() => null) : null;
   await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => undefined);
   await fs.writeFile(
     evidencePath,
@@ -144,6 +149,8 @@ async function saveTaskEvidence(
         stage,
         url: page.url(),
         rows,
+        error_details: error instanceof CleanupBrowserError ? error.details : undefined,
+        store_picker_diagnostics: pickerDiagnostics,
         captured_at: now(),
       },
       null,
@@ -170,7 +177,12 @@ async function queryTaskRows(
     try {
       await selectExactStore(page, target, task.store_name);
     } catch (error) {
-      throw new CleanupBrowserError("store_mismatch", String(error), "store");
+      const normalized = normalizeStoreSelectionError(error);
+      const selectionDiagnostics = await collectStorePickerDiagnostics(page, target).catch(() => null);
+      throw new CleanupBrowserError(normalized.category, normalized.message, "store", {
+        ...normalized.details,
+        selection_diagnostics: selectionDiagnostics,
+      });
     }
   }
 
@@ -422,12 +434,19 @@ export async function runBrowserCleanup(
           await appendLedgerResult(options.ledgerPath, result);
         }
       } catch (error) {
+        const preservePickerState =
+          error instanceof CleanupBrowserError &&
+          (error.category === "store_picker_unavailable" || error.category === "store_mismatch");
+        const evidenceTarget = preservePickerState
+          ? page
+          : ((await ensureProductPage(page).catch(() => page)) as Target);
         const evidencePath = await saveTaskEvidence(
           page,
-          (await ensureProductPage(page).catch(() => page)) as Target,
+          evidenceTarget,
           options,
           task,
           "failed",
+          error,
         ).catch(() => "");
         results.push(failureResult(task, error, evidencePath));
         if (error instanceof CleanupBrowserError && error.stopScope === "store") {

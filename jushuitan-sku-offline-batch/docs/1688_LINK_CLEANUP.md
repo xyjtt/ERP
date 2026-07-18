@@ -93,6 +93,7 @@ python D:\script_files\ERP\furniture-uploader\scripts\run_1688_stop_sale_pipelin
 以下情况均记录 `failed`，不伪报成功：
 
 - `login_required` / `risk_control`：停止整个聚水潭会话。
+- `store_picker_unavailable`：店铺选择器未打开、搜索框不可用或确认失败，停止对应店铺并保留触发器/弹窗诊断。
 - `store_mismatch`：停止对应店铺。
 - `task_not_found`：四字段没有精确命中。
 - `ambiguous_match`：命中多行。
@@ -107,6 +108,7 @@ python D:\script_files\ERP\furniture-uploader\scripts\run_1688_stop_sale_pipelin
 - 结果：`results/1688-link-cleanup/<run-id>.jsonl`
 - 汇总：`results/1688-link-cleanup/<run-id>.summary.json`
 - 页面证据：`artifacts/1688-link-cleanup/<run-id>/`
+- 店铺选择失败证据包含触发器可见性、登录输入框状态、可见弹窗和遮罩层计数，不记录账号、密码或 Cookie。
 - 幂等账本：`storage/1688-link-cleanup-ledger.jsonl`
 
 真实执行默认发送钉钉汇总；`--no-notify` 仅用于受控测试。聚水潭进程存在失败时返回非零退出码，调度器必须据此报警和创建补偿任务。

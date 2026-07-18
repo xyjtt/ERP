@@ -54,6 +54,7 @@ const OPERATIONS_CATEGORY_LABELS: Record<string, string> = {
   ledger_idempotency: "历史已完成",
   login_required: "登录失效",
   risk_control: "验证码或风控",
+  store_picker_unavailable: "店铺选择器不可用",
   store_mismatch: "店铺不匹配",
   store_stopped: "店铺已安全停止",
   session_stopped: "会话已安全停止",

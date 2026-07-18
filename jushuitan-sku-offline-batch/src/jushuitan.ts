@@ -11,6 +11,7 @@ import {
   UpdatePopupRecord,
 } from "./types";
 import { chunkArray, ensureDir, resolveFirstVisibleLocator } from "./utils";
+import { openStorePickerWithFallback, StoreSelectionError } from "./store-picker";
 
 export type Target = Page | Frame | Locator;
 
@@ -580,6 +581,15 @@ async function getStoreDialog(page: Page, timeoutMs = 10000): Promise<Locator | 
         target.locator('[role="dialog"]').filter({ hasText: /请选择平台.?店铺/ }),
         target.locator('.ant-modal').filter({ hasText: /请选择平台.?店铺/ }),
         target.locator('.ant-modal-content').filter({ hasText: /请选择平台.?店铺/ }),
+        target.locator('[role="dialog"]').filter({
+          has: target.locator('input[placeholder*="平台或店铺名称"], input[placeholder*="回车搜索"]'),
+        }),
+        target.locator('.ant-modal, .ant-modal-wrap, .ant-modal-content').filter({
+          has: target.locator('input[placeholder*="平台或店铺名称"], input[placeholder*="回车搜索"]'),
+        }),
+        target.locator('.ant-drawer, .ant-drawer-content').filter({
+          has: target.locator('input[placeholder*="平台或店铺名称"], input[placeholder*="回车搜索"]'),
+        }),
         target.locator('.ant-modal-content').filter({
           has: target.locator('input[placeholder*="平台或店铺名称"]'),
         }),
@@ -600,6 +610,117 @@ async function getStoreDialog(page: Page, timeoutMs = 10000): Promise<Locator | 
   }
 
   return null;
+}
+
+async function clickVisibleStoreTrigger(queryTarget: Target, candidate: string): Promise<boolean> {
+  const locators = queryTarget.locator(candidate);
+  const count = await locators.count().catch(() => 0);
+
+  for (let index = 0; index < Math.min(count, 6); index += 1) {
+    const locator = locators.nth(index);
+    if (!(await locator.isVisible({ timeout: 800 }).catch(() => false))) {
+      continue;
+    }
+
+    await locator.scrollIntoViewIfNeeded().catch(() => undefined);
+    const clicked = await locator
+      .click({ timeout: 2500 })
+      .then(() => true)
+      .catch(async () =>
+        locator
+          .click({ timeout: 2500, force: true })
+          .then(() => true)
+          .catch(() => false),
+      );
+    if (clicked) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+export async function collectStorePickerDiagnostics(page: Page, queryTarget: Target): Promise<Record<string, unknown>> {
+  const triggerCandidates = [];
+  for (const selector of selectors.productPage.platformTrigger) {
+    const locators = queryTarget.locator(selector);
+    const count = await locators.count().catch(() => 0);
+    const elements = [];
+    for (let index = 0; index < Math.min(count, 6); index += 1) {
+      const locator = locators.nth(index);
+      const visible = await locator.isVisible().catch(() => false);
+      const metadata = await locator
+        .evaluate((element) => {
+          const htmlElement = element as HTMLInputElement;
+          return {
+            tag: element.tagName.toLowerCase(),
+            id: element.id,
+            class_name: element.getAttribute("class") ?? "",
+            placeholder: element.getAttribute("placeholder") ?? "",
+            aria_expanded: element.getAttribute("aria-expanded") ?? "",
+            disabled: Boolean(htmlElement.disabled),
+            readonly: Boolean(htmlElement.readOnly),
+          };
+        })
+        .catch(() => null);
+      elements.push({ index, visible, metadata });
+    }
+    triggerCandidates.push({ selector, count, elements });
+  }
+
+  const targets = [];
+  for (const [index, target] of allTargets(page).entries()) {
+    const visibleDialogs = [];
+    const dialogs = target.locator("[role='dialog'], .ant-modal-wrap, .ant-modal, .ant-drawer");
+    const dialogCount = await dialogs.count().catch(() => 0);
+    for (let dialogIndex = 0; dialogIndex < Math.min(dialogCount, 10); dialogIndex += 1) {
+      const dialog = dialogs.nth(dialogIndex);
+      if (!(await dialog.isVisible().catch(() => false))) {
+        continue;
+      }
+      visibleDialogs.push({
+        index: dialogIndex,
+        text: (await dialog.innerText().catch(() => "")).replace(/\s+/g, " ").trim().slice(0, 1200),
+      });
+    }
+
+    const visibleOverlays = [];
+    for (const selector of [
+      ".ant-modal-mask",
+      ".ant-drawer-mask",
+      ".ant-popover",
+      ".ant-tooltip",
+      ".ant-tour",
+      "[class*='guide']",
+    ]) {
+      const overlays = target.locator(selector);
+      const overlayCount = await overlays.count().catch(() => 0);
+      let visibleCount = 0;
+      for (let overlayIndex = 0; overlayIndex < Math.min(overlayCount, 10); overlayIndex += 1) {
+        if (await overlays.nth(overlayIndex).isVisible().catch(() => false)) {
+          visibleCount += 1;
+        }
+      }
+      if (overlayCount > 0) {
+        visibleOverlays.push({ selector, count: overlayCount, visible_count: visibleCount });
+      }
+    }
+
+    targets.push({
+      index,
+      url: "url" in target && typeof target.url === "function" ? target.url() : page.url(),
+      visible_dialogs: visibleDialogs,
+      overlays: visibleOverlays,
+    });
+  }
+
+  return {
+    page_url: page.url(),
+    page_title: await page.title().catch(() => ""),
+    login_input_visible: await hasVisible(page, selectors.login.username, 300),
+    trigger_candidates: triggerCandidates,
+    targets,
+  };
 }
 
 async function getStoreSearchInputInPopup(page: Page, timeoutMs = 10000): Promise<{ dialog: Locator; input: Locator } | null> {
@@ -886,16 +1007,32 @@ export async function selectExactStore(
   storeName: string,
 ): Promise<void> {
   await clearPlatformSelection(queryTarget);
-  const trigger = await resolveFirstVisibleLocator(
-    queryTarget,
-    selectors.productPage.platformTrigger,
-    5000,
-  );
-  await trigger.click({ force: true });
+  const opened = await openStorePickerWithFallback({
+    candidates: selectors.productPage.platformTrigger,
+    getOpenPicker: () => getStoreDialog(page, 1800),
+    clickCandidate: async (candidate) => {
+      const clicked = await clickVisibleStoreTrigger(queryTarget, candidate);
+      if (clicked) {
+        await page.waitForTimeout(350);
+      }
+      return clicked;
+    },
+  });
+  if (!opened) {
+    throw new StoreSelectionError(
+      "store_picker_unavailable",
+      `Store picker dialog did not open for ${storeName}`,
+      { attempted_selectors: [...selectors.productPage.platformTrigger] },
+    );
+  }
 
-  const storeContext = await getStoreSearchInputInPopup(page, 10000);
+  const storeContext = await getStoreSearchInputInPopup(page, 5000);
   if (!storeContext) {
-    throw new Error(`Store picker dialog did not open for ${storeName}`);
+    throw new StoreSelectionError(
+      "store_picker_unavailable",
+      `Store picker opened without a usable search input for ${storeName}`,
+      { attempted_selectors: opened.attemptedSelectors },
+    );
   }
 
   const { dialog, input } = storeContext;
@@ -926,7 +1063,7 @@ export async function selectExactStore(
   }
 
   if (!selected) {
-    throw new Error(`Exact Jushuitan store was not found or selected: ${storeName}`);
+    throw new StoreSelectionError("store_mismatch", `Exact Jushuitan store was not found or selected: ${storeName}`);
   }
 
   const footerText = await dialog
@@ -935,16 +1072,23 @@ export async function selectExactStore(
     .catch(() => "");
   const counts = parseSelectionCounts(footerText);
   if (counts.platformCount !== 1 || counts.shopCount !== 1) {
-    throw new Error(`Exact store selection verification failed for ${storeName}. Footer: ${footerText}`);
+    throw new StoreSelectionError(
+      "store_mismatch",
+      `Exact store selection verification failed for ${storeName}. Footer: ${footerText}`,
+    );
   }
 
   if (!(await clickConfirmInStorePopup(page, 10000))) {
-    throw new Error(`Store picker confirmation failed for ${storeName}`);
+    throw new StoreSelectionError("store_picker_unavailable", `Store picker confirmation failed for ${storeName}`);
   }
 
+  const trigger = await resolveFirstVisibleLocator(queryTarget, selectors.productPage.platformTrigger, 5000);
   const triggerValue = compactText(await trigger.inputValue().catch(() => ""));
   if (!triggerValue.includes("已选1个平台1个店铺")) {
-    throw new Error(`Jushuitan store filter is not exact after confirmation: ${triggerValue}`);
+    throw new StoreSelectionError(
+      "store_mismatch",
+      `Jushuitan store filter is not exact after confirmation: ${triggerValue}`,
+    );
   }
 }
 
