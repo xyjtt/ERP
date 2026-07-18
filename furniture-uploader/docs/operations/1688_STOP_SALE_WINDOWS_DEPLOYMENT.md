@@ -61,6 +61,8 @@ preview 只读取旧业务源，不写任何数据库。execute 在打开浏览�
 
 新库默认复用执行机 1688 外置配置和 Windows Credential Manager 引用 `YYDD/1688/database/app-writer`。仅在无法复用时才使用 `STOP_SALE_APP_SQLSERVER_*` 环境变量；密码不得写入 `.env`。
 
+钉钉优先复用 1688 项目 Credential Manager 中的 `YYDD/1688/notification/dingtalk/webhook` 和 `YYDD/1688/notification/dingtalk/secret`。只有这两个引用不存在时才要求 `DINGTALK_*` 环境变量。
+
 ## Profile 映射
 
 在执行机创建 `furniture-uploader/config/systems/1688_sku_offline.local.json`，只覆盖 `execution.store_accounts` 中的 Profile 路径和必要账号键。路径必须指向执行机已登录的独立账号 Profile。

@@ -22,6 +22,7 @@ from config_loader import load_json_with_local_override
 from sku_offline_tasks import dedupe_offline_tasks, filter_offline_tasks, load_offline_tasks
 from stop_sale_audit import (
     StopSaleAuditRepository,
+    hydrate_dingtalk_credentials,
     load_jsonl_records,
     resolve_stop_sale_app_config,
     stop_sale_task_key,
@@ -408,6 +409,12 @@ def main() -> int:
         raise ValueError("Shared lock timing values must be positive (wait may be zero)")
     if args.mode == "execute" and not args.yes:
         raise ValueError("execute mode requires --yes")
+    if args.mode == "execute" and not args.no_notify:
+        dingtalk_credentials = hydrate_dingtalk_credentials(args.shared_runtime_root)
+        if not all(dingtalk_credentials.values()):
+            raise RuntimeError(
+                "DingTalk credentials are missing from both the process environment and the 1688 Credential Manager."
+            )
 
     jushuitan_root = Path(args.jushuitan_root).resolve()
     if not (jushuitan_root / "package.json").exists():

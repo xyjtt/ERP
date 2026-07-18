@@ -16,7 +16,11 @@ if str(RPA_ROOT) not in sys.path:
     sys.path.insert(0, str(RPA_ROOT))
 
 from config_loader import load_json_with_local_override
-from stop_sale_audit import StopSaleAuditRepository, resolve_stop_sale_app_config
+from stop_sale_audit import (
+    StopSaleAuditRepository,
+    hydrate_dingtalk_credentials,
+    resolve_stop_sale_app_config,
+)
 
 
 SOURCE_ENV_NAMES = (
@@ -94,8 +98,13 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         )
         for name in SOURCE_ENV_NAMES
     }
+    dingtalk_credentials = hydrate_dingtalk_credentials(script_1688_root)
     execution_secret_env = {
-        name: bool(str(os.getenv(name, "")).strip())
+        name: (
+            dingtalk_credentials.get(name, False)
+            if name in dingtalk_credentials
+            else bool(str(os.getenv(name, "")).strip())
+        )
         for name in EXECUTION_SECRET_ENV_NAMES
     }
     app_audit_config = None

@@ -16,6 +16,7 @@ if str(RPA_ROOT) not in sys.path:
     sys.path.insert(0, str(RPA_ROOT))
 
 from stop_sale_audit import (
+    hydrate_dingtalk_credentials,
     load_jsonl_records,
     resolve_stop_sale_app_config,
     stop_sale_offline_key,
@@ -62,6 +63,22 @@ class StopSaleAuditTests(unittest.TestCase):
             records = load_jsonl_records(path)
 
         self.assertEqual(records, [{"status": "success"}])
+
+    def test_dingtalk_credentials_can_be_hydrated_without_returning_values(self) -> None:
+        values = {
+            "YYDD/1688/notification/dingtalk/webhook": "https://example.invalid/webhook",
+            "YYDD/1688/notification/dingtalk/secret": "signing-secret",
+        }
+        with patch.dict(os.environ, {}, clear=True):
+            with patch(
+                "stop_sale_audit._load_runtime_secret",
+                side_effect=lambda _root, ref: values[ref],
+            ):
+                result = hydrate_dingtalk_credentials("D:/runtime")
+
+            self.assertEqual(result, {"DINGTALK_WEBHOOK": True, "DINGTALK_SECRET": True})
+            self.assertNotIn("example.invalid", repr(result))
+            self.assertNotIn("signing-secret", repr(result))
 
 
 if __name__ == "__main__":

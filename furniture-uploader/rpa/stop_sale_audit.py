@@ -17,6 +17,8 @@ DEFAULT_APP_DATABASE = "JSReportReplica"
 DEFAULT_APP_SCHEMA = "app"
 DEFAULT_APP_DRIVER = "ODBC Driver 18 for SQL Server"
 DEFAULT_CREDENTIAL_REF = "YYDD/1688/database/app-writer"
+DINGTALK_WEBHOOK_CREDENTIAL_REF = "YYDD/1688/notification/dingtalk/webhook"
+DINGTALK_SECRET_CREDENTIAL_REF = "YYDD/1688/notification/dingtalk/secret"
 
 
 @dataclass(frozen=True)
@@ -79,6 +81,34 @@ def _load_secret_provider_module(shared_runtime_root: Path):
     sys.modules[module_name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def _load_runtime_secret(shared_runtime_root: str | Path, credential_ref: str) -> str:
+    provider_module = _load_secret_provider_module(Path(shared_runtime_root).resolve())
+    record = provider_module.get_secret_provider().get(credential_ref)
+    value = str(record.secret or "")
+    if not value:
+        raise RuntimeError(f"Credential has no secret: {credential_ref}")
+    return value
+
+
+def hydrate_dingtalk_credentials(shared_runtime_root: str | Path) -> dict[str, bool]:
+    references = {
+        "DINGTALK_WEBHOOK": DINGTALK_WEBHOOK_CREDENTIAL_REF,
+        "DINGTALK_SECRET": DINGTALK_SECRET_CREDENTIAL_REF,
+    }
+    result: dict[str, bool] = {}
+    for env_name, credential_ref in references.items():
+        configured = bool(str(os.getenv(env_name, "")).strip())
+        if not configured:
+            try:
+                os.environ[env_name] = _load_runtime_secret(shared_runtime_root, credential_ref)
+            except Exception:
+                result[env_name] = False
+                continue
+            configured = True
+        result[env_name] = configured
+    return result
 
 
 def _load_app_config_from_1688_runtime(shared_runtime_root: Path) -> StopSaleAppConfig:
