@@ -12,7 +12,7 @@ import {
 } from "./types";
 import { chunkArray, ensureDir, resolveFirstVisibleLocator } from "./utils";
 
-type Target = Page | Frame | Locator;
+export type Target = Page | Frame | Locator;
 
 function allTargets(page: Page): Target[] {
   return [page, ...page.frames()];
@@ -209,8 +209,8 @@ async function waitForVisibleTargetLocator(
   throw new Error(`未找到可见弹窗，候选选择器: ${candidates.join(" | ")}`);
 }
 
-async function dismissVisibleModals(page: Page): Promise<void> {
-  const modalLocator = page.locator(".ant-modal-wrap");
+export async function dismissVisibleModals(page: Page): Promise<void> {
+  const modalLocator = page.locator(".ant-modal-wrap, [role='dialog']");
   const modalCount = await modalLocator.count();
 
   for (let index = 0; index < modalCount; index += 1) {
@@ -221,15 +221,19 @@ async function dismissVisibleModals(page: Page): Promise<void> {
     }
 
     const closeButton = modal
-      .locator([
-        ".ant-modal-close",
-        ".ant-modal-close-x",
-        'button:has-text("知道了")',
-        'button:has-text("取消")',
-        'button:has-text("关闭")',
-        'button:has-text("同意")',
-        'button:has-text("确定")',
-      ].join(","))
+      .locator(
+        [
+          ".ant-modal-close",
+          ".ant-modal-close-x",
+          'button:has-text("知道了")',
+          'button:has-text("取消")',
+          'button:has-text("关闭")',
+          'button:has-text("同意")',
+          'button:has-text("确定")',
+        ].join(","),
+      )
+      .or(modal.getByRole("button", { name: /确\s*定|知\s*道\s*了|关\s*闭/ }))
+      .or(modal.locator(".ant-modal-footer button.ant-btn-primary"))
       .first();
 
     if ((await closeButton.count()) > 0) {
@@ -246,7 +250,7 @@ async function closeGuideIfPresent(page: Page): Promise<void> {
   }
 }
 
-async function dismissQuickSaveModal(page: Page): Promise<void> {
+export async function dismissQuickSaveModal(page: Page): Promise<void> {
   const modal = page.locator(selectors.productPage.quickSaveModal.join(",")).first();
   if (!(await modal.count())) {
     return;
@@ -324,24 +328,28 @@ async function waitForLoggedIn(page: Page): Promise<boolean> {
 }
 
 async function ensureLoginAgreementChecked(page: Page): Promise<void> {
-  try {
-    const checkboxInput = page.locator('input[type="checkbox"]').first();
-    if ((await checkboxInput.count()) > 0) {
-      const checked = await checkboxInput.isChecked().catch(() => false);
-      if (!checked) {
-        await resolveFirstVisibleLocator(page, selectors.login.agreementCheckbox).then((locator) =>
-          locator.click({ force: true }),
-        );
-      }
+  const checkboxInput = page.locator('input[type="checkbox"]').first();
+  if ((await checkboxInput.count().catch(() => 0)) > 0) {
+    if (!(await checkboxInput.isChecked().catch(() => false))) {
+      await checkboxInput.check({ force: true }).catch(() => undefined);
+    }
+    if (!(await checkboxInput.isChecked().catch(() => false))) {
+      const wrapper = checkboxInput.locator("xpath=ancestor::label[1]");
+      await wrapper.click({ force: true }).catch(() => undefined);
+    }
+    if (await checkboxInput.isChecked().catch(() => false)) {
       return;
     }
-  } catch {
-    // Fall through.
   }
 
   if (await hasVisible(page, selectors.login.agreementCheckbox)) {
     await clickByCandidates(page, selectors.login.agreementCheckbox);
+    if ((await checkboxInput.count().catch(() => 0)) === 0 || (await checkboxInput.isChecked().catch(() => false))) {
+      return;
+    }
   }
+
+  throw new Error("Login agreement checkbox could not be selected");
 }
 
 async function dismissLoginAgreement(page: Page): Promise<void> {
@@ -351,7 +359,7 @@ async function dismissLoginAgreement(page: Page): Promise<void> {
   }
 }
 
-async function login(page: Page): Promise<void> {
+export async function login(page: Page, options: { allowManualWait?: boolean } = {}): Promise<void> {
   await page.goto(appConfig.loginUrl, { waitUntil: "domcontentloaded", timeout: 120000 });
   await dismissLoginAgreement(page);
   await fillByCandidates(page, selectors.login.username, appConfig.username);
@@ -363,6 +371,10 @@ async function login(page: Page): Promise<void> {
 
   if (await waitForLoggedIn(page)) {
     return;
+  }
+
+  if (options.allowManualWait === false) {
+    throw new Error(`Login did not complete without manual intervention. Current URL: ${page.url()}`);
   }
 
   await page.waitForTimeout(appConfig.manualLoginTimeoutMs);
@@ -392,7 +404,7 @@ async function waitForQueryReady(page: Page): Promise<Target> {
   throw new Error("未找到店铺商品管理查询表单");
 }
 
-async function ensureProductPage(page: Page): Promise<Target> {
+export async function ensureProductPage(page: Page): Promise<Target> {
   await dismissVisibleModals(page);
   await closeGuideIfPresent(page);
 
@@ -780,6 +792,160 @@ async function clickConfirmInStorePopup(page: Page, timeoutMs = 10000): Promise<
   }
 
   return false;
+}
+
+function compactText(value: string): string {
+  return value.replace(/\s+/g, "").trim();
+}
+
+async function clickExactStoreRowCheckbox(modal: Locator, storeName: string): Promise<boolean> {
+  const normalizedStore = compactText(storeName);
+  const storeSuffix = compactText(storeName.replace(/^阿里巴巴[-—–]?/, ""));
+  const rows = modal.locator(
+    "tbody tr, .ant-table-tbody > tr, .ant-tree-treenode, [role='row'], .ant-list-item, label.ant-checkbox-wrapper",
+  );
+  const matches: Array<{ row: Locator; text: string }> = [];
+  const count = await rows.count().catch(() => 0);
+
+  for (let index = 0; index < count; index += 1) {
+    const row = rows.nth(index);
+    const text = compactText(await row.innerText().catch(() => ""));
+    if (!text || (!text.includes(normalizedStore) && !text.includes(storeSuffix))) {
+      continue;
+    }
+    const checkboxCount = await row
+      .locator("input[type='checkbox'], label.ant-checkbox-wrapper, .ant-checkbox-wrapper")
+      .count()
+      .catch(() => 0);
+    if (checkboxCount > 0) {
+      matches.push({ row, text });
+    }
+  }
+
+  if (matches.length === 0) {
+    return false;
+  }
+
+  matches.sort((left, right) => left.text.length - right.text.length);
+  const row = matches[0].row;
+  const input = row.locator("input[type='checkbox']").first();
+  if ((await input.count().catch(() => 0)) > 0) {
+    if (!(await input.isChecked().catch(() => false))) {
+      await input.check({ force: true }).catch(() => undefined);
+    }
+    if (await input.isChecked().catch(() => false)) {
+      return true;
+    }
+  }
+
+  const label = row.locator("label.ant-checkbox-wrapper, .ant-checkbox-wrapper").first();
+  if ((await label.count().catch(() => 0)) > 0) {
+    await label.click({ force: true }).catch(() => undefined);
+    return (
+      (await input.isChecked().catch(() => false)) ||
+      (await row.locator(".ant-checkbox-checked").count().catch(() => 0)) > 0
+    );
+  }
+
+  return false;
+}
+
+async function clearStoreDialogSelection(modal: Locator): Promise<void> {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const footerText = await modal
+      .locator(selectors.productPage.platformModalFooter.join(","))
+      .innerText()
+      .catch(() => "");
+    const counts = parseSelectionCounts(footerText);
+    if (counts.platformCount === 0 && counts.shopCount === 0) {
+      return;
+    }
+
+    const checkedInputs = modal.locator("label.ant-checkbox-wrapper input[type='checkbox']:checked");
+    const checkedCount = await checkedInputs.count().catch(() => 0);
+    for (let index = checkedCount - 1; index >= 0; index -= 1) {
+      const input = checkedInputs.nth(index);
+      await input.uncheck({ force: true }).catch(async () => {
+        await input.locator("xpath=ancestor::label[1]").click({ force: true }).catch(() => undefined);
+      });
+      await modal.page().waitForTimeout(150);
+    }
+    await modal.page().waitForTimeout(350);
+  }
+
+  const footerText = await modal
+    .locator(selectors.productPage.platformModalFooter.join(","))
+    .innerText()
+    .catch(() => "");
+  throw new Error(`Could not clear existing Jushuitan store selection. Footer: ${footerText}`);
+}
+
+export async function selectExactStore(
+  page: Page,
+  queryTarget: Target,
+  storeName: string,
+): Promise<void> {
+  await clearPlatformSelection(queryTarget);
+  const trigger = await resolveFirstVisibleLocator(
+    queryTarget,
+    selectors.productPage.platformTrigger,
+    5000,
+  );
+  await trigger.click({ force: true });
+
+  const storeContext = await getStoreSearchInputInPopup(page, 10000);
+  if (!storeContext) {
+    throw new Error(`Store picker dialog did not open for ${storeName}`);
+  }
+
+  const { dialog, input } = storeContext;
+  await clearStoreDialogSelection(dialog);
+  const suffix = storeName.replace(/^阿里巴巴[-—–]?/, "").trim();
+  const searchTerms = [...new Set([storeName.trim(), suffix].filter(Boolean))];
+  let selected = false;
+
+  for (const term of searchTerms) {
+    const resetButton = dialog.locator(selectors.productPage.platformModalResetButton.join(",")).first();
+    if ((await resetButton.count().catch(() => 0)) > 0) {
+      await resetButton.click({ force: true }).catch(() => undefined);
+      await page.waitForTimeout(300);
+    }
+    await input.fill("").catch(() => undefined);
+    await input.fill(term).catch(async () => input.type(term, { delay: 40 }));
+    const searchButton = dialog.locator(selectors.productPage.platformModalSearchButton.join(",")).first();
+    if ((await searchButton.count().catch(() => 0)) > 0) {
+      await searchButton.click({ force: true }).catch(() => undefined);
+    } else {
+      await input.press("Enter").catch(() => undefined);
+    }
+    await waitStoreDialogSearchLoaded(dialog, 12000);
+    selected = await clickExactStoreRowCheckbox(dialog, storeName);
+    if (selected) {
+      break;
+    }
+  }
+
+  if (!selected) {
+    throw new Error(`Exact Jushuitan store was not found or selected: ${storeName}`);
+  }
+
+  const footerText = await dialog
+    .locator(selectors.productPage.platformModalFooter.join(","))
+    .innerText()
+    .catch(() => "");
+  const counts = parseSelectionCounts(footerText);
+  if (counts.platformCount !== 1 || counts.shopCount !== 1) {
+    throw new Error(`Exact store selection verification failed for ${storeName}. Footer: ${footerText}`);
+  }
+
+  if (!(await clickConfirmInStorePopup(page, 10000))) {
+    throw new Error(`Store picker confirmation failed for ${storeName}`);
+  }
+
+  const triggerValue = compactText(await trigger.inputValue().catch(() => ""));
+  if (!triggerValue.includes("已选1个平台1个店铺")) {
+    throw new Error(`Jushuitan store filter is not exact after confirmation: ${triggerValue}`);
+  }
 }
 
 async function selectPlatform(page: Page, queryTarget: Target, platform: PlatformKey): Promise<boolean> {

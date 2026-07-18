@@ -1,6 +1,11 @@
 # 聚水潭停产下架商品编码批量修改
 
-这个项目用于从 Excel 数据源中筛选当天需要下架的商品编码，然后登录聚水潭页面，按平台批量把线上商品编码改成 `txcj`，并导出执行记录与复查结果。
+本项目包含两条彼此隔离的聚水潭链路：
+
+- 历史批量改码：按平台把线上商品编码改为 `txcj`。
+- 1688 清除链接：1688 SKU 已下架后，精确执行“更新/清除链接 -> 清除链接”。
+
+两条链路不能混用。1688 清除链接说明见 [docs/1688_LINK_CLEANUP.md](./docs/1688_LINK_CLEANUP.md)。
 
 ## 功能范围
 
@@ -41,13 +46,11 @@ npx playwright install chromium
 ## 配置
 
 1. 复制 `.env.example` 为 `.env`
-2. 填写以下配置：
+2. 填写非敏感配置；账号密码使用进程或 Windows 用户环境变量 `JST_USERNAME`、`JST_PASSWORD`：
 
 ```ini
 JST_LOGIN_URL=聚水潭登录页地址
 JST_PRODUCT_URL=店铺商品管理页地址
-JST_USERNAME=账号
-JST_PASSWORD=密码
 EXCEL_PATH=./data/source.xlsx
 EXCEL_SHEET_NAME=
 TARGET_DATE=2026-03-18
@@ -72,6 +75,14 @@ STORAGE_STATE_PATH=./storage/jushuitan.json
 npm run start
 ```
 
+1688 清除链接默认只预览：
+
+```bash
+npm run cleanup:1688 -- --mode preview --file <handoff.jsonl>
+```
+
+真实清除必须显式使用 `--mode execute --yes`。首次接入先运行 `probe --limit 1`。
+
 ## 输出结果
 
 脚本会在 `results/时间戳/平台/` 下输出：
@@ -88,5 +99,5 @@ npm run start
 - 当前项目使用了基于中文文本和常见组件结构的选择器，第一次接真实页面时，大概率需要根据聚水潭页面 DOM 微调 [src/selectors.ts](./src/selectors.ts)。
 - Excel 数据里没有平台列，所以脚本默认会对 `.env` 中配置的所有平台分别执行一遍。
 - 如果你希望首次登录后复用会话，可以保留 `STORAGE_STATE_PATH` 输出的状态文件，后续可以扩展成免登录流程。
-- 如果登录页存在验证码、短信验证或风控拦截，脚本会在提交登录后额外等待 `MANUAL_LOGIN_TIMEOUT_MS`，方便人工在打开的浏览器里完成登录。
+- 旧批量改码流程可保留人工登录等待；1688 清除链接不会等待人工处理验证码、短信或风控，而是停止并记录失败。
 - 如果 `npx playwright install chromium` 下载很慢或失败，可以直接配置 `BROWSER_CHANNEL=chrome` 或 `BROWSER_CHANNEL=msedge`，复用本机已安装浏览器。

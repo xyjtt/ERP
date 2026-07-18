@@ -4,10 +4,23 @@ import base64
 import hashlib
 import hmac
 import json
+import os
 import urllib.parse
 import urllib.request
 from datetime import datetime
 from typing import Any
+
+
+def resolve_dingtalk_credentials(dingtalk: dict[str, Any]) -> tuple[str, str]:
+    webhook_env = str(dingtalk.get("webhook_env", "DINGTALK_WEBHOOK")).strip()
+    secret_env = str(dingtalk.get("secret_env", "DINGTALK_SECRET")).strip()
+    webhook = str(os.environ.get(webhook_env, "") if webhook_env else "").strip()
+    secret = str(os.environ.get(secret_env, "") if secret_env else "").strip()
+    if not webhook:
+        webhook = str(dingtalk.get("webhook", "")).strip()
+    if not secret:
+        secret = str(dingtalk.get("secret", "")).strip()
+    return webhook, secret
 
 
 def build_signed_webhook(webhook: str, secret: str) -> str:
@@ -35,12 +48,12 @@ def post_dingtalk_text_message(system_config: dict[str, Any], content: str) -> b
     if not dingtalk.get("enabled", False):
         return False
 
-    webhook = str(dingtalk.get("webhook", "")).strip()
+    webhook, secret = resolve_dingtalk_credentials(dingtalk)
     if not webhook:
         print("[WARN] DingTalk notification is enabled but webhook is empty.")
         return False
 
-    request_url = build_signed_webhook(webhook, str(dingtalk.get("secret", "")).strip())
+    request_url = build_signed_webhook(webhook, secret)
     payload = json.dumps(
         {
             "msgtype": "text",
@@ -61,5 +74,5 @@ def post_dingtalk_text_message(system_config: dict[str, Any], content: str) -> b
             response.read()
         return True
     except Exception as exc:
-        print(f"[WARN] DingTalk notification failed: {exc}")
+        print(f"[WARN] DingTalk notification failed ({type(exc).__name__}).")
         return False

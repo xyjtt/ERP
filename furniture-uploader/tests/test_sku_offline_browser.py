@@ -4,13 +4,24 @@ import sys
 import unittest
 from pathlib import Path
 
+from selenium.common.exceptions import TimeoutException
+from selenium.webdriver.common.keys import Keys
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RPA_ROOT = PROJECT_ROOT / "rpa"
 if str(RPA_ROOT) not in sys.path:
     sys.path.insert(0, str(RPA_ROOT))
 
-from exceptions import OfflineLoginRequiredError, PublishValidationError
+from exceptions import (
+    OfflineIdentityMismatchError,
+    OfflineLoginRequiredError,
+    OfflineRiskControlError,
+    OfflineStoreMismatchError,
+    OfflineTaskNotFoundError,
+    OfflineTaskStateError,
+    PublishValidationError,
+)
 from sku_offline_browser import SkuOfflineBrowser
 
 
@@ -100,10 +111,42 @@ class FakeSuccessDriver:
     def __init__(self, *, current_url: str = "") -> None:
         self.visited_urls: list[str] = []
         self.current_url = current_url
+        self.title = ""
+        self.switch_to = type("SwitchTo", (), {"default_content": lambda self: None})()
 
     def get(self, url: str) -> None:
         self.visited_urls.append(url)
         self.current_url = url
+
+
+class FakeClickableElement:
+    def __init__(self) -> None:
+        self.clicked = False
+
+    def click(self) -> None:
+        self.clicked = True
+
+    def get_attribute(self, name: str) -> str:
+        return ""
+
+
+class FakeSearchInput:
+    def __init__(self, value: str = "") -> None:
+        self.value = value
+        self.keys: list[tuple[object, ...]] = []
+
+    def click(self) -> None:
+        return
+
+    def send_keys(self, *keys: object) -> None:
+        self.keys.append(keys)
+        if keys == (Keys.DELETE,):
+            self.value = ""
+        elif keys != (Keys.CONTROL, "a"):
+            self.value += "".join(str(item) for item in keys)
+
+    def get_attribute(self, name: str) -> str:
+        return self.value if name == "value" else ""
 
 
 class FakeSuccessBrowser(SkuOfflineBrowser):
@@ -124,6 +167,315 @@ class FakeSuccessBrowser(SkuOfflineBrowser):
 
 
 class SkuOfflineBrowserTests(unittest.TestCase):
+    def test_management_search_field_uses_native_keyboard_input(self) -> None:
+        browser = SkuOfflineBrowser({}, PROJECT_ROOT)
+        browser.driver = FakeSuccessDriver()
+        browser.driver.execute_script = lambda *args: None  # type: ignore[attr-defined]
+        browser._pause = lambda seconds: None  # type: ignore[method-assign]
+        browser._fill_text_field = lambda *args, **kwargs: (_ for _ in ()).throw(  # type: ignore[method-assign]
+            AssertionError("JS fallback should not run when native input succeeds")
+        )
+        element = FakeSearchInput("old-value")
+
+        browser._fill_management_search_field(element, "1022879495664")
+
+        self.assertEqual(element.value, "1022879495664")
+        self.assertEqual(
+            element.keys,
+            [(Keys.CONTROL, "a"), (Keys.DELETE,), ("1022879495664",)],
+        )
+
+    def test_management_filter_query_records_official_filter_url(self) -> None:
+        browser = SkuOfflineBrowser({}, PROJECT_ROOT)
+        browser.driver = FakeSuccessDriver()
+        browser.driver.execute_script = lambda script, product_id: (  # type: ignore[attr-defined]
+            "https://offer.1688.com/app/pages-group/manage-home/index.html?"
+            f"q=filterOfferId%3D{product_id}"
+        )
+        context = {"product_id": "1005537490740"}
+
+        browser._open_management_filter_query(context)
+
+        self.assertIn("filterOfferId%3D1005537490740", context["management_filter_query_url"])
+
+    def test_direct_edit_activates_sales_info_section(self) -> None:
+        browser = SkuOfflineBrowser({}, PROJECT_ROOT)
+        browser.driver = FakeSuccessDriver()
+        anchor = FakeClickableElement()
+        browser._wait_for_element = lambda selector, clickable=False: anchor  # type: ignore[method-assign]
+        browser._pause = lambda seconds: None  # type: ignore[method-assign]
+
+        browser._open_edit_page(
+            {"sales_info_anchor": {"by": "xpath", "value": "//*[contains(normalize-space(.), '销售信息')]"}},
+            {"product_id": "732745838005"},
+            prefer_direct=True,
+        )
+
+        self.assertEqual(
+            browser.driver.visited_urls,
+            ["https://offer-new.1688.com/popular/publish.htm?id=732745838005&operator=edit"],
+        )
+        self.assertTrue(anchor.clicked)
+
+    def test_direct_edit_stops_on_deleted_product_error_page(self) -> None:
+        browser = FakeSuccessBrowser(
+            page_text="出错啦！没有找到商品。错误码：PUB_BIZCHECK_PRIMARY_ITEM_DELETE"
+        )
+        context = {"product_id": "1060786095784"}
+
+        with self.assertRaises(OfflineTaskNotFoundError):
+            browser._open_edit_page({}, context, prefer_direct=True)
+
+        self.assertEqual(context["page_error_category"], "task_not_found")
+        self.assertEqual(context["page_error_stage"], "edit_page_load")
+        self.assertEqual(context["edit_page_error_code"], "PUB_BIZCHECK_PRIMARY_ITEM_DELETE")
+
+    def test_direct_edit_marks_product_identity_error_as_route_rejected(self) -> None:
+        browser = FakeSuccessBrowser(
+            page_text="出错啦！错误码：PUB_BIZCHECK_BIZ_IDENTITY_ERROR，请通过商品管理进入商品编辑页面"
+        )
+        context = {"product_id": "1022879495664"}
+
+        with self.assertRaises(OfflineTaskStateError):
+            browser._open_edit_page({}, context, prefer_direct=True)
+
+        self.assertEqual(context["page_error_category"], "edit_route_rejected")
+        self.assertEqual(context["page_error_stage"], "edit_page_load")
+        self.assertEqual(context["edit_page_error_code"], "PUB_BIZCHECK_BIZ_IDENTITY_ERROR")
+
+    def test_management_edit_keeps_product_identity_error_terminal(self) -> None:
+        browser = FakeSuccessBrowser(
+            page_text="出错啦！错误码：PUB_BIZCHECK_BIZ_IDENTITY_ERROR，请通过商品管理进入商品编辑页面"
+        )
+        context = {"product_id": "1022879495664", "edit_entry_mode": "management"}
+
+        with self.assertRaises(OfflineTaskStateError):
+            browser._raise_if_edit_page_unavailable(context)
+
+        self.assertEqual(context["page_error_category"], "product_unavailable")
+
+    def test_task_edit_defaults_to_management_search_path(self) -> None:
+        browser = SkuOfflineBrowser({}, PROJECT_ROOT)
+        calls: list[str] = []
+        browser.open_management_page = lambda config: calls.append("open_management")  # type: ignore[method-assign]
+        browser._assert_store_context = lambda *args, **kwargs: calls.append("assert_store")  # type: ignore[method-assign]
+        browser._switch_into_management_frame = lambda *args: calls.append("switch_frame")  # type: ignore[method-assign]
+        browser._search_product = lambda *args: calls.append("search_product")  # type: ignore[method-assign]
+        browser._open_edit_page = lambda *args, **kwargs: calls.append("open_edit")  # type: ignore[method-assign]
+        context: dict[str, str] = {"product_id": "1022879495664"}
+
+        browser._open_task_edit_page({}, {}, context, {})
+
+        self.assertEqual(
+            calls,
+            ["open_management", "assert_store", "switch_frame", "search_product", "open_edit"],
+        )
+        self.assertEqual(context["edit_entry_mode"], "management")
+
+    def test_task_edit_falls_back_from_rejected_direct_route(self) -> None:
+        browser = SkuOfflineBrowser({}, PROJECT_ROOT)
+        calls: list[str] = []
+        browser.open_management_page = lambda config: calls.append("open_management")  # type: ignore[method-assign]
+        browser._assert_store_context = lambda *args, **kwargs: calls.append("assert_store")  # type: ignore[method-assign]
+        browser._switch_into_management_frame = lambda *args: calls.append("switch_frame")  # type: ignore[method-assign]
+        browser._search_product = lambda *args: calls.append("search_product")  # type: ignore[method-assign]
+
+        def fake_open_edit(selectors: dict[str, str], context: dict[str, str], *, prefer_direct: bool = False) -> None:
+            calls.append("open_direct" if prefer_direct else "open_management_edit")
+            if prefer_direct:
+                context["page_error_category"] = "edit_route_rejected"
+                context["page_error_stage"] = "edit_page_load"
+                context["page_error_text"] = "direct route rejected"
+                context["edit_page_error_code"] = "PUB_BIZCHECK_BIZ_IDENTITY_ERROR"
+                raise OfflineTaskStateError("direct route rejected")
+
+        browser._open_edit_page = fake_open_edit  # type: ignore[method-assign]
+        context: dict[str, str] = {"product_id": "1022879495664"}
+
+        browser._open_task_edit_page({}, {}, context, {"edit_entry_mode": "direct"})
+
+        self.assertEqual(
+            calls,
+            [
+                "open_management",
+                "assert_store",
+                "open_direct",
+                "open_management",
+                "assert_store",
+                "switch_frame",
+                "search_product",
+                "open_management_edit",
+            ],
+        )
+        self.assertEqual(context["edit_entry_mode"], "management")
+        self.assertEqual(context["edit_entry_fallback"], "management")
+        self.assertEqual(context["direct_edit_rejected_code"], "PUB_BIZCHECK_BIZ_IDENTITY_ERROR")
+        self.assertNotIn("page_error_category", context)
+
+    def test_sales_info_activation_recovers_with_cdp_reload(self) -> None:
+        browser = SkuOfflineBrowser({}, PROJECT_ROOT)
+        cdp_calls: list[tuple[str, dict[str, bool]]] = []
+        browser.driver = FakeSuccessDriver()
+        browser.driver.execute_cdp_cmd = lambda method, params: cdp_calls.append((method, params))  # type: ignore[attr-defined]
+        rows = iter([None, object()])
+        browser._find_sku_row_by_runtime_value = lambda context: next(rows)  # type: ignore[method-assign]
+        browser._wait_for_element = lambda selector, clickable=False: (_ for _ in ()).throw(TimeoutException())  # type: ignore[method-assign]
+        browser._pause = lambda seconds: None  # type: ignore[method-assign]
+        context = {"online_sku": "SZT009219N961V01"}
+
+        browser._activate_sales_info_section(
+            {"sales_info_anchor": {"by": "xpath", "value": "//*[contains(., '销售信息')]"}},
+            context,
+        )
+
+        self.assertEqual(cdp_calls, [("Page.reload", {"ignoreCache": True})])
+        self.assertEqual(context["sales_info_activation"], "sku_table_visible_after_reload")
+
+    def test_toggle_sku_uses_runtime_value_row_before_xpath_wait(self) -> None:
+        browser = SkuOfflineBrowser({}, PROJECT_ROOT)
+        browser.driver = FakeSuccessDriver()
+        row = object()
+        calls: list[str] = []
+        browser._find_sku_row_by_runtime_value = lambda context: row  # type: ignore[method-assign]
+        browser._wait_for_element = lambda selector: calls.append("wait")  # type: ignore[method-assign]
+        browser._toggle_found_sku_row = lambda selectors, context, sku_row: sku_row is row  # type: ignore[method-assign]
+
+        changed = browser._toggle_sku_offline(
+            {"sku_row": {"by": "xpath", "value": "//tr[.//input[@value='{online_sku}']]"}},
+            {"online_sku": "DSG005015N11V01"},
+        )
+
+        self.assertTrue(changed)
+        self.assertEqual(calls, [])
+
+    def test_sole_online_sku_is_blocked_before_toggle(self) -> None:
+        browser = SkuOfflineBrowser({}, PROJECT_ROOT)
+        browser.driver = FakeSuccessDriver()
+        browser._read_switch_label = lambda element: "上架"  # type: ignore[method-assign]
+        browser._is_online_state = lambda element, label: True  # type: ignore[method-assign]
+        switch = type(
+            "VisibleSwitch",
+            (),
+            {
+                "is_displayed": lambda self: True,
+                "get_attribute": lambda self, name: "true" if name == "aria-checked" else "",
+            },
+        )()
+        browser.driver.execute_script = lambda script: [switch]  # type: ignore[attr-defined]
+        context: dict[str, object] = {"online_sku": "SZT009219N961V01"}
+
+        with self.assertRaises(PublishValidationError):
+            browser._assert_target_not_sole_online_sku(context)
+
+        self.assertEqual(context["page_error_stage"], "pre_sku_toggle")
+        self.assertEqual(context["page_error_category"], "sole_sku_requires_product_offline")
+        self.assertEqual(context["sku_switch_summary_before"]["visible_switch_count"], 1)
+        self.assertEqual(context["automatic_product_offline_allowed"], "false")
+
+    def test_submit_changes_accepts_success_page_without_submit_trace(self) -> None:
+        browser = SkuOfflineBrowser({}, PROJECT_ROOT)
+        browser.driver = FakeSuccessDriver()
+        submit_element = FakeClickableElement()
+        calls: list[str] = []
+        browser._resolve_selector = lambda selector, context: selector  # type: ignore[method-assign]
+        browser._selector_is_configured = lambda selector: True  # type: ignore[method-assign]
+        browser._check_publish_error_state = lambda *args, **kwargs: None  # type: ignore[method-assign]
+        browser._prepare_pre_submit_backfill = lambda config, context: None  # type: ignore[method-assign]
+        browser._raise_if_inline_validation_present = lambda context, stage_name: None  # type: ignore[method-assign]
+        browser._ensure_target_sku_still_offline = lambda selectors, context: None  # type: ignore[method-assign]
+        browser._install_offline_submit_trace = lambda: None  # type: ignore[method-assign]
+        browser._wait_for_element = lambda selector, clickable=False: submit_element  # type: ignore[method-assign]
+        browser._click_submit_element = lambda element, context: calls.append("click")  # type: ignore[method-assign]
+        browser._pause = lambda seconds: None  # type: ignore[method-assign]
+        browser._click_optional_confirm_button = lambda selector: None  # type: ignore[method-assign]
+
+        def fake_wait_for_success(config: dict[str, object], context: dict[str, str]) -> bool:
+            context["success_signal_source"] = "page"
+            context["success_message"] = "修改成功，您的商品已提交审核"
+            return True
+
+        browser._wait_for_success = fake_wait_for_success  # type: ignore[method-assign]
+        browser._assert_offline_submit_trace = lambda context: (_ for _ in ()).throw(  # type: ignore[method-assign]
+            AssertionError("submit trace should not be required after success page")
+        )
+        context: dict[str, str] = {}
+
+        browser._submit_changes(
+            {"submit_button": {"by": "id", "value": "submitFormButton"}},
+            {"enabled": True},
+            {},
+            {},
+            context,
+        )
+
+        self.assertEqual(calls, ["click"])
+        self.assertEqual(context["success_detected"], "true")
+        self.assertEqual(context["execution_result"], "submitted")
+
+    def test_submit_changes_accepts_success_page_after_dispatch_retry(self) -> None:
+        browser = SkuOfflineBrowser({}, PROJECT_ROOT)
+        browser.driver = FakeSuccessDriver()
+        submit_element = FakeClickableElement()
+        calls: list[str] = []
+        success_results = iter([False, True])
+        browser._resolve_selector = lambda selector, context: selector  # type: ignore[method-assign]
+        browser._selector_is_configured = lambda selector: True  # type: ignore[method-assign]
+        browser._check_publish_error_state = lambda *args, **kwargs: None  # type: ignore[method-assign]
+        browser._prepare_pre_submit_backfill = lambda config, context: None  # type: ignore[method-assign]
+        browser._raise_if_inline_validation_present = lambda context, stage_name: None  # type: ignore[method-assign]
+        browser._ensure_target_sku_still_offline = lambda selectors, context: None  # type: ignore[method-assign]
+        browser._install_offline_submit_trace = lambda: None  # type: ignore[method-assign]
+        browser._wait_for_element = lambda selector, clickable=False: submit_element  # type: ignore[method-assign]
+        browser._click_submit_element = lambda element, context: calls.append("primary_click")  # type: ignore[method-assign]
+        browser._dispatch_submit_button_click = lambda selector, context: calls.append("dispatch_retry")  # type: ignore[method-assign]
+        browser._click_optional_confirm_button = lambda selector: None  # type: ignore[method-assign]
+        browser._pause = lambda seconds: None  # type: ignore[method-assign]
+        browser._wait_for_success = lambda config, context: next(success_results)  # type: ignore[method-assign]
+        browser._assert_offline_submit_trace = lambda context: False  # type: ignore[method-assign]
+        browser._retry_submit_via_trace = lambda context: (_ for _ in ()).throw(  # type: ignore[method-assign]
+            AssertionError("direct retry should not run after the success page appears")
+        )
+        context: dict[str, str] = {}
+
+        browser._submit_changes(
+            {"submit_button": {"by": "id", "value": "submitFormButton"}},
+            {"enabled": True},
+            {},
+            {},
+            context,
+        )
+
+        self.assertEqual(calls, ["primary_click", "dispatch_retry"])
+        self.assertEqual(context["success_detected"], "true")
+        self.assertEqual(context["submit_success_phase"], "after_dispatch_retry")
+        self.assertEqual(context["execution_result"], "submitted")
+
+    def test_ensure_target_sku_still_offline_uses_runtime_row(self) -> None:
+        browser = SkuOfflineBrowser({}, PROJECT_ROOT)
+        browser.driver = FakeSuccessDriver()
+        sku_row = object()
+        switch = object()
+        browser._find_sku_row_by_runtime_value = lambda context: sku_row  # type: ignore[method-assign]
+        browser._wait_for_element = lambda selector: (_ for _ in ()).throw(  # type: ignore[method-assign]
+            AssertionError("XPath fallback should not run when the runtime row exists")
+        )
+        browser._get_row_switch_element = lambda row, selector: switch  # type: ignore[method-assign]
+        browser._read_switch_label = lambda element: "下架"  # type: ignore[method-assign]
+        browser._is_already_offline = lambda element, label: True  # type: ignore[method-assign]
+        browser._ensure_switch_state_stable = lambda **kwargs: None  # type: ignore[method-assign]
+        browser._force_target_sku_offline_in_runtime_state = lambda context: {"supported": False}  # type: ignore[method-assign]
+        context = {"online_sku": "CY001301N35"}
+
+        browser._ensure_target_sku_still_offline(
+            {
+                "sku_row": {"by": "xpath", "value": "//tr[.//input[@value='{online_sku}']]"},
+                "sku_switch": {"by": "css", "value": "button.ant-switch"},
+            },
+            context,
+        )
+
+        self.assertEqual(context["switch_label_before_submit"], "下架")
+
     def test_match_available_sku_supports_case_and_symbol_normalization(self) -> None:
         browser = SkuOfflineBrowser({}, PROJECT_ROOT)
         matched = browser._match_available_sku(
@@ -161,6 +513,70 @@ class SkuOfflineBrowserTests(unittest.TestCase):
         self.assertEqual(context["page_error_stage"], "post_offline_submit")
         self.assertEqual(context["page_error_category"], "business_validation")
         self.assertIn("配送服务为必填项", context["page_error_text"])
+
+    def test_raise_if_inline_validation_classifies_sole_online_sku(self) -> None:
+        browser = SkuOfflineBrowser({}, PROJECT_ROOT)
+        browser._collect_visible_inline_validation_messages = lambda: [  # type: ignore[method-assign]
+            "是否上架: 有产品规格的商品至少要有一个在线状态的sku。"
+        ]
+        context: dict[str, str] = {}
+
+        with self.assertRaises(PublishValidationError):
+            browser._raise_if_inline_validation_present(context, stage_name="pre_offline_submit")
+
+        self.assertEqual(context["page_error_category"], "sole_sku_requires_product_offline")
+        self.assertEqual(context["automatic_product_offline_allowed"], "false")
+
+    def test_raise_if_inline_validation_classifies_campaign_restriction(self) -> None:
+        browser = SkuOfflineBrowser({}, PROJECT_ROOT)
+        browser._collect_visible_inline_validation_messages = lambda: [  # type: ignore[method-assign]
+            "该商品已报名天天特卖活动，活动期间不允许修改SKU上下架状态。"
+        ]
+        context: dict[str, str] = {}
+
+        with self.assertRaises(PublishValidationError):
+            browser._raise_if_inline_validation_present(context, stage_name="pre_offline_submit")
+
+        self.assertEqual(context["page_error_category"], "campaign_restriction")
+        self.assertEqual(context["campaign_restriction_detected"], "true")
+
+    def test_switch_stability_reuses_runtime_sku_row_after_re_render(self) -> None:
+        browser = SkuOfflineBrowser({}, PROJECT_ROOT)
+        browser.driver = FakeSuccessDriver()
+        switch = type(
+            "RuntimeSwitch",
+            (),
+            {
+                "is_displayed": lambda self: True,
+                "get_attribute": lambda self, name: "false" if name == "aria-checked" else "",
+                "text": "",
+            },
+        )()
+        row = type(
+            "RuntimeRow",
+            (),
+            {
+                "is_displayed": lambda self: True,
+                "find_element": lambda self, by, value: switch,
+            },
+        )()
+        browser._find_sku_row_by_runtime_value = lambda context: row  # type: ignore[method-assign]
+        browser.driver.find_elements = lambda *args: (_ for _ in ()).throw(  # type: ignore[attr-defined]
+            AssertionError("static XPath fallback should not run")
+        )
+        context: dict[str, str] = {"online_sku": "CY001301N35"}
+
+        browser._ensure_switch_state_stable(
+            sku_row_selector={"by": "xpath", "value": "//tr[.//input[@value='CY001301N35']]"},
+            switch_selector={"by": "css", "value": "button.ant-switch"},
+            expect_offline=True,
+            context=context,
+            context_key="stable_state",
+            timeout_seconds=1,
+            stable_seconds=0.2,
+        )
+
+        self.assertEqual(context["stable_state"], "aria-checked=false")
 
     def test_raise_if_inline_validation_present_noop_when_empty(self) -> None:
         browser = SkuOfflineBrowser({}, PROJECT_ROOT)
@@ -356,6 +772,26 @@ class SkuOfflineBrowserTests(unittest.TestCase):
         self.assertEqual(context["pre_submit_backfill_status"], "ready")
         self.assertEqual(context["pre_submit_missing_attributes"], [])
 
+    def test_prepare_pre_submit_backfill_delivery_service_only(self) -> None:
+        browser = FakePreSubmitBrowser()
+        browser._ensure_required_delivery_service = lambda context: {  # type: ignore[method-assign]
+            "label": "配送服务",
+            "status": "applied",
+            "value": "送货楼下",
+        }
+        browser._resolve_current_page_category_context = lambda context: (_ for _ in ()).throw(  # type: ignore[method-assign]
+            AssertionError("category backfill should not run in delivery_service_only mode")
+        )
+        context: dict[str, object] = {}
+
+        browser._prepare_pre_submit_backfill(
+            {"enabled": True, "mode": "delivery_service_only"},
+            context,
+        )
+
+        self.assertEqual(context["pre_submit_backfill_status"], "ready")
+        self.assertEqual(context["pre_submit_backfill_actions"][0]["status"], "applied")
+
     def test_resolve_pre_submit_backfill_rules_falls_back_to_direct_rules(self) -> None:
         browser = FakePreSubmitBrowser()
         context = {"platform_category": "unknown_category"}
@@ -477,6 +913,91 @@ class SkuOfflineBrowserTests(unittest.TestCase):
 
         with self.assertRaises(OfflineLoginRequiredError):
             browser._assert_not_redirected_to_login()
+
+    def test_store_context_classifies_login_before_missing_store_selector(self) -> None:
+        browser = SkuOfflineBrowser({}, PROJECT_ROOT)
+        browser.driver = FakeSuccessDriver(current_url="https://login.taobao.com/member/login.jhtml")
+        browser._wait_for_element = lambda selector: (_ for _ in ()).throw(RuntimeError("missing"))  # type: ignore[method-assign]
+        context: dict[str, str] = {}
+
+        with self.assertRaises(OfflineLoginRequiredError):
+            browser._assert_store_context(
+                {"current_store_name": {"by": "css", "value": ".user-name"}},
+                context,
+                required=True,
+            )
+
+        self.assertEqual(context["page_error_category"], "login_required")
+        self.assertEqual(context["page_error_stage"], "login_check")
+
+    def test_assert_edit_page_identity_accepts_matching_product_id(self) -> None:
+        browser = SkuOfflineBrowser({}, PROJECT_ROOT)
+        browser.driver = FakeSuccessDriver(
+            current_url="https://offer-new.1688.com/popular/publish.htm?id=1000406623557&operator=edit"
+        )
+        context = {"product_id": "1000406623557"}
+
+        browser._assert_edit_page_identity(context, {"verify_edit_page_identity": True})
+
+        self.assertEqual(context["edit_page_product_id"], "1000406623557")
+
+    def test_assert_edit_page_identity_rejects_mismatched_product_id(self) -> None:
+        browser = SkuOfflineBrowser({}, PROJECT_ROOT)
+        browser.driver = FakeSuccessDriver(
+            current_url="https://offer-new.1688.com/popular/publish.htm?id=999&operator=edit"
+        )
+        context = {"product_id": "1000406623557"}
+
+        with self.assertRaises(OfflineIdentityMismatchError):
+            browser._assert_edit_page_identity(context, {"verify_edit_page_identity": True})
+
+        self.assertEqual(context["page_error_category"], "identity_mismatch")
+
+    def test_assert_no_risk_control_block_rejects_captcha_url(self) -> None:
+        browser = SkuOfflineBrowser({}, PROJECT_ROOT)
+        browser.driver = FakeSuccessDriver(current_url="https://login.1688.com/captcha")
+        context: dict[str, str] = {}
+
+        with self.assertRaises(OfflineRiskControlError):
+            browser._assert_no_risk_control_block(context)
+
+        self.assertEqual(context["page_error_category"], "risk_control")
+
+    def test_assert_store_context_required_wraps_missing_element(self) -> None:
+        browser = SkuOfflineBrowser({}, PROJECT_ROOT)
+        browser.driver = FakeSuccessDriver()
+        browser.driver.switch_to = type("SwitchTo", (), {"default_content": lambda self: None})()
+        browser._wait_for_element = lambda selector: (_ for _ in ()).throw(RuntimeError("missing"))  # type: ignore[method-assign]
+
+        with self.assertRaises(OfflineStoreMismatchError):
+            browser._assert_store_context(
+                {"current_store_name": {"by": "css", "value": ".user-name"}},
+                {"store_name": "阿里巴巴-常州工莱家具"},
+                required=True,
+            )
+
+    def test_assert_store_context_accepts_configured_store_alias(self) -> None:
+        browser = SkuOfflineBrowser({}, PROJECT_ROOT)
+        browser.driver = FakeSuccessDriver(current_url="https://work.1688.com/")
+        current_store = type("StoreElement", (), {"text": "乐畅家具"})()
+        browser._wait_for_element = lambda selector: current_store  # type: ignore[method-assign]
+        context: dict[str, object] = {"store_name": "阿里巴巴-常州乐畅家居有限公司"}
+        browser._apply_account_binding_context(
+            context,
+            {
+                "account_key": "lechang",
+                "store_aliases": ["常州乐畅家居有限公司", "乐畅家具"],
+            },
+        )
+
+        browser._assert_store_context(
+            {"current_store_name": {"by": "css", "value": ".user-name"}},
+            context,
+            required=True,
+        )
+
+        self.assertEqual(context["current_store_name"], "乐畅家具")
+        self.assertNotIn("page_error_category", context)
 
     def test_wait_for_success_detects_review_success_page_text(self) -> None:
         browser = FakeSuccessBrowser(page_text="修改成功，您的商品已提交审核，请到未上架产品-审核中列表查看。")

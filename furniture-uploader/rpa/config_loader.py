@@ -18,7 +18,7 @@ def load_json_with_local_override(path: str | Path) -> dict[str, Any]:
 
 def load_json_file(path: str | Path) -> dict[str, Any]:
     config_path = Path(path)
-    with config_path.open("r", encoding="utf-8") as file:
+    with config_path.open("r", encoding="utf-8-sig") as file:
         return json.load(file)
 
 

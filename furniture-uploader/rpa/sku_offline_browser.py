@@ -4,14 +4,18 @@ import json
 import time
 import re
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 
 from browser_rpa import BY_MAPPING, BrowserRPA
 from exceptions import (
     OfflineLoginRequiredError,
+    OfflineIdentityMismatchError,
+    OfflineRiskControlError,
     OfflineStoreMismatchError,
     OfflineTaskNotFoundError,
     OfflineTaskStateError,
@@ -19,7 +23,7 @@ from exceptions import (
     PublishValidationError,
 )
 from jst_attribute_mapper import infer_platform_category_key
-from sku_offline_tasks import OfflineTask
+from sku_offline_tasks import OfflineTask, store_name_matches
 
 
 class SkuOfflineBrowser(BrowserRPA):
@@ -41,6 +45,8 @@ class SkuOfflineBrowser(BrowserRPA):
         self,
         system_config: dict[str, Any],
         task: OfflineTask,
+        *,
+        account_binding: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if not self.driver:
             raise RuntimeError("Browser has not been opened.")
@@ -50,21 +56,22 @@ class SkuOfflineBrowser(BrowserRPA):
         error_detection = dict(system_config.get("workflow", {}).get("error_detection", {}))
         pre_submit_backfill = dict(system_config.get("workflow", {}).get("pre_submit_backfill", {}))
         post_submit_verification = dict(system_config.get("workflow", {}).get("post_submit_verification", {}))
+        safety_config = dict(system_config.get("execution", {}).get("safety", {}))
         context = task.to_context()
+        self._apply_account_binding_context(context, account_binding or {})
         self.last_result_context = context
         main_window = self.driver.current_window_handle
 
         try:
-            product_id = str(context.get("product_id", "")).strip()
-            if product_id:
-                self._open_edit_page(selectors, context, prefer_direct=True)
-            else:
-                self.open_management_page(system_config)
-                self._assert_store_context(selectors, context)
-                self._switch_into_management_frame(selectors, context)
-                self._search_product(selectors, context)
-                self._open_edit_page(selectors, context)
+            self._open_task_edit_page(
+                system_config,
+                selectors,
+                context,
+                safety_config,
+            )
             self._assert_not_redirected_to_login()
+            self._assert_no_risk_control_block(context)
+            self._assert_edit_page_identity(context, safety_config)
             changed = self._toggle_sku_offline(selectors, context)
             if changed:
                 self._submit_changes(selectors, success_detection, error_detection, pre_submit_backfill, context)
@@ -83,29 +90,204 @@ class SkuOfflineBrowser(BrowserRPA):
         finally:
             self._restore_management_window(main_window)
 
+    def _open_task_edit_page(
+        self,
+        system_config: dict[str, Any],
+        selectors: dict[str, Any],
+        context: dict[str, Any],
+        safety_config: dict[str, Any],
+    ) -> None:
+        self.open_management_page(system_config)
+        self._assert_store_context(
+            selectors,
+            context,
+            required=bool(safety_config.get("require_store_context_selector", True)),
+        )
+
+        edit_entry_mode = str(safety_config.get("edit_entry_mode", "management")).strip().lower()
+        if edit_entry_mode not in {"management", "direct"}:
+            raise OfflineTaskStateError(f"Unsupported 1688 edit_entry_mode: {edit_entry_mode!r}.")
+
+        if edit_entry_mode == "direct":
+            try:
+                self._open_edit_page(selectors, context, prefer_direct=True)
+                return
+            except OfflineTaskStateError:
+                if context.get("page_error_category") != "edit_route_rejected":
+                    raise
+                context["direct_edit_rejected_code"] = context.pop("edit_page_error_code", "")
+                context["direct_edit_rejected_text"] = context.pop("page_error_text", "")
+                context.pop("page_error_category", None)
+                context.pop("page_error_stage", None)
+                context["edit_entry_fallback"] = "management"
+                self.open_management_page(system_config)
+                self._assert_store_context(
+                    selectors,
+                    context,
+                    required=bool(safety_config.get("require_store_context_selector", True)),
+                )
+
+        context["edit_entry_mode"] = "management"
+        self._switch_into_management_frame(selectors, context)
+        self._search_product(selectors, context)
+        self._open_edit_page(selectors, context)
+
     def _assert_store_context(
         self,
         selectors: dict[str, Any],
         context: dict[str, Any],
+        *,
+        required: bool = False,
     ) -> None:
         if not self.driver:
             raise RuntimeError("Browser has not been opened.")
         self.driver.switch_to.default_content()
+        self._assert_not_redirected_to_login(context)
         selector = self._resolve_selector(selectors.get("current_store_name", {}), context)
         if not self._selector_is_configured(selector):
+            if required:
+                raise OfflineStoreMismatchError("current_store_name selector is required but not configured.")
             return
-        current_store_name = self._wait_for_element(selector).text.strip()
+        try:
+            current_store_name = self._wait_for_element(selector).text.strip()
+        except Exception as exc:
+            if required:
+                raise OfflineStoreMismatchError("Unable to verify current 1688 store before offline execution.") from exc
+            raise
         context["current_store_name"] = current_store_name
         expected_store_name = context.get("store_name", "").strip()
-        if (
-            current_store_name
-            and expected_store_name
-            and expected_store_name not in current_store_name
-            and current_store_name not in expected_store_name
+        raw_aliases = context.get("expected_store_aliases", [])
+        expected_store_aliases = (
+            [str(item).strip() for item in raw_aliases if str(item).strip()]
+            if isinstance(raw_aliases, list)
+            else []
+        )
+        if current_store_name and expected_store_name and not store_name_matches(
+            current_store_name,
+            expected_store_name,
+            aliases=expected_store_aliases,
         ):
-            raise OfflineStoreMismatchError(
-                f"Current store '{current_store_name}' does not match task store '{expected_store_name}'."
+            message = f"Current store '{current_store_name}' does not match task store '{expected_store_name}'."
+            self._annotate_page_error_context(
+                context,
+                stage_name="store_context_check",
+                error_text=message,
+                error_category="store_mismatch",
             )
+            raise OfflineStoreMismatchError(message)
+
+    def _apply_account_binding_context(
+        self,
+        context: dict[str, Any],
+        account_binding: dict[str, Any],
+    ) -> None:
+        if not account_binding:
+            return
+        account_key = str(account_binding.get("account_key", "")).strip()
+        browser_profile_dir = str(
+            account_binding.get("browser_profile_dir", account_binding.get("profile_dir", ""))
+        ).strip()
+        if account_key:
+            context["expected_account_key"] = account_key
+        if browser_profile_dir:
+            context["expected_browser_profile_dir"] = browser_profile_dir
+        store_aliases = account_binding.get("store_aliases", account_binding.get("aliases", []))
+        if isinstance(store_aliases, list):
+            context["expected_store_aliases"] = [
+                str(item).strip()
+                for item in store_aliases
+                if str(item).strip()
+            ]
+
+    def _assert_no_risk_control_block(self, context: dict[str, Any]) -> None:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        current_url = str(self.driver.current_url or "").strip().lower()
+        url_markers = ["captcha", "punish", "risk", "security", "awsc"]
+        if any(marker in current_url for marker in url_markers):
+            self._annotate_page_error_context(
+                context,
+                stage_name="risk_control_check",
+                error_text=f"risk/captcha marker detected in URL: {current_url[:180]}",
+                error_category="risk_control",
+            )
+            raise OfflineRiskControlError("1688 页面进入验证码或风控校验，停止当前店铺。")
+
+        body_text = self._extract_page_body_text()
+        risk_keywords = [
+            "请完成验证",
+            "安全验证",
+            "拖动滑块",
+            "验证码",
+            "账户安全",
+            "访问受限",
+            "验证身份",
+        ]
+        hit = next((keyword for keyword in risk_keywords if keyword in body_text), "")
+        if hit:
+            self._annotate_page_error_context(
+                context,
+                stage_name="risk_control_check",
+                error_text=hit,
+                error_category="risk_control",
+            )
+            raise OfflineRiskControlError("1688 页面要求验证码或安全验证，停止当前店铺。")
+
+    def _assert_edit_page_identity(
+        self,
+        context: dict[str, Any],
+        safety_config: dict[str, Any],
+    ) -> None:
+        if not bool(safety_config.get("verify_edit_page_identity", True)):
+            return
+        expected_product_id = str(context.get("product_id", "")).strip()
+        if not expected_product_id:
+            raise OfflineIdentityMismatchError("Missing product_id before opening 1688 edit page.")
+
+        current_product_id = self._extract_product_id_from_current_url()
+        context["edit_page_product_id"] = current_product_id
+        if bool(safety_config.get("verify_edit_url_product_id", True)):
+            if not current_product_id:
+                self._annotate_page_error_context(
+                    context,
+                    stage_name="edit_page_identity",
+                    error_text="missing product id in edit page URL",
+                    error_category="identity_mismatch",
+                )
+                raise OfflineIdentityMismatchError("1688 edit page URL does not contain a product id.")
+            if current_product_id != expected_product_id:
+                self._annotate_page_error_context(
+                    context,
+                    stage_name="edit_page_identity",
+                    error_text=f"expected product_id={expected_product_id}, actual={current_product_id}",
+                    error_category="identity_mismatch",
+                )
+                raise OfflineIdentityMismatchError(
+                    f"1688 edit page product id mismatch: expected {expected_product_id}, actual {current_product_id}."
+                )
+
+        if bool(safety_config.get("verify_product_id_in_page_body", False)):
+            body_text = self._extract_page_body_text()
+            if expected_product_id not in body_text:
+                self._annotate_page_error_context(
+                    context,
+                    stage_name="edit_page_identity",
+                    error_text=f"product id {expected_product_id} not found in page body",
+                    error_category="identity_mismatch",
+                )
+                raise OfflineIdentityMismatchError(
+                    f"Product id '{expected_product_id}' was not visible on the edit page."
+                )
+
+    def _extract_product_id_from_current_url(self) -> str:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        current_url = str(self.driver.current_url or "").strip()
+        try:
+            values = parse_qs(urlparse(current_url).query).get("id", [])
+        except Exception:
+            return ""
+        return str(values[0]).strip() if values else ""
 
     def _switch_into_management_frame(
         self,
@@ -119,38 +301,107 @@ class SkuOfflineBrowser(BrowserRPA):
         if self._selector_is_configured(frame_selector):
             iframe = self._wait_for_element(frame_selector)
             self.driver.switch_to.frame(iframe)
+            context["edit_entry_stage"] = "management_frame_entered"
 
     def _search_product(
         self,
         selectors: dict[str, Any],
         context: dict[str, Any],
     ) -> None:
+        self._wait_for_management_search_ready(context)
         product_id_input = self._resolve_selector(selectors.get("product_id_input", {}), context)
         if not self._selector_is_configured(product_id_input):
             raise ValueError("product_id_input selector is not configured.")
         input_element = self._wait_for_element(product_id_input, clickable=True)
-        self._fill_text_field(input_element, context.get("product_id", ""), clear=True)
+        self._fill_management_search_field(input_element, context.get("product_id", ""))
 
         title_sku_input = self._resolve_selector(selectors.get("title_sku_input", {}), context)
         if self._selector_is_configured(title_sku_input):
             title_sku_element = self._wait_for_element(title_sku_input, clickable=True)
-            self._fill_text_field(title_sku_element, "", clear=True)
+            self._fill_management_search_field(title_sku_element, "")
 
         search_button = self._resolve_selector(selectors.get("search_button", {}), context)
         if not self._selector_is_configured(search_button):
             raise ValueError("search_button selector is not configured.")
-        self._wait_for_element(search_button, clickable=True).click()
-        self._pause(1.0)
+        input_element.send_keys(Keys.ENTER)
+        context["management_search_submit_method"] = "enter"
+        context["edit_entry_stage"] = "management_search_submitted"
+        self._pause(2.0)
 
         result_row = self._resolve_selector(selectors.get("product_result_row", {}), context)
         if self._selector_is_configured(result_row):
-            self._wait_for_element(result_row)
+            try:
+                self._wait_for_element(result_row)
+            except TimeoutException:
+                context["management_search_retry"] = "query_url"
+                self._open_management_filter_query(context)
+                self._pause(4.0)
+                self._wait_for_management_search_ready(context)
+                self._wait_for_element(result_row)
+            context["edit_entry_stage"] = "management_product_matched"
         else:
             body_text = self.driver.find_element(By.TAG_NAME, "body").text
             if context.get("product_id", "") not in body_text:
                 raise OfflineTaskNotFoundError(
                     f"Product '{context.get('product_id', '')}' was not found on the management page."
                 )
+
+    def _wait_for_management_search_ready(self, context: dict[str, Any]) -> None:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        timeout = float(self.browser_config.get("explicit_wait_seconds", 20))
+        WebDriverWait(self.driver, timeout).until(
+            lambda driver: bool(
+                driver.execute_script(
+                    """
+                    const button = document.querySelector('button[data-click="search"]');
+                    const inputs = document.querySelectorAll('.search-field input.ant-input');
+                    const tableReady = document.querySelector('table') || document.querySelector('.ant-table');
+                    return button && inputs.length >= 2 && tableReady;
+                    """
+                )
+            )
+        )
+        context["edit_entry_stage"] = "management_search_ready"
+
+    def _open_management_filter_query(self, context: dict[str, Any]) -> None:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        product_id = str(context.get("product_id", "")).strip()
+        if not product_id:
+            raise OfflineTaskNotFoundError("Missing product_id for the 1688 management filter query.")
+        target_url = self.driver.execute_script(
+            """
+            const productId = String(arguments[0] || '').trim();
+            const url = new URL(window.location.href);
+            url.searchParams.set('q', `filterOfferId=${productId}`);
+            window.location.assign(url.toString());
+            return url.toString();
+            """,
+            product_id,
+        )
+        context["management_filter_query_url"] = str(target_url or "")
+
+    def _fill_management_search_field(self, element: Any, value: Any) -> None:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        target_value = str(value or "")
+        try:
+            self.driver.execute_script(
+                "arguments[0].scrollIntoView({block: 'center', inline: 'nearest'});",
+                element,
+            )
+            element.click()
+            element.send_keys(Keys.CONTROL, "a")
+            element.send_keys(Keys.DELETE)
+            if target_value:
+                element.send_keys(target_value)
+            self._pause(0.3)
+            if str(element.get_attribute("value") or "") == target_value:
+                return
+        except Exception:
+            pass
+        self._fill_text_field(element, target_value, clear=True)
 
     def _open_edit_page(
         self,
@@ -163,9 +414,13 @@ class SkuOfflineBrowser(BrowserRPA):
         if prefer_direct and product_id:
             if not self.driver:
                 raise RuntimeError("Browser has not been opened.")
+            context["edit_entry_mode"] = "direct"
             self.driver.switch_to.default_content()
             self.driver.get(f"https://offer-new.1688.com/popular/publish.htm?id={product_id}&operator=edit")
             self._pause(6.0)
+            self._raise_if_edit_page_unavailable(context)
+            self._activate_sales_info_section(selectors, context)
+            context["edit_entry_stage"] = "edit_page_ready"
             return
 
         result_row_selector = self._resolve_selector(selectors.get("product_result_row", {}), context)
@@ -179,6 +434,7 @@ class SkuOfflineBrowser(BrowserRPA):
                 str(edit_button_in_row.get("value", "")).strip(),
             )
             self.driver.execute_script("arguments[0].click();", edit_button)
+            context["edit_entry_stage"] = "management_edit_clicked"
         else:
             edit_button_selector = self._resolve_selector(selectors.get("edit_button", {}), context)
             if not self._selector_is_configured(edit_button_selector):
@@ -188,19 +444,108 @@ class SkuOfflineBrowser(BrowserRPA):
         self._switch_to_newest_window(before_handles)
         self._pause(1.5)
 
-        sales_info_anchor = self._resolve_selector(selectors.get("sales_info_anchor", {}), context)
-        if self._selector_is_configured(sales_info_anchor):
-            self._wait_for_element(sales_info_anchor, clickable=True).click()
-            self._pause(0.5)
+        self._raise_if_edit_page_unavailable(context)
+        self._activate_sales_info_section(selectors, context)
+        context["edit_entry_stage"] = "edit_page_ready"
 
-    def _assert_not_redirected_to_login(self) -> None:
+    def _raise_if_edit_page_unavailable(self, context: dict[str, Any]) -> None:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+
+        body_text = self._extract_page_body_text()
+        try:
+            page_source = str(self.driver.page_source or "")
+        except Exception:
+            page_source = ""
+        page_content = f"{body_text}\n{page_source}"
+        product_id = str(context.get("product_id", "")).strip()
+
+        if "PUB_BIZCHECK_PRIMARY_ITEM_DELETE" in page_content or "没有找到商品" in page_content:
+            error_code = "PUB_BIZCHECK_PRIMARY_ITEM_DELETE"
+            error_text = f"没有找到商品（{error_code}）"
+            context["edit_page_error_code"] = error_code
+            context["page_error_category"] = "task_not_found"
+            context["page_error_stage"] = "edit_page_load"
+            context["page_error_text"] = error_text
+            raise OfflineTaskNotFoundError(
+                f"Product '{product_id}' was not found or has been deleted on 1688 ({error_code})."
+            )
+
+        if "PUB_BIZCHECK_BIZ_IDENTITY_ERROR" in page_content:
+            error_code = "PUB_BIZCHECK_BIZ_IDENTITY_ERROR"
+            direct_entry = context.get("edit_entry_mode") == "direct"
+            error_text = (
+                f"直达编辑入口被拒绝，需从商品管理进入（{error_code}）"
+                if direct_entry
+                else f"从商品管理进入后仍无法编辑当前商品（{error_code}）"
+            )
+            context["edit_page_error_code"] = error_code
+            context["page_error_category"] = (
+                "edit_route_rejected" if direct_entry else "product_unavailable"
+            )
+            context["page_error_stage"] = "edit_page_load"
+            context["page_error_text"] = error_text
+            raise OfflineTaskStateError(
+                f"Product '{product_id}' edit entry was rejected by 1688 ({error_code})."
+            )
+
+    def _activate_sales_info_section(
+        self,
+        selectors: dict[str, Any],
+        context: dict[str, Any],
+    ) -> None:
+        sales_info_anchor = self._resolve_selector(selectors.get("sales_info_anchor", {}), context)
+        if not self._selector_is_configured(sales_info_anchor):
+            return
+        try:
+            if self._find_sku_row_by_runtime_value(context) is not None:
+                context["sales_info_activation"] = "sku_table_already_visible"
+                return
+        except Exception:
+            pass
+        try:
+            self._wait_for_element(sales_info_anchor, clickable=True).click()
+        except TimeoutException:
+            context["sales_info_activation_retry"] = "cdp_reload"
+            try:
+                self.driver.execute_cdp_cmd("Page.reload", {"ignoreCache": True})
+            except Exception as exc:
+                context["sales_info_activation_reload_error"] = str(exc)[:240]
+            self._pause(5.0)
+            try:
+                if self._find_sku_row_by_runtime_value(context) is not None:
+                    context["sales_info_activation"] = "sku_table_visible_after_reload"
+                    return
+            except Exception:
+                pass
+            self._wait_for_element(sales_info_anchor, clickable=True).click()
+        context["sales_info_activation"] = "anchor_clicked"
+        self._pause(0.5)
+
+    def _assert_not_redirected_to_login(self, context: dict[str, Any] | None = None) -> None:
         if not self.driver:
             raise RuntimeError("Browser has not been opened.")
         current_url = str(self.driver.current_url or "").strip().lower()
         if "login.taobao.com" in current_url:
-            raise OfflineLoginRequiredError("1688 登录态已失效，当前页面被重定向到登录页，请重新登录后重试。")
+            message = "1688 登录态已失效，当前页面被重定向到登录页，请重新登录后重试。"
+            if context is not None:
+                self._annotate_page_error_context(
+                    context,
+                    stage_name="login_check",
+                    error_text=message,
+                    error_category="login_required",
+                )
+            raise OfflineLoginRequiredError(message)
         if "login.1688.com" in current_url and "publish.htm" not in current_url and "work.1688.com" not in current_url:
-            raise OfflineLoginRequiredError("1688 登录态已失效，当前页面停留在登录流程，请重新登录后重试。")
+            message = "1688 登录态已失效，当前页面停留在登录流程，请重新登录后重试。"
+            if context is not None:
+                self._annotate_page_error_context(
+                    context,
+                    stage_name="login_check",
+                    error_text=message,
+                    error_category="login_required",
+                )
+            raise OfflineLoginRequiredError(message)
 
     def _toggle_sku_offline(
         self,
@@ -210,6 +555,9 @@ class SkuOfflineBrowser(BrowserRPA):
         sku_row_selector = self._resolve_selector(selectors.get("sku_row", {}), context)
         if not self._selector_is_configured(sku_row_selector):
             raise ValueError("sku_row selector is not configured.")
+        sku_row = self._find_sku_row_by_runtime_value(context)
+        if sku_row is not None:
+            return self._toggle_found_sku_row(selectors, context, sku_row)
         try:
             sku_row = self._wait_for_element(sku_row_selector)
         except TimeoutException as exc:
@@ -224,6 +572,12 @@ class SkuOfflineBrowser(BrowserRPA):
                 if fallback_sku:
                     fallback_context = dict(context)
                     fallback_context["online_sku"] = fallback_sku
+                    sku_row = self._find_sku_row_by_runtime_value(fallback_context)
+                    if sku_row is not None:
+                        context["online_sku_requested"] = str(context.get("online_sku", "")).strip()
+                        context["online_sku"] = fallback_sku
+                        context["online_sku_match_mode"] = "normalized_exact"
+                        return self._toggle_found_sku_row(selectors, context, sku_row)
                     fallback_selector = self._resolve_selector(selectors.get("sku_row", {}), fallback_context)
                     if self._selector_is_configured(fallback_selector):
                         try:
@@ -245,6 +599,36 @@ class SkuOfflineBrowser(BrowserRPA):
             raise
 
         return self._toggle_found_sku_row(selectors, context, sku_row)
+
+    def _find_sku_row_by_runtime_value(self, context: dict[str, Any]) -> Any | None:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        target_sku = str(context.get("online_sku", "")).strip()
+        if not target_sku:
+            return None
+        return self.driver.execute_script(
+            """
+            const target = String(arguments[0] || '').trim();
+            const normalizedTarget = target.replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+            if (!normalizedTarget) return null;
+            const rows = Array.from(document.querySelectorAll('#guid-skuTable tbody tr, table tbody tr'));
+            for (const row of rows) {
+              const values = Array.from(row.querySelectorAll('input, textarea'))
+                .map((node) => String(node.value || '').trim())
+                .filter(Boolean);
+              const rowText = String(row.innerText || '').trim();
+              if (rowText) values.push(rowText);
+              for (const value of values) {
+                const normalizedValue = String(value || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+                if (value === target || normalizedValue === normalizedTarget) {
+                  return row;
+                }
+              }
+            }
+            return null;
+            """,
+            target_sku,
+        )
 
     def _toggle_found_sku_row(
         self,
@@ -272,6 +656,7 @@ class SkuOfflineBrowser(BrowserRPA):
                 f"Unable to determine current switch state for SKU '{context.get('online_sku', '')}'."
             )
 
+        self._assert_target_not_sole_online_sku(context)
         self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", switch_element)
         self.driver.execute_script("arguments[0].click();", switch_element)
         self._pause(0.8)
@@ -284,6 +669,60 @@ class SkuOfflineBrowser(BrowserRPA):
         )
         context["execution_result"] = "offline_toggled"
         return True
+
+    def _assert_target_not_sole_online_sku(self, context: dict[str, Any]) -> None:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        switch_elements = self.driver.execute_script(
+            """
+            return Array.from(document.querySelectorAll('button[role="switch"].ant-switch'))
+              .filter((element) => {
+                const row = element.closest('tr');
+                if (!row) return false;
+                return Array.from(row.querySelectorAll('input, textarea'))
+                  .some((input) => String(input.value || '').trim());
+              });
+            """
+        )
+        if not isinstance(switch_elements, list):
+            switch_elements = []
+        visible_states: list[dict[str, Any]] = []
+        for element in switch_elements:
+            try:
+                if not element.is_displayed():
+                    continue
+                label = self._read_switch_label(element)
+                visible_states.append(
+                    {
+                        "label": label,
+                        "aria_checked": str(element.get_attribute("aria-checked") or ""),
+                        "online": self._is_online_state(element, label),
+                    }
+                )
+            except Exception:
+                continue
+
+        summary = {
+            "visible_switch_count": len(visible_states),
+            "online_switch_count": sum(1 for item in visible_states if item["online"]),
+            "states": visible_states,
+        }
+        context["sku_switch_summary_before"] = summary
+        if summary["visible_switch_count"] != 1 or summary["online_switch_count"] != 1:
+            return
+
+        error_text = (
+            "目标 SKU 是该商品唯一在线 SKU，1688 要求至少保留一个在线 SKU；"
+            "脚本禁止自动整商品下架。"
+        )
+        context["automatic_product_offline_allowed"] = "false"
+        self._annotate_page_error_context(
+            context,
+            stage_name="pre_sku_toggle",
+            error_text=error_text,
+            error_category="sole_sku_requires_product_offline",
+        )
+        raise PublishValidationError(error_text)
 
     def _collect_visible_sku_codes(self) -> list[str]:
         if not self.driver:
@@ -345,20 +784,27 @@ class SkuOfflineBrowser(BrowserRPA):
         )
         try:
             self._prepare_pre_submit_backfill(pre_submit_backfill, context)
+            self._raise_if_inline_validation_present(context, stage_name="pre_offline_submit")
         except PublishValidationError:
             self._revert_unsaved_sku_toggle(selectors, context)
             raise
-        self._raise_if_inline_validation_present(context, stage_name="pre_offline_submit")
         self._ensure_target_sku_still_offline(selectors, context)
         self._install_offline_submit_trace()
         submit_element = self._wait_for_element(submit_button, clickable=True)
         context["submit_button_disabled_before_click"] = str(submit_element.get_attribute("disabled") or "")
         context["submit_button_class_before_click"] = str(submit_element.get_attribute("class") or "")
-        submit_element.click()
+        self._click_submit_element(submit_element, context)
         self._pause(1.0)
 
         confirm_button = self._resolve_selector(selectors.get("confirm_button", {}), context)
         self._click_optional_confirm_button(confirm_button)
+
+        if self._record_submit_success_if_detected(
+            success_detection,
+            context,
+            phase="after_primary_click",
+        ):
+            return
 
         self._check_publish_error_state(
             error_detection,
@@ -373,6 +819,12 @@ class SkuOfflineBrowser(BrowserRPA):
             self._dispatch_submit_button_click(submit_button, context)
             self._pause(1.0)
             self._click_optional_confirm_button(confirm_button)
+            if self._record_submit_success_if_detected(
+                success_detection,
+                context,
+                phase="after_dispatch_retry",
+            ):
+                return
             self._check_publish_error_state(
                 error_detection,
                 context=context,
@@ -386,6 +838,12 @@ class SkuOfflineBrowser(BrowserRPA):
             context["submit_direct_retry"] = direct_submit_result
             trace_detected = bool(direct_submit_result.get("ok"))
         if not trace_detected:
+            if self._record_submit_success_if_detected(
+                success_detection,
+                context,
+                phase="after_trace_miss",
+            ):
+                return
             raise PublishSubmitError(
                 "Submit button was clicked but no submit request was captured. "
                 "The page likely blocked submit due to hidden validation or disabled state."
@@ -395,6 +853,23 @@ class SkuOfflineBrowser(BrowserRPA):
         if bool(success_detection.get("required", False)) and not success_detected:
             raise PublishSubmitError("Did not detect the configured success signal after submitting offline changes.")
         context["execution_result"] = "submitted"
+
+    def _record_submit_success_if_detected(
+        self,
+        success_detection: dict[str, Any],
+        context: dict[str, Any],
+        *,
+        phase: str,
+    ) -> bool:
+        if not success_detection or not bool(success_detection.get("enabled", True)):
+            return False
+        success_detected = self._wait_for_success(success_detection, context)
+        context["success_detected"] = "true" if success_detected else "false"
+        if not success_detected:
+            return False
+        context["submit_success_phase"] = phase
+        context["execution_result"] = "submitted"
+        return True
 
     def _ensure_target_sku_still_offline(
         self,
@@ -406,7 +881,9 @@ class SkuOfflineBrowser(BrowserRPA):
         sku_row_selector = self._resolve_selector(selectors.get("sku_row", {}), context)
         if not self._selector_is_configured(sku_row_selector):
             raise ValueError("sku_row selector is not configured.")
-        sku_row = self._wait_for_element(sku_row_selector)
+        sku_row = self._find_sku_row_by_runtime_value(context)
+        if sku_row is None:
+            sku_row = self._wait_for_element(sku_row_selector)
 
         switch_selector = selectors.get("sku_switch", {})
         if not switch_selector:
@@ -439,7 +916,9 @@ class SkuOfflineBrowser(BrowserRPA):
                 raise OfflineTaskStateError(
                     f"Runtime skuTable status is not offline before submit for SKU '{context.get('online_sku', '')}'."
                 )
-        refreshed_row = self._wait_for_element(sku_row_selector)
+        refreshed_row = self._find_sku_row_by_runtime_value(context)
+        if refreshed_row is None:
+            refreshed_row = self._wait_for_element(sku_row_selector)
         refreshed_switch = self._get_row_switch_element(refreshed_row, switch_selector)
         context["switch_label_reasserted_before_submit"] = self._read_switch_label(refreshed_switch)
 
@@ -469,11 +948,33 @@ class SkuOfflineBrowser(BrowserRPA):
                     return
                 normalized_messages = normalized_recheck
         error_text = " | ".join(normalized_messages[:3])
+        sole_sku_blocked = any(
+            "至少要有一个在线状态的sku" in message.replace(" ", "").lower()
+            for message in normalized_messages
+        )
+        campaign_blocked = any(
+            "天天特卖" in message
+            or (
+                any(keyword in message for keyword in ("活动期间", "已报名", "参加活动", "活动商品"))
+                and any(keyword in message for keyword in ("不允许", "不能", "无法", "限制", "请先退出"))
+            )
+            for message in normalized_messages
+        )
+        if sole_sku_blocked:
+            error_category = "sole_sku_requires_product_offline"
+        elif campaign_blocked:
+            error_category = "campaign_restriction"
+        else:
+            error_category = "business_validation"
+        if sole_sku_blocked:
+            context["automatic_product_offline_allowed"] = "false"
+        if campaign_blocked:
+            context["campaign_restriction_detected"] = "true"
         self._annotate_page_error_context(
             context,
             stage_name=stage_name,
             error_text=error_text,
-            error_category="business_validation",
+            error_category=error_category,
         )
         raise PublishValidationError(f"{stage_name} blocked by inline validation: {error_text}")
 
@@ -500,6 +1001,11 @@ class SkuOfflineBrowser(BrowserRPA):
                     '\\u8bf7\\u5b8c\\u5584',
                     '\\u8bf7\\u586b\\u5199',
                     '\\u4e0d\\u6ee1\\u8db3\\u8981\\u6c42',
+                    '\\u81f3\\u5c11\\u8981\\u6709\\u4e00\\u4e2a\\u5728\\u7ebf\\u72b6\\u6001',
+                    '\\u5929\\u5929\\u7279\\u5356',
+                    '\\u6d3b\\u52a8\\u671f\\u95f4',
+                    '\\u5df2\\u62a5\\u540d',
+                    '\\u53c2\\u52a0\\u6d3b\\u52a8',
                     '\\u8bf7\\u4fee\\u6539',
                     '\\u9519\\u8bef',
                     '\\u6821\\u9a8c',
@@ -509,6 +1015,7 @@ class SkuOfflineBrowser(BrowserRPA):
                 const selectors = [
                   '#guid-catProp .prop-error-message .message-span',
                   '#guid-catProp .modern-message .message-span',
+                  '#guid-processingSkuPropTable .modern-message .message-span',
                   '#guid-customExtraService .modern-message .message-span',
                   '#guid-buyerProtection .modern-message .message-span',
                   '#guid-logistics .modern-message .message-span',
@@ -721,7 +1228,8 @@ class SkuOfflineBrowser(BrowserRPA):
         stable_since = 0.0
         last_label = ""
         while True:
-            candidate_rows = self.driver.find_elements(row_by, row_value)
+            runtime_row = self._find_sku_row_by_runtime_value(context)
+            candidate_rows = [runtime_row] if runtime_row is not None else self.driver.find_elements(row_by, row_value)
             switch_element = None
             for row in candidate_rows:
                 try:
@@ -736,7 +1244,9 @@ class SkuOfflineBrowser(BrowserRPA):
 
             if switch_element is not None:
                 label = self._read_switch_label(switch_element)
-                last_label = label
+                aria_checked = str(switch_element.get_attribute("aria-checked") or "").strip().lower()
+                observed_state = label or (f"aria-checked={aria_checked}" if aria_checked else "")
+                last_label = observed_state
                 state_ok = (
                     self._is_already_offline(switch_element, label)
                     if expect_offline
@@ -746,7 +1256,7 @@ class SkuOfflineBrowser(BrowserRPA):
                     if stable_since <= 0:
                         stable_since = time.time()
                     elif time.time() - stable_since >= max(stable_seconds, 0.2):
-                        context[context_key] = label
+                        context[context_key] = observed_state
                         return
                 else:
                     stable_since = 0.0
@@ -852,6 +1362,44 @@ class SkuOfflineBrowser(BrowserRPA):
         if not isinstance(result, dict):
             return {"supported": False, "reason": "invalid_runtime_result"}
         return {str(key): value for key, value in result.items()}
+
+    def _click_submit_element(self, submit_element: Any, context: dict[str, Any]) -> None:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        try:
+            rect = self.driver.execute_script(
+                """
+                const target = arguments[0];
+                target.scrollIntoView({block: 'center', inline: 'nearest'});
+                const rect = target.getBoundingClientRect();
+                return {
+                  x: rect.left + rect.width / 2,
+                  y: rect.top + rect.height / 2,
+                  width: rect.width,
+                  height: rect.height,
+                };
+                """,
+                submit_element,
+            )
+            if isinstance(rect, dict) and float(rect.get("width", 0) or 0) > 0 and float(rect.get("height", 0) or 0) > 0:
+                x = float(rect.get("x", 0) or 0)
+                y = float(rect.get("y", 0) or 0)
+                self.driver.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y})
+                self.driver.execute_cdp_cmd(
+                    "Input.dispatchMouseEvent",
+                    {"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1},
+                )
+                self.driver.execute_cdp_cmd(
+                    "Input.dispatchMouseEvent",
+                    {"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1},
+                )
+                context["submit_click_mode"] = "cdp_mouse"
+                return
+        except Exception as exc:
+            context["submit_cdp_click_error"] = str(exc)[:240]
+
+        submit_element.click()
+        context["submit_click_mode"] = "webdriver_click"
 
     def _dispatch_submit_button_click(self, submit_button: dict[str, str], context: dict[str, Any]) -> None:
         if not self.driver:
@@ -1286,6 +1834,27 @@ class SkuOfflineBrowser(BrowserRPA):
     ) -> None:
         if not backfill_config or not backfill_config.get("enabled", False):
             context["pre_submit_backfill_status"] = "disabled"
+            return
+
+        mode = str(backfill_config.get("mode", "full")).strip().lower() or "full"
+        if mode == "delivery_service_only":
+            delivery_service_action = self._ensure_required_delivery_service(context)
+            context["pre_submit_backfill_actions"] = (
+                [delivery_service_action]
+                if delivery_service_action is not None
+                else []
+            )
+            if delivery_service_action and delivery_service_action.get("status") == "apply_failed":
+                error_text = "提交前必填属性缺失: 配送服务"
+                self._annotate_page_error_context(
+                    context,
+                    stage_name="pre_submit_backfill",
+                    error_text=error_text,
+                    error_category="business_validation",
+                )
+                context["pre_submit_backfill_status"] = "blocked"
+                raise PublishValidationError(error_text)
+            context["pre_submit_backfill_status"] = "ready"
             return
 
         self._resolve_current_page_category_context(context)

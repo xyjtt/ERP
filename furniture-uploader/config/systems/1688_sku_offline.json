@@ -26,7 +26,75 @@
   },
   "execution": {
     "max_retry": 1,
-    "allow_multi_store_batch": false
+    "allow_multi_store_batch": false,
+    "require_store_account_mapping": true,
+    "require_browser_profile_exists": true,
+    "stop_store_on_error_categories": [
+      "login_required",
+      "risk_control",
+      "store_mismatch",
+      "identity_mismatch",
+      "account_mapping"
+    ],
+    "non_retryable_error_categories": [
+      "task_not_found",
+      "sku_not_found",
+      "product_unavailable",
+      "sole_sku_requires_product_offline",
+      "campaign_restriction"
+    ],
+    "safety": {
+      "edit_entry_mode": "management",
+      "assert_store_context_before_direct_edit": true,
+      "require_store_context_selector": true,
+      "verify_edit_page_identity": true,
+      "verify_edit_url_product_id": true,
+      "verify_product_id_in_page_body": false
+    },
+    "store_accounts": [
+      {
+        "store_name": "阿里巴巴-广州淘淘家居有限公司",
+        "store_aliases": [
+          "阿里巴巴_广州淘淘家居有限公司",
+          "广州淘淘家居有限公司",
+          "广州淘淘家居",
+          "木刻理想"
+        ],
+        "account_key": "muke_lixiang",
+        "browser_type": "edge",
+        "browser_profile_dir": "D:/script_1688/.local/browser_profiles/1688_profile_muke_lixiang"
+      },
+      {
+        "store_name": "阿里巴巴-广州沃来贸易有限公司",
+        "store_aliases": [
+          "阿里巴巴_广州沃来贸易有限公司",
+          "广州沃来贸易有限公司",
+          "广州沃来家具"
+        ],
+        "account_key": "guangzhou_wolai",
+        "browser_type": "edge",
+        "browser_profile_dir": "D:/script_1688/.local/browser_profiles/1688_profile_guangzhou_wolai"
+      },
+      {
+        "store_name": "阿里巴巴-常州工莱家具",
+        "store_aliases": [
+          "常州工莱家具"
+        ],
+        "account_key": "gonglai",
+        "browser_type": "edge",
+        "browser_profile_dir": "D:/script_1688/.local/browser_profiles/1688_profile_gonglai"
+      },
+      {
+        "store_name": "阿里巴巴-常州乐畅家居有限公司",
+        "store_aliases": [
+          "常州乐畅家居有限公司",
+          "乐畅家具"
+        ],
+        "account_key": "lechang",
+        "browser_type": "edge",
+        "browser_profile_dir": "D:/script_1688/.local/browser_profiles/1688_profile_lechang"
+      }
+    ]
   },
   "scan": {
     "watch_dir": "D:/script_files/1688/shared/sample-data",
@@ -40,6 +108,8 @@
   "notifications": {
     "dingtalk": {
       "enabled": false,
+      "webhook_env": "DINGTALK_WEBHOOK",
+      "secret_env": "DINGTALK_SECRET",
       "webhook": "",
       "secret": ""
     }
@@ -67,8 +137,8 @@
         "value": "//button[@data-click='search' or normalize-space(.)='搜索' or .//span[contains(normalize-space(.), '搜索')]]"
       },
       "product_result_row": {
-        "by": "xpath",
-        "value": "//tr[@data-row-key='{product_id}' or .//*[contains(normalize-space(.), 'ID：{product_id}') or contains(normalize-space(.), 'ID:{product_id}') or contains(normalize-space(.), '{product_id}')]]"
+        "by": "css",
+        "value": "tr[data-row-key='{product_id}']"
       },
       "edit_button_in_row": {
         "by": "xpath",

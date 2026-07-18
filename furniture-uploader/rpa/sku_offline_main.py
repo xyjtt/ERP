@@ -1,19 +1,19 @@
 from __future__ import annotations
 
 import argparse
-import base64
+import copy
 import hashlib
-import hmac
 import json
 import shutil
 import sys
-import urllib.parse
 import urllib.request
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from config_loader import load_json_with_local_override
+from dingtalk import build_signed_webhook, resolve_dingtalk_credentials
+from exceptions import OfflineAccountMappingError
 from run_report import RunReportWriter
 from sku_offline_browser import SkuOfflineBrowser
 from sku_offline_tasks import (
@@ -25,6 +25,7 @@ from sku_offline_tasks import (
     filter_offline_tasks,
     group_tasks_by_store,
     load_offline_tasks,
+    store_name_matches,
 )
 
 
@@ -85,6 +86,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Do not send DingTalk notifications for this run.",
     )
+    parser.add_argument(
+        "--jushuitan-handoff-out",
+        default="",
+        help="Optional JSONL path for exact Jushuitan 1688 link-cleanup tasks.",
+    )
     return parser
 
 
@@ -109,6 +115,11 @@ def main() -> None:
             )
             preview_path = write_preview_report(project_root, preview)
             print_preview(preview, preview_path)
+            if args.jushuitan_handoff_out:
+                write_jushuitan_handoff(
+                    Path(args.jushuitan_handoff_out),
+                    build_jushuitan_handoff_records(preview),
+                )
             return
 
         if args.mode == "execute":
@@ -135,6 +146,15 @@ def main() -> None:
                 skip_login=args.skip_login,
                 no_notify=args.no_notify,
                 run_report=run_report,
+                jushuitan_handoff_path=(
+                    Path(args.jushuitan_handoff_out)
+                    if args.jushuitan_handoff_out
+                    else project_root
+                    / "logs"
+                    / "sku_offline"
+                    / "jushuitan_handoffs"
+                    / f"{run_report.session_id}.jsonl"
+                ),
             )
             return
 
@@ -244,7 +264,8 @@ def execute_preview(
     skip_login: bool,
     no_notify: bool,
     run_report: RunReportWriter,
-) -> dict[str, int]:
+    jushuitan_handoff_path: Path | None = None,
+) -> dict[str, Any]:
     selected_tasks = list(preview.get("selected_tasks", []))
     store_groups = group_tasks_by_store(selected_tasks)
     execution_config = dict(system_config.get("execution", {}))
@@ -254,69 +275,126 @@ def execute_preview(
             "Please split the file by store or enable store mapping in local config."
         )
 
-    browser = SkuOfflineBrowser(operator_config.get("browser", {}), project_root)
     summary = {
         "success": 0,
         "failed": 0,
         "already_offline": 0,
+        "stopped_stores": 0,
+        "stopped_store_names": [],
     }
     max_attempts = max(1, int(execution_config.get("max_retry", 1)) + 1)
+    successful_task_statuses: dict[tuple[str, str, str], str] = {}
 
-    browser.open()
-    try:
-        browser.prepare_session(system_config, skip_login=skip_login)
-        for task in selected_tasks:
-            browser.reset_runtime_artifacts()
-            attempts = 0
-            while attempts < max_attempts:
-                attempts += 1
-                try:
-                    result_context = browser.execute_offline_task(system_config, task)
-                    status = (
-                        "already_offline"
-                        if result_context.get("execution_result") == "already_offline"
-                        else "success"
-                    )
-                    if status == "already_offline":
-                        summary["already_offline"] += 1
-                    else:
-                        summary["success"] += 1
-                    run_report.append(
-                        build_run_report_payload(
-                            task=task,
-                            status=status,
-                            attempts=attempts,
-                            result_context=result_context,
-                        )
-                    )
-                    break
-                except Exception as exc:
-                    if attempts < max_attempts:
-                        safe_console_print(
-                            f"[WARN] Retry {attempts}/{max_attempts - 1} for "
-                            f"{task.store_name} {task.product_id} {task.online_sku}: {exc}"
-                        )
-                        continue
-
-                    summary["failed"] += 1
-                    payload = build_run_report_payload(
-                        task=task,
-                        status="failed",
-                        attempts=attempts,
-                        result_context=browser.last_result_context,
-                        exc=exc,
-                        screenshot_path=browser.last_screenshot_path,
-                        html_snapshot_path=browser.last_html_snapshot_path,
-                    )
-                    run_report.append(payload)
-                    safe_console_print(
-                        f"[ERROR] Offline task failed: {task.store_name} "
-                        f"{task.product_id} {task.online_sku} -> {exc}"
-                    )
+    for store_name, store_tasks in store_groups.items():
+        try:
+            account_binding = resolve_store_account_binding(system_config, store_name)
+            store_operator_config = build_store_operator_config(
+                operator_config,
+                account_binding=account_binding,
+                execution_config=execution_config,
+            )
+        except Exception as exc:
+            error_category = classify_offline_error(exc, {"page_error_category": "account_mapping"})
+            summary["failed"] += len(store_tasks)
+            summary["stopped_stores"] += 1
+            summary["stopped_store_names"].append(store_name)
+            for index, task in enumerate(store_tasks):
+                payload = build_run_report_payload(
+                    task=task,
+                    status="failed",
+                    attempts=0,
+                    result_context={
+                        "page_error_category": error_category,
+                        "page_error_stage": "pre_execution_store_binding",
+                        "page_error_text": str(exc),
+                    },
+                    exc=exc,
+                )
+                run_report.append(payload)
+                if index == 0:
                     send_failure_notification(system_config, payload, disabled=no_notify)
+            safe_console_print(
+                f"[ERROR] Stop store batch for {store_name}: safety category={error_category}; {exc}"
+            )
+            continue
+
+        browser = SkuOfflineBrowser(store_operator_config.get("browser", {}), project_root)
+        store_stopped = False
+
+        browser.open()
+        try:
+            browser.prepare_session(system_config, skip_login=skip_login)
+            for task in store_tasks:
+                browser.reset_runtime_artifacts()
+                attempts = 0
+                while attempts < max_attempts:
+                    attempts += 1
+                    try:
+                        result_context = browser.execute_offline_task(
+                            system_config,
+                            task,
+                            account_binding=account_binding,
+                        )
+                        status = (
+                            "already_offline"
+                            if result_context.get("execution_result") == "already_offline"
+                            else "success"
+                        )
+                        if status == "already_offline":
+                            summary["already_offline"] += 1
+                        else:
+                            summary["success"] += 1
+                        successful_task_statuses[task.dedupe_key] = status
+                        run_report.append(
+                            build_run_report_payload(
+                                task=task,
+                                status=status,
+                                attempts=attempts,
+                                result_context=result_context,
+                            )
+                        )
+                        break
+                    except Exception as exc:
+                        error_category = classify_offline_error(exc, browser.last_result_context)
+                        if (
+                            attempts < max_attempts
+                            and should_retry_offline_error(error_category, execution_config)
+                            and not should_stop_store_on_error(error_category, execution_config)
+                        ):
+                            safe_console_print(
+                                f"[WARN] Retry {attempts}/{max_attempts - 1} for "
+                                f"{task.store_name} {task.product_id} {task.online_sku}: {exc}"
+                            )
+                            continue
+
+                        summary["failed"] += 1
+                        payload = build_run_report_payload(
+                            task=task,
+                            status="failed",
+                            attempts=attempts,
+                            result_context=browser.last_result_context,
+                            exc=exc,
+                            screenshot_path=browser.last_screenshot_path,
+                            html_snapshot_path=browser.last_html_snapshot_path,
+                        )
+                        run_report.append(payload)
+                        safe_console_print(
+                            f"[ERROR] Offline task failed: {task.store_name} "
+                            f"{task.product_id} {task.online_sku} -> {exc}"
+                        )
+                        send_failure_notification(system_config, payload, disabled=no_notify)
+                        if should_stop_store_on_error(error_category, execution_config):
+                            store_stopped = True
+                            summary["stopped_stores"] += 1
+                            summary["stopped_store_names"].append(store_name)
+                            safe_console_print(
+                                f"[ERROR] Stop store batch for {store_name}: safety category={error_category}"
+                            )
+                        break
+                if store_stopped:
                     break
-    finally:
-        browser.close()
+        finally:
+            browser.close()
 
     summary["total"] = len(selected_tasks)
     summary["selected_count"] = len(selected_tasks)
@@ -324,9 +402,176 @@ def execute_preview(
     summary["filtered_out_count"] = int(preview.get("filtered_out_count", 0))
     summary["report_path"] = run_report.info()["report_path"]
     summary["summary_path"] = run_report.info()["summary_path"]
+    handoff_path = jushuitan_handoff_path or (
+        project_root
+        / "logs"
+        / "sku_offline"
+        / "jushuitan_handoffs"
+        / (
+            f"{getattr(run_report, 'session_id', 'session')}"
+            f"_{datetime.now().strftime('%H%M%S_%f')}.jsonl"
+        )
+    )
+    handoff_records = build_jushuitan_handoff_records(
+        preview,
+        successful_task_statuses=successful_task_statuses,
+    )
+    write_jushuitan_handoff(handoff_path, handoff_records)
+    summary["jushuitan_handoff_path"] = str(handoff_path)
+    summary["jushuitan_handoff_count"] = len(handoff_records)
     send_summary_notification(system_config, summary, disabled=no_notify)
     safe_console_print(json.dumps(summary, ensure_ascii=False, indent=2))
     return summary
+
+
+def build_jushuitan_handoff_records(
+    preview: dict[str, Any],
+    *,
+    successful_task_statuses: dict[tuple[str, str, str], str] | None = None,
+) -> list[dict[str, Any]]:
+    selected_tasks = list(preview.get("selected_tasks", []))
+    selected_keys = {task.dedupe_key for task in selected_tasks}
+    candidates = [
+        *selected_tasks,
+        *[
+            task
+            for task in list(preview.get("duplicate_tasks", []))
+            if task.dedupe_key in selected_keys
+        ],
+    ]
+    records: dict[str, dict[str, Any]] = {}
+
+    for task in candidates:
+        source_status = "pending_1688"
+        if successful_task_statuses is not None:
+            source_status = str(successful_task_statuses.get(task.dedupe_key, "")).strip()
+            if source_status not in {"success", "already_offline"}:
+                continue
+
+        identity_parts = (
+            task.store_name,
+            task.product_id,
+            task.online_sku,
+            task.platform_store_item_code,
+        )
+        normalized_identity = "|".join(
+            "".join(str(part).split()).lower() for part in identity_parts
+        )
+        task_id = hashlib.sha256(normalized_identity.encode("utf-8")).hexdigest()
+        records[task_id] = {
+            "task_id": task_id,
+            "source": "1688_sku_offline",
+            "source_status": source_status,
+            "store_name": task.store_name,
+            "platform": task.platform,
+            "product_id": task.product_id,
+            "online_sku": task.online_sku,
+            "platform_store_item_code": task.platform_store_item_code,
+            "handling": task.handling,
+            "source_file": task.source_file,
+            "source_row_number": task.source_row_number,
+        }
+
+    return list(records.values())
+
+
+def write_jushuitan_handoff(path: Path, records: list[dict[str, Any]]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return path
+
+
+def resolve_store_account_binding(system_config: dict[str, Any], store_name: str) -> dict[str, Any]:
+    execution_config = dict(system_config.get("execution", {}))
+    raw_bindings = execution_config.get("store_accounts", system_config.get("store_accounts", []))
+    bindings = [item for item in raw_bindings if isinstance(item, dict)]
+    target_store = str(store_name or "").strip()
+    for binding in bindings:
+        binding_store = str(binding.get("store_name", binding.get("store", ""))).strip()
+        aliases = [
+            str(item).strip()
+            for item in binding.get("store_aliases", binding.get("aliases", []))
+            if str(item).strip()
+        ]
+        if binding_store and store_name_matches(target_store, binding_store, aliases=aliases):
+            return dict(binding)
+        if any(store_name_matches(target_store, alias) for alias in aliases):
+            return dict(binding)
+
+    if bool(execution_config.get("require_store_account_mapping", False)):
+        raise OfflineAccountMappingError(f"No 1688 account/profile mapping configured for store '{target_store}'.")
+    return {}
+
+
+def build_store_operator_config(
+    operator_config: dict[str, Any],
+    *,
+    account_binding: dict[str, Any],
+    execution_config: dict[str, Any],
+) -> dict[str, Any]:
+    resolved = copy.deepcopy(operator_config)
+    browser_config = resolved.setdefault("browser", {})
+    if not account_binding:
+        return resolved
+
+    account_key = str(account_binding.get("account_key", "")).strip()
+    profile_dir = str(
+        account_binding.get("browser_profile_dir", account_binding.get("profile_dir", ""))
+    ).strip()
+    profile_directory = str(account_binding.get("profile_directory", "")).strip()
+    debugger_address = str(account_binding.get("debugger_address", "")).strip()
+    browser_type = str(account_binding.get("browser_type", "")).strip()
+
+    if account_key:
+        browser_config["sku_offline_account_key"] = account_key
+    if browser_type:
+        browser_config["browser_type"] = browser_type
+    if debugger_address:
+        browser_config["debugger_address"] = debugger_address
+    elif profile_dir:
+        if bool(execution_config.get("require_browser_profile_exists", False)) and not Path(profile_dir).exists():
+            raise OfflineAccountMappingError(
+                f"Configured browser profile does not exist for account '{account_key}': {profile_dir}"
+            )
+        browser_config["user_data_dir"] = profile_dir
+        if "browser_type" not in browser_config:
+            browser_config["browser_type"] = "edge"
+    if profile_directory:
+        browser_config["profile_directory"] = profile_directory
+
+    return resolved
+
+
+def should_stop_store_on_error(error_category: str, execution_config: dict[str, Any]) -> bool:
+    configured = execution_config.get(
+        "stop_store_on_error_categories",
+        [
+            "login_required",
+            "risk_control",
+            "store_mismatch",
+            "identity_mismatch",
+            "account_mapping",
+        ],
+    )
+    categories = {str(item).strip() for item in configured if str(item).strip()}
+    return str(error_category or "").strip() in categories
+
+
+def should_retry_offline_error(error_category: str, execution_config: dict[str, Any]) -> bool:
+    configured = execution_config.get(
+        "non_retryable_error_categories",
+        [
+            "task_not_found",
+            "sku_not_found",
+            "product_unavailable",
+            "sole_sku_requires_product_offline",
+            "campaign_restriction",
+        ],
+    )
+    categories = {str(item).strip() for item in configured if str(item).strip()}
+    return str(error_category or "").strip() not in categories
 
 
 def process_scan_mode(
@@ -433,6 +678,12 @@ def classify_offline_error(exc: Exception, result_context: dict[str, Any]) -> st
     error_message = str(exc or "")
     if error_type == "OfflineLoginRequiredError":
         return "login_required"
+    if error_type == "OfflineRiskControlError":
+        return "risk_control"
+    if error_type == "OfflineIdentityMismatchError":
+        return "identity_mismatch"
+    if error_type == "OfflineAccountMappingError":
+        return "account_mapping"
     if error_type == "PublishValidationError":
         return "business_validation"
     if error_type == "OfflineTaskNotFoundError":
@@ -451,9 +702,16 @@ def classify_offline_error(exc: Exception, result_context: dict[str, Any]) -> st
 def localize_error_category(error_category: str) -> str:
     mapping = {
         "login_required": "登录态失效",
+        "risk_control": "验证码/风控拦截",
+        "identity_mismatch": "身份校验不匹配",
+        "account_mapping": "账号映射缺失",
         "business_validation": "业务校验失败",
         "sku_not_found": "SKU未匹配",
         "task_not_found": "任务未找到",
+        "edit_route_rejected": "编辑入口被拒绝",
+        "product_unavailable": "商品不可编辑",
+        "sole_sku_requires_product_offline": "唯一在线SKU禁止单独下架",
+        "campaign_restriction": "平台活动限制SKU下架",
         "store_mismatch": "店铺不匹配",
         "task_state": "状态识别失败",
         "submit_failed": "提交失败",
@@ -481,12 +739,18 @@ def build_failure_notification_content(payload: dict[str, Any]) -> str:
 
 
 def build_summary_notification_content(summary: dict[str, Any]) -> str:
+    stopped_store_names = summary.get("stopped_store_names", [])
+    if isinstance(stopped_store_names, list):
+        stopped_store_text = "、".join(str(item) for item in stopped_store_names if str(item).strip())
+    else:
+        stopped_store_text = str(stopped_store_names or "")
     return (
         "1688 SKU下架批次完成\n"
         f"任务总数：{summary.get('total', 0)}\n"
         f"执行成功：{summary.get('success', 0)}\n"
         f"已是下架：{summary.get('already_offline', 0)}\n"
         f"执行失败：{summary.get('failed', 0)}\n"
+        f"安全停止店铺：{summary.get('stopped_stores', 0)} {stopped_store_text}\n"
         f"重复数量：{summary.get('duplicate_count', 0)}\n"
         f"过滤数量：{summary.get('filtered_out_count', 0)}\n"
         f"报告路径：{summary.get('report_path', '')}\n"
@@ -573,22 +837,12 @@ def post_dingtalk_message(system_config: dict[str, Any], content: str) -> None:
     dingtalk = dict(system_config.get("notifications", {}).get("dingtalk", {}))
     if not dingtalk.get("enabled", False):
         return
-    webhook = str(dingtalk.get("webhook", "")).strip()
+    webhook, secret = resolve_dingtalk_credentials(dingtalk)
     if not webhook:
         safe_console_print("[WARN] DingTalk notification is enabled but webhook is empty.")
         return
 
-    request_url = webhook
-    secret = str(dingtalk.get("secret", "")).strip()
-    if secret:
-        timestamp = str(int(datetime.now().timestamp() * 1000))
-        string_to_sign = f"{timestamp}\n{secret}"
-        signature = base64.b64encode(
-            hmac.new(secret.encode("utf-8"), string_to_sign.encode("utf-8"), digestmod=hashlib.sha256).digest()
-        ).decode("utf-8")
-        encoded_signature = urllib.parse.quote_plus(signature)
-        connector = "&" if "?" in webhook else "?"
-        request_url = f"{webhook}{connector}timestamp={timestamp}&sign={encoded_signature}"
+    request_url = build_signed_webhook(webhook, secret)
 
     payload = json.dumps(
         {
@@ -609,7 +863,7 @@ def post_dingtalk_message(system_config: dict[str, Any], content: str) -> None:
         with urllib.request.urlopen(request, timeout=10) as response:
             response.read()
     except Exception as exc:
-        safe_console_print(f"[WARN] DingTalk notification failed: {exc}")
+        safe_console_print(f"[WARN] DingTalk notification failed ({type(exc).__name__}).")
 
 
 if __name__ == "__main__":

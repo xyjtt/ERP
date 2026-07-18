@@ -56,3 +56,15 @@ class OfflineStoreMismatchError(OfflineTaskError):
 
 class OfflineLoginRequiredError(OfflineTaskError):
     pass
+
+
+class OfflineRiskControlError(OfflineTaskError):
+    pass
+
+
+class OfflineIdentityMismatchError(OfflineTaskError):
+    pass
+
+
+class OfflineAccountMappingError(OfflineTaskError):
+    pass
