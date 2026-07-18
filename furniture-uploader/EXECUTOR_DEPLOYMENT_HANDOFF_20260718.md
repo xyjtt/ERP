@@ -1,5 +1,9 @@
 # 1688 停产下架执行机 AI 交接
 
+Gitee：`https://gitee.com/xyjtt/erp.git`
+
+分支：`deploy/1688-stop-sale-windows-20260718`
+
 请先阅读：
 
 1. `furniture-uploader/docs/operations/1688_STOP_SALE_WINDOWS_DEPLOYMENT.md`

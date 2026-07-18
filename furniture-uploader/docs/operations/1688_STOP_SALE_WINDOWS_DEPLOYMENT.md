@@ -5,11 +5,19 @@
 ## Gitee 来源
 
 - 仓库：`https://gitee.com/xyjtt/erp.git`
-- 部署分支由交付方提供。
+- 部署分支：`deploy/1688-stop-sale-windows-20260718`
 - 代码目录：`furniture-uploader`、`jushuitan-sku-offline-batch`。
 - 执行机已有项目：`D:\script_1688`。
 
 不要提交或复制开发机的 Cookie、Token、`.local.json`、`.env`、浏览器 Profile、运行日志和截图。
+
+执行机首次克隆：
+
+```powershell
+git clone --branch deploy/1688-stop-sale-windows-20260718 `
+  https://gitee.com/xyjtt/erp.git `
+  D:\deploy\erp-stop-sale
+```
 
 ## 执行机 AI 接手顺序
 
@@ -22,6 +30,8 @@
 7. 运行执行机 preflight。
 8. 先跑 preview，再跑单店单条 execute。
 9. 核对共享锁、运营群消息、1688 报告、聚水潭反查和幂等账本。
+
+当前 `npm ci` 审计基线报告 5 项依赖告警（1 低、3 中、1 高）。部署测试阶段不得直接执行 `npm audit fix --force`，避免未经回归的破坏性升级；由执行机 AI 单独输出审计报告后再安排依赖治理。
 
 ## 环境变量
 
