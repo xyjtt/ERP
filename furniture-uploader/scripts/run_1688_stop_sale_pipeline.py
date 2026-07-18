@@ -14,6 +14,8 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_JUSHUITAN_ROOT = PROJECT_ROOT.parent / "jushuitan-sku-offline-batch"
 DEFAULT_SHARED_RUNTIME_ROOT = Path(os.environ.get("SCRIPT_1688_ROOT", "D:/script_1688"))
+DEFAULT_JST_LOGIN_URL = "https://www.erp321.com/login.aspx"
+DEFAULT_JST_PRODUCT_URL = "https://www.erp321.com/epaas"
 RPA_ROOT = PROJECT_ROOT / "rpa"
 if str(RPA_ROOT) not in sys.path:
     sys.path.insert(0, str(RPA_ROOT))
@@ -134,6 +136,15 @@ def build_jushuitan_command(
     if args.no_notify:
         command.append("--no-notify")
     return command
+
+
+def build_jushuitan_environment(handoff_path: Path) -> dict[str, str]:
+    environment = os.environ.copy()
+    environment.setdefault("JST_LOGIN_URL", DEFAULT_JST_LOGIN_URL)
+    environment.setdefault("JST_PRODUCT_URL", DEFAULT_JST_PRODUCT_URL)
+    # The cleanup CLI consumes JSONL directly; this only satisfies the shared legacy config schema.
+    environment["EXCEL_PATH"] = str(handoff_path.resolve())
+    return environment
 
 
 def count_handoff_records(path: Path) -> int:
@@ -353,7 +364,12 @@ def run_pipeline(
                 jushuitan_root,
                 jushuitan_results_dir,
             )
-            result_jushuitan = subprocess.run(command_jushuitan, cwd=jushuitan_root, check=False)
+            result_jushuitan = subprocess.run(
+                command_jushuitan,
+                cwd=jushuitan_root,
+                check=False,
+                env=build_jushuitan_environment(handoff_path),
+            )
             jushuitan_return_code = result_jushuitan.returncode
             if audit_started and audit_repository is not None:
                 audit_repository.record_jushuitan_results(

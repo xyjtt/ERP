@@ -20,6 +20,7 @@ from run_1688_stop_sale_pipeline import (
     build_argument_parser,
     build_1688_command,
     build_jushuitan_command,
+    build_jushuitan_environment,
     derive_audit_status,
     load_selected_audit_tasks,
     run_pipeline,
@@ -54,6 +55,15 @@ class Run1688StopSalePipelineTests(unittest.TestCase):
         self.assertEqual(command_jst[command_jst.index("--run-id") + 1], args.run_id)
         self.assertIn("--yes", command_1688)
         self.assertIn("--yes", command_jst)
+
+    def test_jushuitan_cleanup_environment_supplies_shared_config_requirements(self) -> None:
+        handoff = Path("D:/audit/handoff.jsonl")
+        with patch.dict("os.environ", {}, clear=True):
+            environment = build_jushuitan_environment(handoff)
+
+        self.assertEqual(environment["JST_LOGIN_URL"], "https://www.erp321.com/login.aspx")
+        self.assertEqual(environment["JST_PRODUCT_URL"], "https://www.erp321.com/epaas")
+        self.assertTrue(environment["EXCEL_PATH"].endswith("handoff.jsonl"))
 
     def test_production_pipeline_reuses_logged_in_profile_by_default(self) -> None:
         args = build_argument_parser().parse_args(["--file", "tasks.csv"])

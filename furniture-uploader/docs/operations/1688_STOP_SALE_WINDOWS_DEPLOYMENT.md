@@ -63,6 +63,8 @@ preview 只读取旧业务源，不写任何数据库。execute 在打开浏览�
 
 钉钉优先复用 1688 项目 Credential Manager 中的 `YYDD/1688/notification/dingtalk/webhook` 和 `YYDD/1688/notification/dingtalk/secret`。只有这两个引用不存在时才要求 `DINGTALK_*` 环境变量。
 
+聚水潭清链子进程由 pipeline 注入正式登录页、商品管理页和当前 JSONL handoff 路径；不需要人工配置 `JST_LOGIN_URL`、`JST_PRODUCT_URL` 或遗留的 `EXCEL_PATH`。执行机只需提供 `JST_USERNAME`、`JST_PASSWORD`。
+
 ## Profile 映射
 
 在执行机创建 `furniture-uploader/config/systems/1688_sku_offline.local.json`，只覆盖 `execution.store_accounts` 中的 Profile 路径和必要账号键。路径必须指向执行机已登录的独立账号 Profile。
