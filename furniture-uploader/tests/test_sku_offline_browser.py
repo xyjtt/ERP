@@ -511,7 +511,7 @@ class SkuOfflineBrowserTests(unittest.TestCase):
             browser._raise_if_inline_validation_present(context, stage_name="post_offline_submit")
 
         self.assertEqual(context["page_error_stage"], "post_offline_submit")
-        self.assertEqual(context["page_error_category"], "business_validation")
+        self.assertEqual(context["page_error_category"], "delivery_service_backfill_failed")
         self.assertIn("配送服务为必填项", context["page_error_text"])
 
     def test_raise_if_inline_validation_classifies_sole_online_sku(self) -> None:
@@ -786,6 +786,23 @@ class SkuOfflineBrowserTests(unittest.TestCase):
 
         browser._prepare_pre_submit_backfill(
             {"enabled": True, "mode": "delivery_service_only"},
+            context,
+        )
+
+        self.assertEqual(context["pre_submit_backfill_status"], "ready")
+        self.assertEqual(context["pre_submit_backfill_actions"][0]["status"], "applied")
+
+    def test_prepare_pre_submit_backfill_runs_delivery_service_without_other_rules(self) -> None:
+        browser = FakePreSubmitBrowser()
+        browser._ensure_required_delivery_service = lambda context: {  # type: ignore[method-assign]
+            "label": "配送服务",
+            "status": "applied",
+            "value": "市区物流点自提",
+        }
+        context: dict[str, object] = {}
+
+        browser._prepare_pre_submit_backfill(
+            {"enabled": True, "mode": "full", "block_on_missing": True},
             context,
         )
 

@@ -142,10 +142,16 @@ python scripts\run_1688_stop_sale_pipeline.py `
   --yes `
   --limit 1 `
   --file <单店CSV> `
-  --shared-runtime-root E:\1688\1688-script-new
+  --shared-runtime-root E:\1688\1688-script-new `
+  --1688-timeout-seconds 900 `
+  --jushuitan-timeout-seconds 600
 ```
 
 execute 使用统一 `run_id` 关联 1688 JSONL、聚水潭 JSONL 和新库两张审计表。preview 不创建新库记录。
+
+单条 canary 建议使用上面的 15 分钟/10 分钟超时。按店铺执行 10 条时默认上限分别为 45 分钟和 20 分钟。超时只终止该 pipeline 子进程拥有的 PID 进程树，写入 `PipelineStageTimeoutError`、审计和钉钉，不允许使用全局关闭 Edge 的命令。
+
+补偿执行必须只包含未完成项。已经完成 1688 与聚水潭闭环的商品不得重新加入补偿 CSV；1688 已完成但聚水潭失败的任务允许通过完整 pipeline 幂等重放，预期结果为 `already_offline + success/already_cleared`。
 
 正式 pipeline 默认复用店铺映射中的已登录 Profile，相当于 `--skip-login`。它仍会检查登录跳转、验证码/风控、当前店铺、商品 ID 和 SKU 身份；登录态失效时停止对应店铺。只有人工调试时才显式使用 `--require-manual-login` 恢复旧的回车确认流程。
 

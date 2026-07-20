@@ -960,10 +960,16 @@ class SkuOfflineBrowser(BrowserRPA):
             )
             for message in normalized_messages
         )
+        delivery_service_blocked = any(
+            "配送服务" in message and any(keyword in message for keyword in ("必填", "请选择", "不能为空"))
+            for message in normalized_messages
+        )
         if sole_sku_blocked:
             error_category = "sole_sku_requires_product_offline"
         elif campaign_blocked:
             error_category = "campaign_restriction"
+        elif delivery_service_blocked:
+            error_category = "delivery_service_backfill_failed"
         else:
             error_category = "business_validation"
         if sole_sku_blocked:
@@ -1850,7 +1856,7 @@ class SkuOfflineBrowser(BrowserRPA):
                     context,
                     stage_name="pre_submit_backfill",
                     error_text=error_text,
-                    error_category="business_validation",
+                    error_category="delivery_service_backfill_failed",
                 )
                 context["pre_submit_backfill_status"] = "blocked"
                 raise PublishValidationError(error_text)
@@ -1864,8 +1870,27 @@ class SkuOfflineBrowser(BrowserRPA):
         rules = self._resolve_pre_submit_backfill_rules(backfill_config, context)
         field_rules = self._resolve_pre_submit_field_rules(backfill_config)
         shipment_table_rules = self._resolve_pre_submit_shipment_table_rules(backfill_config)
+        delivery_service_action = self._ensure_required_delivery_service(context)
+        if delivery_service_action and delivery_service_action.get("status") == "apply_failed":
+            error_text = "提交前必填属性缺失: 配送服务"
+            self._annotate_page_error_context(
+                context,
+                stage_name="pre_submit_backfill",
+                error_text=error_text,
+                error_category="delivery_service_backfill_failed",
+            )
+            context["pre_submit_backfill_status"] = "blocked"
+            context["pre_submit_backfill_actions"] = [delivery_service_action]
+            raise PublishValidationError(error_text)
         if not rules and not field_rules and not shipment_table_rules:
-            context["pre_submit_backfill_status"] = "no_rules"
+            context["pre_submit_backfill_actions"] = (
+                [delivery_service_action] if delivery_service_action is not None else []
+            )
+            context["pre_submit_backfill_status"] = (
+                "ready"
+                if delivery_service_action and delivery_service_action.get("status") != "skipped"
+                else "no_rules"
+            )
             return
 
         before_scan = self._scan_pre_submit_backfill_rules(rules) if rules else []
@@ -1879,7 +1904,9 @@ class SkuOfflineBrowser(BrowserRPA):
         context["pre_submit_field_backfill_before"] = field_before_scan
         context["pre_submit_shipment_table_before"] = shipment_before_scan
 
-        applied_actions: list[dict[str, Any]] = []
+        applied_actions: list[dict[str, Any]] = (
+            [delivery_service_action] if delivery_service_action is not None else []
+        )
         for rule, state in zip(rules, before_scan):
             if str(state.get("current_value", "")).strip():
                 continue
@@ -1916,19 +1943,6 @@ class SkuOfflineBrowser(BrowserRPA):
         # Some category props render lazily after initial interaction; retry missing ones once.
         retry_actions = self._retry_missing_category_prop_rules(rules, context)
         applied_actions.extend(retry_actions)
-
-        delivery_service_action = self._ensure_required_delivery_service(context)
-        if delivery_service_action:
-            applied_actions.append(delivery_service_action)
-            if delivery_service_action.get("status") == "apply_failed":
-                error_text = "提交前必填属性缺失: 配送服务"
-                self._annotate_page_error_context(
-                    context,
-                    stage_name="pre_submit_backfill",
-                    error_text=error_text,
-                    error_category="business_validation",
-                )
-                raise PublishValidationError(error_text)
 
         shipment_actions = self._apply_pre_submit_shipment_table_rules(shipment_table_rules, context)
         field_actions = self._apply_pre_submit_field_rules(field_rules, context)
@@ -2135,7 +2149,7 @@ class SkuOfflineBrowser(BrowserRPA):
     def _ensure_required_delivery_service(self, context: dict[str, Any]) -> dict[str, Any] | None:
         if not self.driver:
             return {"label": "配送服务", "status": "skipped", "reason": "no_driver"}
-        state_before = self._read_delivery_service_state()
+        state_before = self._wait_for_delivery_service_state()
         context["delivery_service_state_before"] = state_before
 
         if not bool(state_before.get("exists")):
@@ -2179,16 +2193,42 @@ class SkuOfflineBrowser(BrowserRPA):
             ),
         }
 
+    def _wait_for_delivery_service_state(self, timeout_seconds: float = 4.0) -> dict[str, Any]:
+        deadline = time.time() + max(0.5, timeout_seconds)
+        state = self._read_delivery_service_state()
+        while not bool(state.get("exists")) and time.time() < deadline:
+            self._scroll_delivery_service_into_view()
+            self._pause(0.5)
+            state = self._read_delivery_service_state()
+        return state
+
+    def _scroll_delivery_service_into_view(self) -> None:
+        if not self.driver:
+            return
+        try:
+            self.driver.execute_script(
+                """
+                const nodes = Array.from(document.querySelectorAll(
+                  '#guid-customExtraService, [id*="customExtraService"], .special-service-wrapper'
+                ));
+                const target = nodes.find((node) =>
+                  String(node.innerText || node.textContent || '').includes('配送服务')
+                );
+                if (target) {
+                  target.scrollIntoView({block: 'center', inline: 'nearest'});
+                }
+                """
+            )
+        except Exception:
+            return
+
     def _read_delivery_service_state(self) -> dict[str, Any]:
         if not self.driver:
             raise RuntimeError("Browser has not been opened.")
         try:
             state = self.driver.execute_script(
                 """
-                const root = document.querySelector('#guid-customExtraService');
-                if (!root) {
-                  return { exists: false };
-                }
+                const root = document.querySelector('#guid-customExtraService, [id*="customExtraService"]') || document;
                 function norm(value) {
                   return String(value || '').replace(/\\s+/g, ' ').trim();
                 }
@@ -2203,7 +2243,7 @@ class SkuOfflineBrowser(BrowserRPA):
                 const target = wrappers.find((wrapper) => {
                   const titleNode = wrapper.querySelector('.service-item-title-value');
                   const title = norm(titleNode ? titleNode.innerText || titleNode.textContent || '' : '');
-                  return title.includes('配送服务');
+                  return title.includes('配送服务') || norm(wrapper.innerText || wrapper.textContent || '').includes('配送服务');
                 });
                 if (!target) {
                   return { exists: false };
@@ -2219,7 +2259,7 @@ class SkuOfflineBrowser(BrowserRPA):
                     continue;
                   }
                   const text = norm(label.innerText || label.textContent || '');
-                  if (input.checked) {
+                  if (input.checked || label.classList.contains('ant-checkbox-wrapper-checked') || Boolean(label.querySelector('.ant-checkbox-checked'))) {
                     selectedOptions.push(text);
                   }
                 }
@@ -2257,10 +2297,7 @@ class SkuOfflineBrowser(BrowserRPA):
         try:
             clicked = self.driver.execute_script(
                 """
-                const root = document.querySelector('#guid-customExtraService');
-                if (!root) {
-                  return false;
-                }
+                const root = document.querySelector('#guid-customExtraService, [id*="customExtraService"]') || document;
                 function norm(value) {
                   return String(value || '').replace(/\\s+/g, ' ').trim();
                 }
@@ -2274,12 +2311,12 @@ class SkuOfflineBrowser(BrowserRPA):
                 const target = wrappers.find((wrapper) => {
                   const titleNode = wrapper.querySelector('.service-item-title-value');
                   const title = norm(titleNode ? titleNode.innerText || titleNode.textContent || '' : '');
-                  return title.includes('配送服务');
+                  return title.includes('配送服务') || norm(wrapper.innerText || wrapper.textContent || '').includes('配送服务');
                 });
                 if (!target) {
                   return false;
                 }
-                const autoSwitch = target.querySelector('button.default-config-switch');
+                const autoSwitch = target.querySelector('button.default-config-switch, button[role="switch"], [role="switch"]');
                 if (!autoSwitch || !isVisible(autoSwitch)) {
                   return false;
                 }
@@ -2302,10 +2339,7 @@ class SkuOfflineBrowser(BrowserRPA):
         try:
             clicked = self.driver.execute_script(
                 """
-                const root = document.querySelector('#guid-customExtraService');
-                if (!root) {
-                  return false;
-                }
+                const root = document.querySelector('#guid-customExtraService, [id*="customExtraService"]') || document;
                 function norm(value) {
                   return String(value || '').replace(/\\s+/g, ' ').trim();
                 }
@@ -2319,7 +2353,7 @@ class SkuOfflineBrowser(BrowserRPA):
                 const target = wrappers.find((wrapper) => {
                   const titleNode = wrapper.querySelector('.service-item-title-value');
                   const title = norm(titleNode ? titleNode.innerText || titleNode.textContent || '' : '');
-                  return title.includes('配送服务');
+                  return title.includes('配送服务') || norm(wrapper.innerText || wrapper.textContent || '').includes('配送服务');
                 });
                 if (!target) {
                   return false;
@@ -3426,8 +3460,15 @@ class SkuOfflineBrowser(BrowserRPA):
                 self.driver.close()
             except Exception:
                 pass
-            if main_window in self.driver.window_handles:
-                self.driver.switch_to.window(main_window)
+            try:
+                handles = list(self.driver.window_handles)
+            except Exception:
+                return
+            if main_window in handles:
+                try:
+                    self.driver.switch_to.window(main_window)
+                except Exception:
+                    return
         try:
             self.driver.switch_to.default_content()
         except Exception:

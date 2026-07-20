@@ -294,6 +294,64 @@ async function closeGuideIfPresent(page: Page): Promise<void> {
   }
 }
 
+export async function dismissVisibleGuides(page: Page): Promise<number> {
+  let dismissedCount = 0;
+  for (let pass = 0; pass < 4; pass += 1) {
+    let dismissedInPass = false;
+    for (const target of allTargets(page)) {
+      const overlays = target.locator(
+        ".ant-tour, .ant-popover, [class*='guide-overlay'], [class*='driver-popover'], .introjs-tooltip",
+      );
+      const count = await overlays.count().catch(() => 0);
+      for (let index = count - 1; index >= 0; index -= 1) {
+        const overlay = overlays.nth(index);
+        if (!(await overlay.isVisible().catch(() => false))) {
+          continue;
+        }
+        const closeButton = overlay
+          .locator(
+            [
+              ".ant-tour-close",
+              ".ant-popover-close",
+              ".driver-popover-close-btn",
+              ".introjs-skipbutton",
+              '[aria-label="Close"]',
+              '[aria-label="close"]',
+              'button:has-text("我知道了")',
+              'button:has-text("知道了")',
+              'button:has-text("跳过")',
+              'button:has-text("不再提示")',
+              'button:has-text("关闭")',
+            ].join(","),
+          )
+          .or(overlay.getByRole("button", { name: /我?\s*知\s*道\s*了|跳\s*过|不\s*再\s*提\s*示|关\s*闭/ }))
+          .first();
+        if ((await closeButton.count().catch(() => 0)) === 0) {
+          continue;
+        }
+        const clicked = await closeButton
+          .click({ timeout: 2000 })
+          .then(() => true)
+          .catch(async () =>
+            closeButton
+              .click({ timeout: 2000, force: true })
+              .then(() => true)
+              .catch(() => false),
+          );
+        if (clicked) {
+          dismissedCount += 1;
+          dismissedInPass = true;
+          await page.waitForTimeout(250);
+        }
+      }
+    }
+    if (!dismissedInPass) {
+      break;
+    }
+  }
+  return dismissedCount;
+}
+
 export async function dismissQuickSaveModal(page: Page): Promise<void> {
   const modal = page.locator(selectors.productPage.quickSaveModal.join(",")).first();
   if (!(await modal.count())) {

@@ -3,6 +3,7 @@ from __future__ import annotations
 from argparse import Namespace
 from pathlib import Path
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -23,6 +24,8 @@ from run_1688_stop_sale_pipeline import (
     build_jushuitan_environment,
     derive_audit_status,
     load_selected_audit_tasks,
+    PipelineStageTimeoutError,
+    run_stage_command,
     run_pipeline,
 )
 
@@ -38,6 +41,8 @@ class Run1688StopSalePipelineTests(unittest.TestCase):
             run_id="run_20260718_001",
             source_database="JSDataMiddlePlatform",
             source_table="dbo.op_stop_sale",
+            timeout_1688_seconds=2700,
+            timeout_jushuitan_seconds=1200,
         )
 
     def test_commands_share_deterministic_run_id(self) -> None:
@@ -76,6 +81,12 @@ class Run1688StopSalePipelineTests(unittest.TestCase):
         )
 
         self.assertFalse(args.skip_login)
+
+    def test_stage_timeout_defaults_are_bounded(self) -> None:
+        args = build_argument_parser().parse_args(["--file", "tasks.csv"])
+
+        self.assertEqual(args.timeout_1688_seconds, 2700)
+        self.assertEqual(args.timeout_jushuitan_seconds, 1200)
 
     def test_audit_status_is_partial_when_some_items_succeeded(self) -> None:
         status = derive_audit_status(
@@ -121,7 +132,7 @@ class Run1688StopSalePipelineTests(unittest.TestCase):
         repository = FakeAuditRepository()
         with tempfile.TemporaryDirectory() as temp_dir:
             with patch(
-                "run_1688_stop_sale_pipeline.subprocess.run",
+                "run_1688_stop_sale_pipeline.run_stage_command",
                 side_effect=OSError("cannot start"),
             ):
                 with self.assertRaises(OSError):
@@ -144,7 +155,7 @@ class Run1688StopSalePipelineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             pipeline_dir = Path(temp_dir)
             with patch(
-                "run_1688_stop_sale_pipeline.subprocess.run",
+                "run_1688_stop_sale_pipeline.run_stage_command",
                 return_value=SimpleNamespace(returncode=0),
             ):
                 return_code = run_pipeline(
@@ -207,6 +218,30 @@ class Run1688StopSalePipelineTests(unittest.TestCase):
         self.assertEqual(len(tasks), 2)
         self.assertEqual({task.platform_store_item_code for task in tasks}, {"CODE-A", "CODE-B"})
         self.assertEqual(len({task.dedupe_key for task in tasks}), 1)
+
+    def test_stage_timeout_stops_only_the_owned_process_tree(self) -> None:
+        class FakeProcess:
+            pid = 4321
+
+            def wait(self, timeout=None):
+                raise subprocess.TimeoutExpired(cmd="python", timeout=timeout)
+
+            def poll(self):
+                return None
+
+        with (
+            patch("run_1688_stop_sale_pipeline.subprocess.Popen", return_value=FakeProcess()),
+            patch("run_1688_stop_sale_pipeline.terminate_stage_process_tree") as terminate,
+        ):
+            with self.assertRaises(PipelineStageTimeoutError):
+                run_stage_command(
+                    ["python", "worker.py"],
+                    cwd=PROJECT_ROOT,
+                    timeout_seconds=3,
+                    stage="1688",
+                )
+
+        terminate.assert_called_once()
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ import argparse
 from contextlib import nullcontext
 import json
 import os
+import signal
 import subprocess
 import sys
 from datetime import datetime
@@ -29,6 +30,61 @@ from stop_sale_audit import (
     resolve_stop_sale_app_config,
     stop_sale_task_key,
 )
+
+
+class PipelineStageTimeoutError(TimeoutError):
+    def __init__(self, stage: str, timeout_seconds: int) -> None:
+        self.stage = stage
+        self.timeout_seconds = timeout_seconds
+        super().__init__(f"{stage} stage exceeded {timeout_seconds} seconds and its process tree was stopped")
+
+
+def terminate_stage_process_tree(process: subprocess.Popen[Any]) -> None:
+    if process.poll() is not None:
+        return
+    if sys.platform == "win32":
+        subprocess.run(
+            ["taskkill.exe", "/PID", str(process.pid), "/T", "/F"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+    else:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            process.terminate()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+
+
+def run_stage_command(
+    command: list[str],
+    *,
+    cwd: Path,
+    timeout_seconds: int,
+    stage: str,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[Any]:
+    popen_options: dict[str, Any] = {
+        "cwd": cwd,
+        "env": env,
+    }
+    if sys.platform == "win32":
+        popen_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        popen_options["start_new_session"] = True
+    process = subprocess.Popen(command, **popen_options)
+    try:
+        return_code = process.wait(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired as exc:
+        terminate_stage_process_tree(process)
+        raise PipelineStageTimeoutError(stage, timeout_seconds) from exc
+    return subprocess.CompletedProcess(command, return_code)
 
 
 def build_argument_parser() -> argparse.ArgumentParser:
@@ -58,6 +114,20 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lock-wait-seconds", type=int, default=7200)
     parser.add_argument("--lock-stale-seconds", type=int, default=21600)
     parser.add_argument("--lock-poll-seconds", type=float, default=10.0)
+    parser.add_argument(
+        "--1688-timeout-seconds",
+        dest="timeout_1688_seconds",
+        type=int,
+        default=2700,
+        help="Maximum total runtime for the 1688 subprocess before its owned process tree is stopped.",
+    )
+    parser.add_argument(
+        "--jushuitan-timeout-seconds",
+        dest="timeout_jushuitan_seconds",
+        type=int,
+        default=1200,
+        help="Maximum total runtime for the Jushuitan subprocess before its owned process tree is stopped.",
+    )
     parser.add_argument(
         "--crawler-worker-task-name",
         default="YYDD-1688-Crawler-Worker",
@@ -350,7 +420,12 @@ def run_pipeline(
             audit_started = True
 
         command_1688 = build_1688_command(args, handoff_path)
-        result_1688 = subprocess.run(command_1688, cwd=PROJECT_ROOT, check=False)
+        result_1688 = run_stage_command(
+            command_1688,
+            cwd=PROJECT_ROOT,
+            timeout_seconds=args.timeout_1688_seconds,
+            stage="1688",
+        )
         result_1688_return_code = result_1688.returncode
         offline_records = load_jsonl_records(offline_report_path)
         if audit_started and audit_repository is not None:
@@ -364,10 +439,11 @@ def run_pipeline(
                 jushuitan_root,
                 jushuitan_results_dir,
             )
-            result_jushuitan = subprocess.run(
+            result_jushuitan = run_stage_command(
                 command_jushuitan,
                 cwd=jushuitan_root,
-                check=False,
+                timeout_seconds=args.timeout_jushuitan_seconds,
+                stage="jushuitan",
                 env=build_jushuitan_environment(handoff_path),
             )
             jushuitan_return_code = result_jushuitan.returncode
@@ -404,6 +480,13 @@ def run_pipeline(
         ),
         "audit_status": audit_status if args.mode == "execute" else None,
         "error_type": type(pending_exception).__name__ if pending_exception is not None else "",
+        "error_stage": (
+            pending_exception.stage
+            if isinstance(pending_exception, PipelineStageTimeoutError)
+            else ""
+        ),
+        "1688_timeout_seconds": args.timeout_1688_seconds,
+        "jushuitan_timeout_seconds": args.timeout_jushuitan_seconds,
         "summary_path": str(summary_path),
     }
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -436,6 +519,8 @@ def main() -> int:
         raise ValueError("--limit must be non-negative")
     if args.lock_wait_seconds < 0 or args.lock_stale_seconds <= 0 or args.lock_poll_seconds <= 0:
         raise ValueError("Shared lock timing values must be positive (wait may be zero)")
+    if args.timeout_1688_seconds <= 0 or args.timeout_jushuitan_seconds <= 0:
+        raise ValueError("Stage timeout values must be positive")
     if args.mode == "execute" and not args.yes:
         raise ValueError("execute mode requires --yes")
     if args.mode == "execute" and not args.no_notify:
@@ -500,6 +585,18 @@ def main() -> int:
                 disabled=args.no_notify,
             )
             return 75
+        if isinstance(exc, PipelineStageTimeoutError):
+            send_pipeline_notification(
+                "【1688 停产下架】\n"
+                f"批次：{run_id}\n"
+                "状态：执行超时\n"
+                f"阶段：{exc.stage}\n"
+                f"超时：{exc.timeout_seconds} 秒\n"
+                "处理：仅终止本批次拥有的进程树，后续任务未继续\n"
+                "退出码：124",
+                disabled=args.no_notify,
+            )
+            return 124
         raise
 
 

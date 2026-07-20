@@ -566,6 +566,8 @@ def should_stop_store_on_error(error_category: str, execution_config: dict[str, 
             "store_mismatch",
             "identity_mismatch",
             "account_mapping",
+            "browser_window_closed",
+            "delivery_service_backfill_failed",
         ],
     )
     categories = {str(item).strip() for item in configured if str(item).strip()}
@@ -690,6 +692,17 @@ def classify_offline_error(exc: Exception, result_context: dict[str, Any]) -> st
 
     error_type = exc.__class__.__name__
     error_message = str(exc or "")
+    normalized_message = error_message.lower()
+    if any(
+        marker in normalized_message
+        for marker in (
+            "no such window",
+            "target window already closed",
+            "web view not found",
+            "disconnected: not connected to devtools",
+        )
+    ):
+        return "browser_window_closed"
     if error_type == "OfflineLoginRequiredError":
         return "login_required"
     if error_type == "OfflineRiskControlError":
@@ -729,6 +742,8 @@ def localize_error_category(error_category: str) -> str:
         "store_mismatch": "店铺不匹配",
         "task_state": "状态识别失败",
         "submit_failed": "提交失败",
+        "browser_window_closed": "浏览器窗口异常关闭",
+        "delivery_service_backfill_failed": "配送服务自动补全失败",
         "automation_error": "脚本异常",
     }
     normalized = str(error_category or "").strip()

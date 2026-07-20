@@ -34,7 +34,9 @@
       "risk_control",
       "store_mismatch",
       "identity_mismatch",
-      "account_mapping"
+      "account_mapping",
+      "browser_window_closed",
+      "delivery_service_backfill_failed"
     ],
     "non_retryable_error_categories": [
       "task_not_found",
@@ -115,6 +117,11 @@
     }
   },
   "workflow": {
+    "pre_submit_backfill": {
+      "enabled": true,
+      "mode": "full",
+      "block_on_missing": true
+    },
     "selectors": {
       "current_store_name": {
         "by": "xpath",

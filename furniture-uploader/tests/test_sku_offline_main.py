@@ -89,6 +89,11 @@ class SkuOfflineMainTests(unittest.TestCase):
         )
         self.assertEqual(localize_error_category("campaign_restriction"), "平台活动限制SKU下架")
         self.assertEqual(localize_error_category("submit_failed"), "提交失败")
+        self.assertEqual(localize_error_category("browser_window_closed"), "浏览器窗口异常关闭")
+        self.assertEqual(
+            localize_error_category("delivery_service_backfill_failed"),
+            "配送服务自动补全失败",
+        )
         self.assertEqual(localize_error_category(""), "未知异常")
 
     def test_classify_offline_error_maps_login_required(self) -> None:
@@ -208,11 +213,21 @@ class SkuOfflineMainTests(unittest.TestCase):
                 "risk_control",
                 "store_mismatch",
                 "identity_mismatch",
+                "browser_window_closed",
+                "delivery_service_backfill_failed",
             ]
         }
 
         self.assertTrue(should_stop_store_on_error("identity_mismatch", execution_config))
+        self.assertTrue(should_stop_store_on_error("browser_window_closed", execution_config))
+        self.assertTrue(should_stop_store_on_error("delivery_service_backfill_failed", execution_config))
         self.assertFalse(should_stop_store_on_error("sku_not_found", execution_config))
+
+    def test_classify_window_closed_webdriver_error(self) -> None:
+        self.assertEqual(
+            classify_offline_error(Exception("no such window: target window already closed"), {}),
+            "browser_window_closed",
+        )
 
     def test_should_not_retry_terminal_item_categories(self) -> None:
         execution_config: dict[str, object] = {}

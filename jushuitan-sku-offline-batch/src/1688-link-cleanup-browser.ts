@@ -12,6 +12,7 @@ import {
 } from "./1688-link-cleanup-core";
 import {
   dismissQuickSaveModal,
+  dismissVisibleGuides,
   dismissVisibleModals,
   collectStorePickerDiagnostics,
   ensureProductPage,
@@ -200,28 +201,63 @@ async function queryTaskRows(
   await searchButton.click({ force: true });
   await page.waitForTimeout(appConfig.searchWaitMs);
   await dismissQuickSaveModal(page);
+  await dismissVisibleGuides(page);
   await assertNoRiskControl(page);
   const collected = await collectRows(target);
   await saveTaskEvidence(page, target, options, task, selectStore ? "query" : "verify");
   return { target, ...collected };
 }
 
-async function selectExactResultRow(locator: Locator, rowIndex: number): Promise<void> {
-  const row = locator.nth(rowIndex);
-  const input = row.locator("td:first-child input.ant-checkbox-input, td:first-child input[type='checkbox']").first();
-  if ((await input.count().catch(() => 0)) === 0) {
-    throw new CleanupBrowserError("row_selection_failed", "The exact result row has no selectable checkbox");
+async function rowSelectionAccepted(row: Locator, input: Locator): Promise<boolean> {
+  return (
+    (await input.isChecked().catch(() => false)) ||
+    (await input.getAttribute("aria-checked").catch(() => "")) === "true" ||
+    (await row.locator(".ant-checkbox-checked, [role='checkbox'][aria-checked='true']").count().catch(() => 0)) > 0
+  );
+}
+
+async function selectExactResultRow(page: Page, target: Target, task: CleanupTask): Promise<void> {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    await dismissVisibleGuides(page);
+    const collected = await collectRows(target);
+    const matches = findMatchingRows(task, collected.rows);
+    if (matches.length !== 1) {
+      throw new CleanupBrowserError(
+        matches.length === 0 ? "task_not_found" : "ambiguous_match",
+        `Exact row changed before selection; expected one match but found ${matches.length}`,
+      );
+    }
+
+    const row = collected.locator.nth(matches[0].index);
+    const inputs = row.locator(
+      "td:first-child input.ant-checkbox-input, td:first-child input[type='checkbox'], input.ant-checkbox-input[type='checkbox'], [role='checkbox']",
+    );
+    const inputCount = await inputs.count().catch(() => 0);
+    if (inputCount === 0) {
+      throw new CleanupBrowserError("row_selection_failed", "The exact result row has no selectable checkbox");
+    }
+
+    for (let index = 0; index < Math.min(inputCount, 4); index += 1) {
+      const input = inputs.nth(index);
+      if (await rowSelectionAccepted(row, input)) {
+        return;
+      }
+      await input.check({ force: true }).catch(() => undefined);
+      if (!(await rowSelectionAccepted(row, input))) {
+        const label = input
+          .locator("xpath=ancestor::label[contains(@class,'ant-checkbox-wrapper')][1]")
+          .or(row.locator("td:first-child label.ant-checkbox-wrapper, td:first-child .ant-checkbox-inner"))
+          .first();
+        await label.click({ force: true }).catch(() => undefined);
+      }
+      await page.waitForTimeout(300);
+      if (await rowSelectionAccepted(row, input)) {
+        return;
+      }
+    }
   }
-  if (!(await input.isChecked().catch(() => false))) {
-    await input.check({ force: true }).catch(() => undefined);
-  }
-  if (!(await input.isChecked().catch(() => false))) {
-    const label = row.locator("td:first-child label.ant-checkbox-wrapper, td:first-child .ant-checkbox-inner").first();
-    await label.click({ force: true }).catch(() => undefined);
-  }
-  if (!(await input.isChecked().catch(() => false))) {
-    throw new CleanupBrowserError("row_selection_failed", "Jushuitan did not accept the exact row selection");
-  }
+
+  throw new CleanupBrowserError("row_selection_failed", "Jushuitan did not accept the exact row selection");
 }
 
 async function clickClearLinkAction(target: Target, page: Page): Promise<void> {
@@ -329,7 +365,7 @@ async function processTask(
     };
   }
 
-  await selectExactResultRow(initial.locator, matches[0].index);
+  await selectExactResultRow(page, initial.target, task);
   await saveTaskEvidence(page, initial.target, options, task, "selected");
   await clickClearLinkAction(initial.target, page);
   const confirmationText = await confirmClearLink(initial.target, page);
