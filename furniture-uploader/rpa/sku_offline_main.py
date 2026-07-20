@@ -568,6 +568,7 @@ def should_stop_store_on_error(error_category: str, execution_config: dict[str, 
             "account_mapping",
             "browser_window_closed",
             "delivery_service_backfill_failed",
+            "management_search_timeout",
         ],
     )
     categories = {str(item).strip() for item in configured if str(item).strip()}
@@ -744,6 +745,7 @@ def localize_error_category(error_category: str) -> str:
         "submit_failed": "提交失败",
         "browser_window_closed": "浏览器窗口异常关闭",
         "delivery_service_backfill_failed": "配送服务自动补全失败",
+        "management_search_timeout": "商品管理搜索超时",
         "automation_error": "脚本异常",
     }
     normalized = str(error_category or "").strip()

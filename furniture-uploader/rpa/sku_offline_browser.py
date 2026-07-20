@@ -331,13 +331,28 @@ class SkuOfflineBrowser(BrowserRPA):
         result_row = self._resolve_selector(selectors.get("product_result_row", {}), context)
         if self._selector_is_configured(result_row):
             try:
-                self._wait_for_element(result_row)
+                self._wait_for_management_result_row(result_row, context)
             except TimeoutException:
                 context["management_search_retry"] = "query_url"
                 self._open_management_filter_query(context)
                 self._pause(4.0)
                 self._wait_for_management_search_ready(context)
-                self._wait_for_element(result_row)
+                try:
+                    self._wait_for_management_result_row(result_row, context)
+                except TimeoutException as exc:
+                    self._assert_not_redirected_to_login(context)
+                    self._assert_no_risk_control_block(context)
+                    message = (
+                        f"Timed out locating product {context.get('product_id', '')} "
+                        "after management search and query-url fallback."
+                    )
+                    self._annotate_page_error_context(
+                        context,
+                        stage_name="management_product_search",
+                        error_text=message,
+                        error_category="management_search_timeout",
+                    )
+                    raise OfflineTaskStateError(message) from exc
             context["edit_entry_stage"] = "management_product_matched"
         else:
             body_text = self.driver.find_element(By.TAG_NAME, "body").text
@@ -345,6 +360,34 @@ class SkuOfflineBrowser(BrowserRPA):
                 raise OfflineTaskNotFoundError(
                     f"Product '{context.get('product_id', '')}' was not found on the management page."
                 )
+
+    def _wait_for_management_result_row(
+        self,
+        configured_selector: dict[str, str],
+        context: dict[str, Any],
+    ) -> Any:
+        product_id = str(context.get("product_id", "")).strip()
+        candidates = [configured_selector]
+        if product_id:
+            fallback = {
+                "by": "xpath",
+                "value": (
+                    f"//tr[@data-row-key='{product_id}' or "
+                    f".//td[normalize-space(.)='{product_id}' or contains(normalize-space(.), '{product_id}')]]"
+                ),
+            }
+            if fallback != configured_selector:
+                candidates.append(fallback)
+
+        last_error: TimeoutException | None = None
+        for selector in candidates:
+            try:
+                return self._wait_for_element(selector)
+            except TimeoutException as exc:
+                last_error = exc
+        if last_error is not None:
+            raise last_error
+        raise TimeoutException("No management result-row selector was available.")
 
     def _wait_for_management_search_ready(self, context: dict[str, Any]) -> None:
         if not self.driver:
@@ -428,7 +471,7 @@ class SkuOfflineBrowser(BrowserRPA):
         before_handles = list(self.driver.window_handles)
 
         if self._selector_is_configured(result_row_selector) and edit_button_in_row:
-            row_element = self._wait_for_element(result_row_selector)
+            row_element = self._wait_for_management_result_row(result_row_selector, context)
             edit_button = row_element.find_element(
                 BY_MAPPING.get(str(edit_button_in_row.get("by", "css")).strip().lower(), By.CSS_SELECTOR),
                 str(edit_button_in_row.get("value", "")).strip(),

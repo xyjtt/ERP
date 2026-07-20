@@ -312,6 +312,26 @@ class SkuOfflineBrowserTests(unittest.TestCase):
         self.assertEqual(context["direct_edit_rejected_code"], "PUB_BIZCHECK_BIZ_IDENTITY_ERROR")
         self.assertNotIn("page_error_category", context)
 
+    def test_management_result_row_falls_back_to_product_id_text(self) -> None:
+        browser = SkuOfflineBrowser({}, PROJECT_ROOT)
+        calls: list[dict[str, str]] = []
+
+        def fake_wait(selector: dict[str, str], clickable: bool = False):
+            calls.append(selector)
+            if selector.get("by") == "css":
+                raise TimeoutException("primary selector missed")
+            return object()
+
+        browser._wait_for_element = fake_wait  # type: ignore[method-assign]
+        result = browser._wait_for_management_result_row(
+            {"by": "css", "value": "tr[data-row-key='1001']"},
+            {"product_id": "1001"},
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(calls[1]["by"], "xpath")
+        self.assertIn("1001", calls[1]["value"])
+
     def test_sales_info_activation_recovers_with_cdp_reload(self) -> None:
         browser = SkuOfflineBrowser({}, PROJECT_ROOT)
         cdp_calls: list[tuple[str, dict[str, bool]]] = []

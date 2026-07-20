@@ -214,13 +214,15 @@ class SkuOfflineMainTests(unittest.TestCase):
                 "store_mismatch",
                 "identity_mismatch",
                 "browser_window_closed",
-                "delivery_service_backfill_failed",
+            "delivery_service_backfill_failed",
+            "management_search_timeout",
             ]
         }
 
         self.assertTrue(should_stop_store_on_error("identity_mismatch", execution_config))
         self.assertTrue(should_stop_store_on_error("browser_window_closed", execution_config))
         self.assertTrue(should_stop_store_on_error("delivery_service_backfill_failed", execution_config))
+        self.assertTrue(should_stop_store_on_error("management_search_timeout", execution_config))
         self.assertFalse(should_stop_store_on_error("sku_not_found", execution_config))
 
     def test_classify_window_closed_webdriver_error(self) -> None:

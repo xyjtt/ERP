@@ -36,7 +36,8 @@
       "identity_mismatch",
       "account_mapping",
       "browser_window_closed",
-      "delivery_service_backfill_failed"
+      "delivery_service_backfill_failed",
+      "management_search_timeout"
     ],
     "non_retryable_error_categories": [
       "task_not_found",
@@ -144,8 +145,8 @@
         "value": "//button[@data-click='search' or normalize-space(.)='搜索' or .//span[contains(normalize-space(.), '搜索')]]"
       },
       "product_result_row": {
-        "by": "css",
-        "value": "tr[data-row-key='{product_id}']"
+        "by": "xpath",
+        "value": "//tr[@data-row-key='{product_id}' or .//td[normalize-space(.)='{product_id}' or contains(normalize-space(.), '{product_id}')]]"
       },
       "edit_button_in_row": {
         "by": "xpath",
