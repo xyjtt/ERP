@@ -4,6 +4,7 @@ import argparse
 from contextlib import nullcontext
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -92,6 +93,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--file", required=True, help="CSV/XLSX stop-sale input file")
     parser.add_argument("--mode", choices=("preview", "execute"), default="preview")
     parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument(
+        "--run-id",
+        default="",
+        help="Optional externally assigned run ID for scheduler and audit correlation.",
+    )
     parser.add_argument("--yes", action="store_true", help="Required for live execute mode")
     login_mode = parser.add_mutually_exclusive_group()
     login_mode.add_argument(
@@ -515,6 +521,8 @@ def run_pipeline(
 
 def main() -> int:
     args = build_argument_parser().parse_args()
+    if args.run_id and not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", str(args.run_id)):
+        raise ValueError("--run-id must contain only letters, numbers, dot, underscore, or dash")
     if args.limit < 0:
         raise ValueError("--limit must be non-negative")
     if args.lock_wait_seconds < 0 or args.lock_stale_seconds <= 0 or args.lock_poll_seconds <= 0:
@@ -534,7 +542,7 @@ def main() -> int:
     if not (jushuitan_root / "package.json").exists():
         raise FileNotFoundError(f"Jushuitan project not found: {jushuitan_root}")
 
-    run_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    run_id = str(args.run_id or "").strip() or datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     args.run_id = run_id
     pipeline_dir = PROJECT_ROOT / "logs" / "sku_offline" / "pipelines"
     pipeline_dir.mkdir(parents=True, exist_ok=True)

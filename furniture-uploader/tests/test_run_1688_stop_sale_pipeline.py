@@ -75,6 +75,13 @@ class Run1688StopSalePipelineTests(unittest.TestCase):
 
         self.assertTrue(args.skip_login)
 
+    def test_scheduler_can_supply_a_deterministic_run_id(self) -> None:
+        args = build_argument_parser().parse_args(
+            ["--file", "tasks.csv", "--run-id", "daily_20260721_s01"]
+        )
+
+        self.assertEqual(args.run_id, "daily_20260721_s01")
+
     def test_manual_login_requires_an_explicit_override(self) -> None:
         args = build_argument_parser().parse_args(
             ["--file", "tasks.csv", "--require-manual-login"]

@@ -390,6 +390,79 @@ class SkuOfflineMainTests(unittest.TestCase):
         self.assertEqual(len(run_report.rows), 2)
         notify_failure.assert_called_once()
 
+    def test_session_safety_exception_is_recorded_without_failing_the_process(self) -> None:
+        tasks = [
+            OfflineTask(
+                source_file="demo.csv",
+                source_sheet="CSV",
+                source_row_number=index + 2,
+                store_name="STORE-A",
+                platform="Alibaba",
+                product_id=str(1000 + index),
+                online_sku=f"SKU-{index}",
+                handling="all-channel-offline",
+                replacement_sku="",
+                change_image="",
+                platform_store_item_code=f"CODE-{index}",
+                raw={},
+            )
+            for index in range(2)
+        ]
+
+        class OfflineLoginRequiredError(Exception):
+            pass
+
+        class FakeBrowser:
+            def __init__(self, *_args, **_kwargs) -> None:
+                self.last_result_context: dict[str, str] = {}
+                self.last_screenshot_path = ""
+                self.last_html_snapshot_path = ""
+
+            def open(self) -> None:
+                return None
+
+            def prepare_session(self, *_args, **_kwargs) -> None:
+                raise OfflineLoginRequiredError("login expired")
+
+            def close(self) -> None:
+                return None
+
+        run_report = FakeRunReport()
+        system_config = {
+            "execution": {
+                "require_store_account_mapping": True,
+                "store_accounts": [{"store_name": "STORE-A", "account_key": "store_a"}],
+                "stop_store_on_error_categories": ["login_required"],
+            },
+            "notifications": {"dingtalk": {"enabled": True}},
+        }
+
+        with (
+            patch("sku_offline_main.SkuOfflineBrowser", FakeBrowser),
+            patch("sku_offline_main.send_failure_notification") as notify_failure,
+            patch("sku_offline_main.send_summary_notification"),
+        ):
+            summary = execute_preview(
+                project_root=PROJECT_ROOT,
+                operator_config={"browser": {}},
+                system_config=system_config,
+                preview={
+                    "selected_tasks": tasks,
+                    "duplicate_count": 0,
+                    "filtered_out_count": 0,
+                },
+                skip_login=True,
+                no_notify=False,
+                run_report=run_report,  # type: ignore[arg-type]
+            )
+
+        self.assertEqual(summary["failed"], 2)
+        self.assertEqual(summary["stopped_stores"], 1)
+        self.assertEqual(len(run_report.rows), 2)
+        self.assertEqual({row["error_category"] for row in run_report.rows}, {"login_required"})
+        self.assertEqual(run_report.rows[0]["page_error_stage"], "pre_execution_session")
+        notify_failure.assert_called_once()
+
     def test_jushuitan_handoff_preserves_distinct_platform_store_codes(self) -> None:
         first = OfflineTask(
             source_file="demo.csv",

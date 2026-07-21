@@ -297,6 +297,7 @@ def execute_preview(
     }
     max_attempts = max(1, int(execution_config.get("max_retry", 1)) + 1)
     successful_task_statuses: dict[tuple[str, str, str], str] = {}
+    finished_task_keys: set[tuple[str, str, str]] = set()
 
     for store_name, store_tasks in store_groups.items():
         try:
@@ -334,8 +335,8 @@ def execute_preview(
         browser = SkuOfflineBrowser(store_operator_config.get("browser", {}), project_root)
         store_stopped = False
 
-        browser.open()
         try:
+            browser.open()
             browser.prepare_session(system_config, skip_login=skip_login)
             for task in store_tasks:
                 browser.reset_runtime_artifacts()
@@ -366,6 +367,7 @@ def execute_preview(
                                 result_context=result_context,
                             )
                         )
+                        finished_task_keys.add(task.dedupe_key)
                         break
                     except Exception as exc:
                         error_category = classify_offline_error(exc, browser.last_result_context)
@@ -391,6 +393,7 @@ def execute_preview(
                             html_snapshot_path=browser.last_html_snapshot_path,
                         )
                         run_report.append(payload)
+                        finished_task_keys.add(task.dedupe_key)
                         safe_console_print(
                             f"[ERROR] Offline task failed: {task.store_name} "
                             f"{task.product_id} {task.online_sku} -> {exc}"
@@ -406,6 +409,38 @@ def execute_preview(
                         break
                 if store_stopped:
                     break
+        except Exception as exc:
+            error_category = classify_offline_error(exc, browser.last_result_context)
+            if not should_stop_store_on_error(error_category, execution_config):
+                raise
+
+            remaining_tasks = [
+                task for task in store_tasks if task.dedupe_key not in finished_task_keys
+            ]
+            summary["failed"] += len(remaining_tasks)
+            summary["stopped_stores"] += 1
+            summary["stopped_store_names"].append(store_name)
+            result_context = dict(browser.last_result_context or {})
+            result_context.setdefault("page_error_category", error_category)
+            result_context.setdefault("page_error_stage", "pre_execution_session")
+            result_context.setdefault("page_error_text", str(exc))
+            for index, task in enumerate(remaining_tasks):
+                payload = build_run_report_payload(
+                    task=task,
+                    status="failed",
+                    attempts=0,
+                    result_context=result_context,
+                    exc=exc,
+                    screenshot_path=browser.last_screenshot_path,
+                    html_snapshot_path=browser.last_html_snapshot_path,
+                )
+                run_report.append(payload)
+                finished_task_keys.add(task.dedupe_key)
+                if index == 0:
+                    send_failure_notification(system_config, payload, disabled=no_notify)
+            safe_console_print(
+                f"[ERROR] Stop store batch for {store_name}: safety category={error_category}; {exc}"
+            )
         finally:
             browser.close()
 
