@@ -1028,10 +1028,12 @@ class SkuOfflineBrowser(BrowserRPA):
         if not self.driver:
             raise RuntimeError("Browser has not been opened.")
         try:
+            self.driver.switch_to.default_content()
             self.driver.refresh()
             self._pause(5.0)
             self._assert_not_redirected_to_login(context)
             self._assert_no_risk_control_block(context)
+            self._activate_sales_info_section(selectors, context)
             expected_product_id = str(context.get("product_id", "")).strip()
             actual_product_id = self._extract_product_id_from_current_url()
             context["trace_miss_probe_product_id"] = actual_product_id

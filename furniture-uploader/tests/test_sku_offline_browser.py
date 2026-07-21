@@ -113,10 +113,14 @@ class FakeSuccessDriver:
         self.current_url = current_url
         self.title = ""
         self.switch_to = type("SwitchTo", (), {"default_content": lambda self: None})()
+        self.refresh_count = 0
 
     def get(self, url: str) -> None:
         self.visited_urls.append(url)
         self.current_url = url
+
+    def refresh(self) -> None:
+        self.refresh_count += 1
 
 
 class FakeClickableElement:
@@ -503,6 +507,38 @@ class SkuOfflineBrowserTests(unittest.TestCase):
 
         self.assertEqual(context["submit_success_phase"], "persisted_state_after_trace_miss")
         self.assertEqual(context["execution_result"], "submitted_untraced_verified")
+
+    def test_trace_miss_probe_resets_document_and_reactivates_sales_section(self) -> None:
+        browser = SkuOfflineBrowser({}, PROJECT_ROOT)
+        browser.driver = FakeSuccessDriver(
+            current_url="https://offer-new.1688.com/popular/publish.htm?id=1023529250812&operator=edit"
+        )
+        switch_element = FakeClickableElement()
+        sku_row = type("SkuRow", (), {"find_element": lambda self, *args: switch_element})()
+        activated: list[str] = []
+        browser._pause = lambda seconds: None  # type: ignore[method-assign]
+        browser._assert_not_redirected_to_login = lambda context=None: None  # type: ignore[method-assign]
+        browser._assert_no_risk_control_block = lambda context: None  # type: ignore[method-assign]
+        browser._activate_sales_info_section = lambda selectors, context: activated.append("sales")  # type: ignore[method-assign]
+        browser._extract_product_id_from_current_url = lambda: "1023529250812"  # type: ignore[method-assign]
+        browser._find_sku_row_by_runtime_value = lambda context: sku_row  # type: ignore[method-assign]
+        browser._read_switch_label = lambda element: "下架"  # type: ignore[method-assign]
+        browser._is_already_offline = lambda element, label: True  # type: ignore[method-assign]
+
+        context: dict[str, object] = {
+            "product_id": "1023529250812",
+            "online_sku": "ZH-SZD000628N693V01-1-SZT009219N961V01-1",
+        }
+
+        result = browser._probe_persisted_offline_after_trace_miss(
+            {"sku_switch": {"by": "css", "value": ".switch"}},
+            context,
+        )
+
+        self.assertTrue(result)
+        self.assertEqual(browser.driver.refresh_count, 1)
+        self.assertEqual(activated, ["sales"])
+        self.assertEqual(context["trace_miss_persistence_probe"], "offline")
 
     def test_ensure_target_sku_still_offline_uses_runtime_row(self) -> None:
         browser = SkuOfflineBrowser({}, PROJECT_ROOT)
