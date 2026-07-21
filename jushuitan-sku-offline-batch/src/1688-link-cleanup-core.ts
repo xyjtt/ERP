@@ -88,6 +88,19 @@ export function buildTaskId(task: {
   return crypto.createHash("sha256").update(key, "utf8").digest("hex");
 }
 
+export function buildProductGroupKey(task: {
+  store_name: string;
+  product_id: string;
+}): string {
+  return [task.store_name, task.product_id].map(normalizedKeyPart).join("\u0000");
+}
+
+export function orderCleanupTasksForExecution(tasks: CleanupTask[]): CleanupTask[] {
+  return [...tasks].sort((left, right) =>
+    buildProductGroupKey(left).localeCompare(buildProductGroupKey(right)),
+  );
+}
+
 export function parseCleanupTask(raw: unknown): CleanupTask {
   const parsed = cleanupTaskSchema.parse(raw);
   if (parsed.platform.toLowerCase() !== "alibaba") {

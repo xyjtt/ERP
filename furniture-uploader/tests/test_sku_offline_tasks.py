@@ -18,6 +18,7 @@ from sku_offline_tasks import (
     build_preview_payload,
     dedupe_offline_tasks,
     filter_offline_tasks,
+    group_tasks_by_product,
     group_tasks_by_store,
     load_offline_tasks,
 )
@@ -137,6 +138,38 @@ class OfflineTaskTests(unittest.TestCase):
             self.assertFalse(registry.contains(task_file))
             registry.record(path=task_file, status="processed", moved_to=str(task_file))
             self.assertTrue(registry.contains(task_file))
+
+    def test_product_grouping_combines_skus_but_keeps_store_and_product_boundaries(self) -> None:
+        dataframe = pd.DataFrame(
+            [
+                {
+                    "店铺名称": store,
+                    "平台": "Alibaba",
+                    "商品ID": product_id,
+                    "平台店铺商品编码": f"CODE-{index}",
+                    "线上商品编码": f"SKU-{index}",
+                    "处理说明": "全渠道下架",
+                    "可替换商品编码": "",
+                    "是否换图": "否",
+                }
+                for index, (store, product_id) in enumerate(
+                    [
+                        ("速班达家居", "1001"),
+                        ("速班达家居", "1001"),
+                        ("速班达家居", "1002"),
+                        ("另一个店铺", "1001"),
+                    ]
+                )
+            ]
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "offline.xlsx"
+            dataframe.to_excel(path, sheet_name="停产下架通知-链接维度", index=False)
+            tasks = load_offline_tasks(path, self.build_input_config())
+
+        groups = group_tasks_by_product(tasks)
+
+        self.assertEqual([len(group) for group in groups.values()], [2, 1, 1])
 
     def test_build_preview_payload_groups_by_store(self) -> None:
         dataframe = pd.DataFrame(

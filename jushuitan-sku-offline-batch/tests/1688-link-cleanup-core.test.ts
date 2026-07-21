@@ -7,10 +7,12 @@ import {
   appendLedgerResult,
   assertTasksAllowedForMode,
   buildOperationsMessages,
+  buildProductGroupKey,
   buildTaskId,
   findMatchingRows,
   loadCleanupTasks,
   loadSuccessfulLedgerTaskIds,
+  orderCleanupTasksForExecution,
   parseCleanupTask,
 } from "../src/1688-link-cleanup-core";
 
@@ -28,6 +30,34 @@ test("task identity includes the platform store item code", () => {
   const first = buildTaskId(rawTask);
   const second = buildTaskId({ ...rawTask, platform_store_item_code: "other-code" });
   assert.notEqual(first, second);
+});
+
+test("product grouping ignores SKU but keeps store and product boundaries", () => {
+  assert.equal(
+    buildProductGroupKey(rawTask),
+    buildProductGroupKey({ ...rawTask, online_sku: "OTHER-SKU" }),
+  );
+  assert.notEqual(
+    buildProductGroupKey(rawTask),
+    buildProductGroupKey({ ...rawTask, product_id: "OTHER-PRODUCT" }),
+  );
+  assert.notEqual(
+    buildProductGroupKey(rawTask),
+    buildProductGroupKey({ ...rawTask, store_name: "阿里巴巴-其他店铺" }),
+  );
+});
+
+test("execution ordering keeps store and product tasks contiguous", () => {
+  const tasks = [
+    parseCleanupTask({ ...rawTask, product_id: "PRODUCT-B", online_sku: "SKU-1" }),
+    parseCleanupTask({ ...rawTask, product_id: "PRODUCT-A", online_sku: "SKU-2" }),
+    parseCleanupTask({ ...rawTask, product_id: "PRODUCT-B", online_sku: "SKU-3" }),
+  ];
+
+  assert.deepEqual(
+    orderCleanupTasksForExecution(tasks).map((task) => task.product_id),
+    ["PRODUCT-A", "PRODUCT-B", "PRODUCT-B"],
+  );
 });
 
 test("parser rejects a non-Alibaba task", () => {

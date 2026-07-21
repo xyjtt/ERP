@@ -106,15 +106,37 @@ def split_store_input(source: Path, output_dir: Path, batch_size: int) -> list[P
     if not rows:
         return []
 
+    store_field = next((name for name in ("店铺名称", "store_name") if name in fieldnames), "")
+    product_field = next((name for name in ("商品ID", "product_id") if name in fieldnames), "")
+    row_batches: list[list[dict[str, str]]] = []
+    if product_field:
+        product_groups: dict[tuple[str, str], list[dict[str, str]]] = {}
+        for row in rows:
+            key = (
+                str(row.get(store_field, "")).strip() if store_field else "",
+                str(row.get(product_field, "")).strip(),
+            )
+            product_groups.setdefault(key, []).append(row)
+
+        current_batch: list[dict[str, str]] = []
+        for product_rows in product_groups.values():
+            if current_batch and len(current_batch) + len(product_rows) > batch_size:
+                row_batches.append(current_batch)
+                current_batch = []
+            current_batch.extend(product_rows)
+        if current_batch:
+            row_batches.append(current_batch)
+    else:
+        row_batches = [rows[offset: offset + batch_size] for offset in range(0, len(rows), batch_size)]
+
     output_dir.mkdir(parents=True, exist_ok=True)
     paths: list[Path] = []
-    for offset in range(0, len(rows), batch_size):
-        batch_number = offset // batch_size + 1
+    for batch_number, batch_rows in enumerate(row_batches, start=1):
         path = output_dir / f"batch_{batch_number:03d}.csv"
         with path.open("w", encoding="utf-8-sig", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=fieldnames)
             writer.writeheader()
-            writer.writerows(rows[offset: offset + batch_size])
+            writer.writerows(batch_rows)
         paths.append(path)
     return paths
 

@@ -86,6 +86,26 @@ class Manage1688StopSaleDailyTests(unittest.TestCase):
         self.assertEqual([path.name for path in paths], ["batch_001.csv", "batch_002.csv", "batch_003.csv"])
         self.assertEqual(row_counts, [2, 2, 1])
 
+    def test_store_input_never_splits_skus_for_the_same_product(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "store.csv"
+            self.write_store_csv(
+                source,
+                [
+                    ("STORE-A", "PRODUCT-A", "SKU-1"),
+                    ("STORE-A", "PRODUCT-B", "SKU-2"),
+                    ("STORE-A", "PRODUCT-B", "SKU-3"),
+                    ("STORE-A", "PRODUCT-C", "SKU-4"),
+                ],
+            )
+
+            paths = split_store_input(source, root / "batches", 2)
+            batches = [path.read_text(encoding="utf-8-sig").splitlines()[1:] for path in paths]
+
+        self.assertEqual([len(rows) for rows in batches], [1, 2, 1])
+        self.assertTrue(all("PRODUCT-B" in row for row in batches[1]))
+
     def test_full_preview_report_supplies_per_store_csv_paths(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             report_path = Path(temp_dir) / "report.json"

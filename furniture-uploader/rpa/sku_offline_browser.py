@@ -48,8 +48,36 @@ class SkuOfflineBrowser(BrowserRPA):
         *,
         account_binding: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        outcome = self.execute_offline_group(
+            system_config,
+            [task],
+            account_binding=account_binding,
+        )[0]
+        if outcome["status"] == "failed":
+            error = outcome.get("error")
+            if isinstance(error, BaseException):
+                raise error
+            raise RuntimeError(str(error or "1688 SKU offline task failed"))
+        return dict(outcome["context"])
+
+    def execute_offline_group(
+        self,
+        system_config: dict[str, Any],
+        tasks: list[OfflineTask],
+        *,
+        account_binding: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
         if not self.driver:
             raise RuntimeError("Browser has not been opened.")
+        if not tasks:
+            return []
+
+        group_keys = {
+            (str(task.store_name).strip(), str(task.product_id).strip())
+            for task in tasks
+        }
+        if len(group_keys) != 1:
+            raise ValueError("A grouped 1688 edit operation must contain one store and one product ID.")
 
         selectors = dict(system_config.get("workflow", {}).get("selectors", {}))
         success_detection = dict(system_config.get("workflow", {}).get("success_detection", {}))
@@ -57,35 +85,152 @@ class SkuOfflineBrowser(BrowserRPA):
         pre_submit_backfill = dict(system_config.get("workflow", {}).get("pre_submit_backfill", {}))
         post_submit_verification = dict(system_config.get("workflow", {}).get("post_submit_verification", {}))
         safety_config = dict(system_config.get("execution", {}).get("safety", {}))
-        context = task.to_context()
-        self._apply_account_binding_context(context, account_binding or {})
-        self.last_result_context = context
+        contexts = [task.to_context() for task in tasks]
+        for context in contexts:
+            self._apply_account_binding_context(context, account_binding or {})
+            context["group_sku_count"] = str(len(tasks))
+            context["group_target_skus"] = [str(item.online_sku).strip() for item in tasks]
+        first_context = contexts[0]
+        active_context = first_context
+        self.last_result_context = first_context
         main_window = self.driver.current_window_handle
+        outcomes: list[dict[str, Any]] = []
 
         try:
             self._open_task_edit_page(
                 system_config,
                 selectors,
-                context,
+                first_context,
                 safety_config,
             )
             self._assert_not_redirected_to_login()
-            self._assert_no_risk_control_block(context)
-            self._assert_edit_page_identity(context, safety_config)
-            changed = self._toggle_sku_offline(selectors, context)
-            if changed:
-                self._submit_changes(selectors, success_detection, error_detection, pre_submit_backfill, context)
-                self._verify_persisted_offline(selectors, post_submit_verification, context)
-            else:
-                context["execution_result"] = "already_offline"
-                context["success_detected"] = "true"
-            self._record_page_metadata(context)
-            self.last_result_context = context
-            return context
+            self._assert_no_risk_control_block(first_context)
+            self._assert_edit_page_identity(first_context, safety_config)
+
+            shared_context_keys = (
+                "edit_entry_mode",
+                "edit_entry_fallback",
+                "edit_page_product_id",
+                "edit_page_error_code",
+            )
+            for task, context in zip(tasks, contexts):
+                active_context = context
+                self.last_result_context = context
+                for key in shared_context_keys:
+                    if key in first_context:
+                        context[key] = first_context[key]
+                try:
+                    changed = self._toggle_sku_offline(selectors, context)
+                except Exception as exc:
+                    if isinstance(
+                        exc,
+                        (
+                            OfflineLoginRequiredError,
+                            OfflineRiskControlError,
+                            OfflineStoreMismatchError,
+                            OfflineIdentityMismatchError,
+                        ),
+                    ):
+                        for item in outcomes:
+                            if item["status"] == "pending_submit":
+                                self._revert_unsaved_sku_toggle(selectors, item["context"])
+                        raise
+                    self._record_page_metadata(context)
+                    self._capture_screenshot(f"{task.product_id}_{task.online_sku}")
+                    outcomes.append(
+                        {
+                            "task": task,
+                            "status": "failed",
+                            "context": context,
+                            "error": exc,
+                            "screenshot_path": self.last_screenshot_path,
+                            "html_snapshot_path": self.last_html_snapshot_path,
+                        }
+                    )
+                    continue
+
+                if changed:
+                    outcomes.append(
+                        {
+                            "task": task,
+                            "status": "pending_submit",
+                            "context": context,
+                            "error": None,
+                            "screenshot_path": "",
+                            "html_snapshot_path": "",
+                        }
+                    )
+                else:
+                    context["execution_result"] = "already_offline"
+                    context["success_detected"] = "true"
+                    outcomes.append(
+                        {
+                            "task": task,
+                            "status": "already_offline",
+                            "context": context,
+                            "error": None,
+                            "screenshot_path": "",
+                            "html_snapshot_path": "",
+                        }
+                    )
+
+            changed_outcomes = [item for item in outcomes if item["status"] == "pending_submit"]
+            if changed_outcomes:
+                submit_context = dict(changed_outcomes[0]["context"])
+                submit_context["group_changed_skus"] = [
+                    str(item["task"].online_sku).strip() for item in changed_outcomes
+                ]
+                try:
+                    for item in changed_outcomes:
+                        self._ensure_target_sku_still_offline(selectors, item["context"])
+                    self._submit_changes(
+                        selectors,
+                        success_detection,
+                        error_detection,
+                        pre_submit_backfill,
+                        submit_context,
+                    )
+                    self._verify_group_persisted_offline(
+                        selectors,
+                        post_submit_verification,
+                        [item["context"] for item in changed_outcomes],
+                    )
+                except Exception as exc:
+                    self.last_result_context = submit_context
+                    self._record_page_metadata(submit_context)
+                    self._capture_screenshot(f"{tasks[0].product_id}_group_submit")
+                    submit_metadata = {
+                        key: value
+                        for key, value in submit_context.items()
+                        if key.startswith(("submit_", "success_", "page_error_", "pre_submit_"))
+                    }
+                    for item in changed_outcomes:
+                        item["context"].update(submit_metadata)
+                        item["context"]["group_submit_failed"] = "true"
+                        item["status"] = "failed"
+                        item["error"] = exc
+                        item["screenshot_path"] = self.last_screenshot_path
+                        item["html_snapshot_path"] = self.last_html_snapshot_path
+                else:
+                    submit_metadata = {
+                        key: value
+                        for key, value in submit_context.items()
+                        if key.startswith(("submit_", "success_", "pre_submit_"))
+                    }
+                    for item in changed_outcomes:
+                        item["context"].update(submit_metadata)
+                        item["context"]["execution_result"] = "submitted"
+                        item["status"] = "success"
+
+            for item in outcomes:
+                self._record_page_metadata(item["context"])
+            if outcomes:
+                self.last_result_context = outcomes[-1]["context"]
+            return outcomes
         except Exception:
-            self._record_page_metadata(context)
-            self.last_result_context = context
-            self._capture_screenshot(f"{task.product_id}_{task.online_sku}")
+            self._record_page_metadata(active_context)
+            self.last_result_context = active_context
+            self._capture_screenshot(f"{tasks[0].product_id}_group")
             raise
         finally:
             self._restore_management_window(main_window)
@@ -3489,18 +3634,34 @@ class SkuOfflineBrowser(BrowserRPA):
         verification_config: dict[str, Any],
         context: dict[str, Any],
     ) -> None:
+        self._verify_group_persisted_offline(selectors, verification_config, [context])
+
+    def _verify_group_persisted_offline(
+        self,
+        selectors: dict[str, Any],
+        verification_config: dict[str, Any],
+        contexts: list[dict[str, Any]],
+    ) -> None:
         if not self.driver:
             raise RuntimeError("Browser has not been opened.")
+        if not contexts:
+            return
         if not verification_config or not verification_config.get("enabled", True):
-            context["post_submit_verified"] = "skipped"
+            for context in contexts:
+                context["post_submit_verified"] = "skipped"
             return
 
-        if self._is_review_submission_success(verification_config, context):
-            context["post_submit_verified"] = "review_submitted"
-            context["execution_result"] = "review_submitted"
+        if self._is_review_submission_success(verification_config, contexts[0]):
+            for context in contexts:
+                context["post_submit_verified"] = "review_submitted"
+                context["execution_result"] = "review_submitted"
             return
 
-        product_id = str(context.get("product_id", "")).strip()
+        product_ids = {str(context.get("product_id", "")).strip() for context in contexts}
+        product_ids.discard("")
+        if len(product_ids) != 1:
+            raise PublishSubmitError("Grouped post-submit verification requires one product_id.")
+        product_id = next(iter(product_ids))
         if not product_id:
             raise PublishSubmitError("Missing product_id for post-submit verification.")
 
@@ -3509,38 +3670,36 @@ class SkuOfflineBrowser(BrowserRPA):
         timeout_seconds = float(verification_config.get("timeout_seconds", 150))
         refresh_interval_seconds = max(1.0, float(verification_config.get("refresh_interval_seconds", 15)))
         deadline = time.time() + max(timeout_seconds, 0)
-        attempts: list[dict[str, Any]] = []
+        attempts_by_sku: dict[str, list[dict[str, Any]]] = {
+            str(context.get("online_sku", "")).strip(): [] for context in contexts
+        }
 
         self._pause(initial_wait_seconds)
         while True:
             self.driver.get(verify_url)
             self._pause(5.0)
+            self._assert_not_redirected_to_login(contexts[0])
+            self._assert_no_risk_control_block(contexts[0])
 
-            switch_label = ""
-            aria_checked = ""
-            try:
-                sku_row_selector = self._resolve_selector(selectors.get("sku_row", {}), context)
-                if not self._selector_is_configured(sku_row_selector):
-                    raise PublishSubmitError("sku_row selector is not configured for post-submit verification.")
-                sku_row = self._wait_for_element(sku_row_selector)
+            unresolved: list[str] = []
+            for context in contexts:
+                online_sku = str(context.get("online_sku", "")).strip()
+                attempts = attempts_by_sku.setdefault(online_sku, [])
+                try:
+                    switch_element, switch_label, aria_checked = self._read_current_sku_switch_state(
+                        selectors,
+                        context,
+                    )
+                except Exception as exc:
+                    attempts.append(
+                        {
+                            "checked_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                            "error": str(exc),
+                        }
+                    )
+                    unresolved.append(online_sku)
+                    continue
 
-                switch_selector = selectors.get("sku_switch", {})
-                if not switch_selector:
-                    raise PublishSubmitError("sku_switch selector is not configured for post-submit verification.")
-                switch_element = sku_row.find_element(
-                    BY_MAPPING.get(str(switch_selector.get("by", "css")).strip().lower(), By.CSS_SELECTOR),
-                    str(switch_selector.get("value", "")).strip(),
-                )
-                switch_label = self._read_switch_label(switch_element)
-                aria_checked = str(switch_element.get_attribute("aria-checked") or "")
-            except Exception as exc:
-                attempts.append(
-                    {
-                        "checked_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                        "error": str(exc),
-                    }
-                )
-            else:
                 attempts.append(
                     {
                         "checked_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -3553,14 +3712,43 @@ class SkuOfflineBrowser(BrowserRPA):
                 if self._is_already_offline(switch_element, switch_label):
                     context["post_submit_verified"] = "true"
                     context["post_submit_checks"] = attempts
-                    return
+                else:
+                    unresolved.append(online_sku)
+
+            if not unresolved:
+                return
 
             if time.time() >= deadline:
-                context["post_submit_checks"] = attempts
+                for context in contexts:
+                    online_sku = str(context.get("online_sku", "")).strip()
+                    context["post_submit_checks"] = attempts_by_sku.get(online_sku, [])
                 raise PublishSubmitError(
-                    f"SKU '{context.get('online_sku', '')}' was submitted, but the edit page still shows it as online."
+                    "Grouped SKU submit did not persist offline state for: " + ", ".join(unresolved)
                 )
             self._pause(refresh_interval_seconds)
+
+    def _read_current_sku_switch_state(
+        self,
+        selectors: dict[str, Any],
+        context: dict[str, Any],
+    ) -> tuple[Any, str, str]:
+        sku_row = self._find_sku_row_by_runtime_value(context)
+        if sku_row is None:
+            sku_row_selector = self._resolve_selector(selectors.get("sku_row", {}), context)
+            if not self._selector_is_configured(sku_row_selector):
+                raise PublishSubmitError("sku_row selector is not configured for post-submit verification.")
+            sku_row = self._wait_for_element(sku_row_selector)
+
+        switch_selector = selectors.get("sku_switch", {})
+        if not switch_selector:
+            raise PublishSubmitError("sku_switch selector is not configured for post-submit verification.")
+        switch_element = sku_row.find_element(
+            BY_MAPPING.get(str(switch_selector.get("by", "css")).strip().lower(), By.CSS_SELECTOR),
+            str(switch_selector.get("value", "")).strip(),
+        )
+        switch_label = self._read_switch_label(switch_element)
+        aria_checked = str(switch_element.get_attribute("aria-checked") or "")
+        return switch_element, switch_label, aria_checked
 
     def _wait_for_success(
         self,

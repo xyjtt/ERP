@@ -251,6 +251,14 @@ def group_tasks_by_store(tasks: list[OfflineTask]) -> dict[str, list[OfflineTask
     return groups
 
 
+def group_tasks_by_product(tasks: list[OfflineTask]) -> dict[tuple[str, str], list[OfflineTask]]:
+    groups: dict[tuple[str, str], list[OfflineTask]] = {}
+    for task in tasks:
+        key = (normalize_cell(task.store_name), normalize_cell(task.product_id))
+        groups.setdefault(key, []).append(task)
+    return groups
+
+
 def build_preview_payload(
     *,
     source_files: list[str],

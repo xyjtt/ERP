@@ -347,6 +347,31 @@ class SkuOfflineMainTests(unittest.TestCase):
                 self.last_result_context = {}
                 return {"execution_result": "submitted"}
 
+            def execute_offline_group(self, system_config, tasks, **kwargs):
+                outcomes = []
+                for task in tasks:
+                    try:
+                        context = self.execute_offline_task(system_config, task, **kwargs)
+                    except Exception as exc:
+                        outcomes.append(
+                            {
+                                "task": task,
+                                "status": "failed",
+                                "context": dict(self.last_result_context),
+                                "error": exc,
+                            }
+                        )
+                    else:
+                        outcomes.append(
+                            {
+                                "task": task,
+                                "status": "success",
+                                "context": context,
+                                "error": None,
+                            }
+                        )
+                return outcomes
+
             def close(self) -> None:
                 return None
 

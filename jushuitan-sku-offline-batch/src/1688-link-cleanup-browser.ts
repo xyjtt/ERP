@@ -4,10 +4,12 @@ import { chromium, Locator, Page } from "playwright";
 import { appConfig } from "./config";
 import {
   appendLedgerResult,
+  buildProductGroupKey,
   CleanupMode,
   CleanupResult,
   CleanupTask,
   findMatchingRows,
+  orderCleanupTasksForExecution,
   RowEvidence,
 } from "./1688-link-cleanup-core";
 import {
@@ -41,6 +43,10 @@ interface BrowserRunOptions {
   runId: string;
   ledgerPath: string;
   artifactsDir: string;
+}
+
+interface ProductPageSession {
+  target?: Target;
 }
 
 const productIdSelectors = [
@@ -177,11 +183,20 @@ async function queryTaskRows(
   task: CleanupTask,
   options: BrowserRunOptions,
   selectStore: boolean,
+  existingTarget?: Target,
 ): Promise<{ target: Target; rows: RowEvidence[]; locator: Locator }> {
   await assertNoRiskControl(page);
+  if (existingTarget) {
+    await dismissVisibleGuides(page);
+    const collected = await collectRows(existingTarget);
+    await saveTaskEvidence(page, existingTarget, options, task, "query");
+    return { target: existingTarget, ...collected };
+  }
+
   const target = await ensureProductPage(page);
   await fillExact(target, productIdSelectors, task.product_id);
-  await fillExact(target, onlineSkuSelectors, task.online_sku);
+  // Query the whole product once so subsequent SKU rows can reuse this result set.
+  await fillExact(target, onlineSkuSelectors, "");
   if (selectStore) {
     await page.waitForTimeout(600);
     await dismissVisibleModals(page);
@@ -337,8 +352,11 @@ async function processTask(
   page: Page,
   task: CleanupTask,
   options: BrowserRunOptions,
+  session: ProductPageSession,
+  selectStore: boolean,
 ): Promise<CleanupResult> {
-  const initial = await queryTaskRows(page, task, options, true);
+  const initial = await queryTaskRows(page, task, options, selectStore, session.target);
+  session.target = initial.target;
   const matches = findMatchingRows(task, initial.rows);
   if (matches.length === 0) {
     throw new CleanupBrowserError(
@@ -371,7 +389,7 @@ async function processTask(
   const confirmationText = await confirmClearLink(initial.target, page);
   await page.waitForTimeout(appConfig.searchWaitMs);
 
-  const verification = await queryTaskRows(page, task, options, false);
+  const verification = await queryTaskRows(page, task, options, false, session.target ?? initial.target);
   const remainingMatches = findMatchingRows(task, verification.rows);
   if (remainingMatches.length > 0) {
     throw new CleanupBrowserError(
@@ -431,6 +449,8 @@ export async function runBrowserCleanup(
   const page = await context.newPage();
   const results: CleanupResult[] = [];
   const stoppedStores = new Set<string>();
+  let activeProduct: { key: string; session: ProductPageSession } | null = null;
+  let selectedStoreName = "";
   let stopAll = false;
 
   try {
@@ -461,7 +481,7 @@ export async function runBrowserCleanup(
       await context.storageState({ path: appConfig.storageStatePath });
     }
 
-    for (const task of tasks) {
+    for (const task of orderCleanupTasksForExecution(tasks)) {
       if (stopAll || stoppedStores.has(task.store_name)) {
         results.push(
           failureResult(
@@ -476,12 +496,24 @@ export async function runBrowserCleanup(
       }
 
       try {
-        const result = await processTask(page, task, options);
+        const sessionKey = buildProductGroupKey(task);
+        const session: ProductPageSession =
+          activeProduct?.key === sessionKey ? activeProduct.session : {};
+        const result = await processTask(
+          page,
+          task,
+          options,
+          session,
+          selectedStoreName !== task.store_name,
+        );
+        activeProduct = { key: sessionKey, session };
+        selectedStoreName = task.store_name;
         results.push(result);
         if (result.status === "success") {
           await appendLedgerResult(options.ledgerPath, result);
         }
       } catch (error) {
+        activeProduct = null;
         const preservePickerState =
           error instanceof CleanupBrowserError &&
           (error.category === "store_picker_unavailable" || error.category === "store_mismatch");
@@ -499,9 +531,11 @@ export async function runBrowserCleanup(
         results.push(failureResult(task, error, evidencePath));
         if (error instanceof CleanupBrowserError && error.stopScope === "store") {
           stoppedStores.add(task.store_name);
+          selectedStoreName = "";
         }
         if (error instanceof CleanupBrowserError && error.stopScope === "all") {
           stopAll = true;
+          selectedStoreName = "";
         }
       }
     }

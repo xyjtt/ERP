@@ -19,11 +19,13 @@ from run_report import RunReportWriter
 from sku_offline_browser import SkuOfflineBrowser
 from sku_offline_tasks import (
     FileIdentity,
+    OfflineTask,
     ProcessedFileRegistry,
     build_preview_payload,
     dedupe_offline_tasks,
     discover_scan_files,
     filter_offline_tasks,
+    group_tasks_by_product,
     group_tasks_by_store,
     load_offline_tasks,
     store_name_matches,
@@ -338,37 +340,91 @@ def execute_preview(
         try:
             browser.open()
             browser.prepare_session(system_config, skip_login=skip_login)
-            for task in store_tasks:
-                browser.reset_runtime_artifacts()
+            for _, product_tasks in group_tasks_by_product(store_tasks).items():
+                pending_tasks = list(product_tasks)
                 attempts = 0
-                while attempts < max_attempts:
+                while pending_tasks and attempts < max_attempts:
                     attempts += 1
+                    browser.reset_runtime_artifacts()
                     try:
-                        result_context = browser.execute_offline_task(
+                        outcomes = browser.execute_offline_group(
                             system_config,
-                            task,
+                            pending_tasks,
                             account_binding=account_binding,
                         )
-                        status = (
-                            "already_offline"
-                            if result_context.get("execution_result") == "already_offline"
-                            else "success"
-                        )
-                        if status == "already_offline":
-                            summary["already_offline"] += 1
-                        else:
-                            summary["success"] += 1
-                        successful_task_statuses[task.dedupe_key] = status
-                        run_report.append(
-                            build_run_report_payload(
+                        if len(outcomes) != len(pending_tasks):
+                            raise RuntimeError(
+                                "1688 grouped execution returned an incomplete SKU result set."
+                            )
+
+                        retry_tasks: list[OfflineTask] = []
+                        for outcome in outcomes:
+                            task = outcome["task"]
+                            result_context = dict(outcome.get("context") or {})
+                            outcome_status = str(outcome.get("status") or "failed")
+                            if outcome_status in {"success", "already_offline"}:
+                                status = outcome_status
+                                if status == "already_offline":
+                                    summary["already_offline"] += 1
+                                else:
+                                    summary["success"] += 1
+                                successful_task_statuses[task.dedupe_key] = status
+                                run_report.append(
+                                    build_run_report_payload(
+                                        task=task,
+                                        status=status,
+                                        attempts=attempts,
+                                        result_context=result_context,
+                                    )
+                                )
+                                finished_task_keys.add(task.dedupe_key)
+                                continue
+
+                            error = outcome.get("error")
+                            if not isinstance(error, BaseException):
+                                error = RuntimeError(str(error or "1688 grouped SKU execution failed"))
+                            error_category = classify_offline_error(error, result_context)
+                            if (
+                                attempts < max_attempts
+                                and should_retry_offline_error(error_category, execution_config)
+                                and not should_stop_store_on_error(error_category, execution_config)
+                            ):
+                                retry_tasks.append(task)
+                                continue
+
+                            summary["failed"] += 1
+                            payload = build_run_report_payload(
                                 task=task,
-                                status=status,
+                                status="failed",
                                 attempts=attempts,
                                 result_context=result_context,
+                                exc=error,
+                                screenshot_path=str(outcome.get("screenshot_path") or ""),
+                                html_snapshot_path=str(outcome.get("html_snapshot_path") or ""),
                             )
-                        )
-                        finished_task_keys.add(task.dedupe_key)
-                        break
+                            run_report.append(payload)
+                            finished_task_keys.add(task.dedupe_key)
+                            safe_console_print(
+                                f"[ERROR] Offline task failed: {task.store_name} "
+                                f"{task.product_id} {task.online_sku} -> {error}"
+                            )
+                            send_failure_notification(system_config, payload, disabled=no_notify)
+                            if should_stop_store_on_error(error_category, execution_config):
+                                store_stopped = True
+                                summary["stopped_stores"] += 1
+                                summary["stopped_store_names"].append(store_name)
+                                safe_console_print(
+                                    f"[ERROR] Stop store batch for {store_name}: safety category={error_category}"
+                                )
+
+                        if store_stopped:
+                            break
+                        pending_tasks = retry_tasks
+                        if pending_tasks:
+                            safe_console_print(
+                                f"[WARN] Retry grouped product {pending_tasks[0].product_id} "
+                                f"for {len(pending_tasks)} SKU(s), attempt {attempts + 1}/{max_attempts}."
+                            )
                     except Exception as exc:
                         error_category = classify_offline_error(exc, browser.last_result_context)
                         if (
@@ -377,28 +433,25 @@ def execute_preview(
                             and not should_stop_store_on_error(error_category, execution_config)
                         ):
                             safe_console_print(
-                                f"[WARN] Retry {attempts}/{max_attempts - 1} for "
-                                f"{task.store_name} {task.product_id} {task.online_sku}: {exc}"
+                                f"[WARN] Retry grouped product {product_tasks[0].product_id} "
+                                f"for {len(pending_tasks)} SKU(s), attempt {attempts + 1}/{max_attempts}."
                             )
                             continue
 
-                        summary["failed"] += 1
-                        payload = build_run_report_payload(
-                            task=task,
-                            status="failed",
-                            attempts=attempts,
-                            result_context=browser.last_result_context,
-                            exc=exc,
-                            screenshot_path=browser.last_screenshot_path,
-                            html_snapshot_path=browser.last_html_snapshot_path,
-                        )
-                        run_report.append(payload)
-                        finished_task_keys.add(task.dedupe_key)
-                        safe_console_print(
-                            f"[ERROR] Offline task failed: {task.store_name} "
-                            f"{task.product_id} {task.online_sku} -> {exc}"
-                        )
-                        send_failure_notification(system_config, payload, disabled=no_notify)
+                        for task in pending_tasks:
+                            summary["failed"] += 1
+                            payload = build_run_report_payload(
+                                task=task,
+                                status="failed",
+                                attempts=attempts,
+                                result_context=dict(browser.last_result_context or {}),
+                                exc=exc,
+                                screenshot_path=browser.last_screenshot_path,
+                                html_snapshot_path=browser.last_html_snapshot_path,
+                            )
+                            run_report.append(payload)
+                            finished_task_keys.add(task.dedupe_key)
+                            send_failure_notification(system_config, payload, disabled=no_notify)
                         if should_stop_store_on_error(error_category, execution_config):
                             store_stopped = True
                             summary["stopped_stores"] += 1

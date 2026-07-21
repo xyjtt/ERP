@@ -23,6 +23,7 @@ from exceptions import (
     PublishValidationError,
 )
 from sku_offline_browser import SkuOfflineBrowser
+from sku_offline_tasks import OfflineTask
 
 
 class FakePreSubmitBrowser(SkuOfflineBrowser):
@@ -171,6 +172,96 @@ class FakeSuccessBrowser(SkuOfflineBrowser):
 
 
 class SkuOfflineBrowserTests(unittest.TestCase):
+    def test_grouped_product_opens_once_and_submits_multiple_skus_once(self) -> None:
+        tasks = [
+            OfflineTask(
+                source_file="demo.csv",
+                source_sheet="CSV",
+                source_row_number=index + 2,
+                store_name="STORE-A",
+                platform="Alibaba",
+                product_id="1007556214138",
+                online_sku=f"SKU-{index}",
+                handling="all-channel-offline",
+                replacement_sku="",
+                change_image="",
+                platform_store_item_code=f"CODE-{index}",
+                raw={},
+            )
+            for index in range(2)
+        ]
+        browser = SkuOfflineBrowser({}, PROJECT_ROOT)
+        browser.driver = FakeSuccessDriver()
+        browser.driver.current_window_handle = "main"  # type: ignore[attr-defined]
+        calls: list[str] = []
+        browser._open_task_edit_page = lambda *args: calls.append("open")  # type: ignore[method-assign]
+        browser._assert_not_redirected_to_login = lambda *args: None  # type: ignore[method-assign]
+        browser._assert_no_risk_control_block = lambda *args: None  # type: ignore[method-assign]
+        browser._assert_edit_page_identity = lambda *args: None  # type: ignore[method-assign]
+        browser._toggle_sku_offline = (  # type: ignore[method-assign]
+            lambda selectors, context: calls.append(f"toggle:{context['online_sku']}") or True
+        )
+        browser._ensure_target_sku_still_offline = lambda *args: None  # type: ignore[method-assign]
+        browser._submit_changes = lambda *args: calls.append("submit")  # type: ignore[method-assign]
+        browser._verify_group_persisted_offline = (  # type: ignore[method-assign]
+            lambda selectors, config, contexts: calls.append(f"verify:{len(contexts)}")
+        )
+        browser._record_page_metadata = lambda context: None  # type: ignore[method-assign]
+        browser._restore_management_window = lambda handle: None  # type: ignore[method-assign]
+
+        outcomes = browser.execute_offline_group({}, tasks)
+
+        self.assertEqual([item["status"] for item in outcomes], ["success", "success"])
+        self.assertEqual(
+            calls,
+            ["open", "toggle:SKU-0", "toggle:SKU-1", "submit", "verify:2"],
+        )
+
+    def test_grouped_product_keeps_valid_sku_when_another_sku_fails(self) -> None:
+        tasks = [
+            OfflineTask(
+                source_file="demo.csv",
+                source_sheet="CSV",
+                source_row_number=index + 2,
+                store_name="STORE-A",
+                platform="Alibaba",
+                product_id="1007556214138",
+                online_sku=f"SKU-{index}",
+                handling="all-channel-offline",
+                replacement_sku="",
+                change_image="",
+                platform_store_item_code=f"CODE-{index}",
+                raw={},
+            )
+            for index in range(2)
+        ]
+        browser = SkuOfflineBrowser({}, PROJECT_ROOT)
+        browser.driver = FakeSuccessDriver()
+        browser.driver.current_window_handle = "main"  # type: ignore[attr-defined]
+        submit_calls: list[str] = []
+        browser._open_task_edit_page = lambda *args: None  # type: ignore[method-assign]
+        browser._assert_not_redirected_to_login = lambda *args: None  # type: ignore[method-assign]
+        browser._assert_no_risk_control_block = lambda *args: None  # type: ignore[method-assign]
+        browser._assert_edit_page_identity = lambda *args: None  # type: ignore[method-assign]
+
+        def toggle(selectors, context):
+            if context["online_sku"] == "SKU-0":
+                raise OfflineTaskNotFoundError("missing SKU")
+            return True
+
+        browser._toggle_sku_offline = toggle  # type: ignore[method-assign]
+        browser._ensure_target_sku_still_offline = lambda *args: None  # type: ignore[method-assign]
+        browser._submit_changes = lambda *args: submit_calls.append("submit")  # type: ignore[method-assign]
+        browser._verify_group_persisted_offline = lambda *args: None  # type: ignore[method-assign]
+        browser._record_page_metadata = lambda context: None  # type: ignore[method-assign]
+        browser._capture_screenshot = lambda name: None  # type: ignore[method-assign]
+        browser._restore_management_window = lambda handle: None  # type: ignore[method-assign]
+
+        outcomes = browser.execute_offline_group({}, tasks)
+
+        self.assertEqual([item["status"] for item in outcomes], ["failed", "success"])
+        self.assertEqual(submit_calls, ["submit"])
+
     def test_management_search_field_uses_native_keyboard_input(self) -> None:
         browser = SkuOfflineBrowser({}, PROJECT_ROOT)
         browser.driver = FakeSuccessDriver()
