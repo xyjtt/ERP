@@ -508,6 +508,18 @@ class SkuOfflineBrowserTests(unittest.TestCase):
         self.assertEqual(context["submit_success_phase"], "persisted_state_after_trace_miss")
         self.assertEqual(context["execution_result"], "submitted_untraced_verified")
 
+    def test_sole_online_sku_validation_is_detected_from_submit_diagnostics(self) -> None:
+        self.assertTrue(
+            SkuOfflineBrowser._contains_sole_online_sku_validation(
+                "是否上架: 有产品规格的商品至少要有一个在线状态的sku。"
+            )
+        )
+        self.assertFalse(
+            SkuOfflineBrowser._contains_sole_online_sku_validation(
+                "配送服务为必填项"
+            )
+        )
+
     def test_trace_miss_probe_resets_document_and_reactivates_sales_section(self) -> None:
         browser = SkuOfflineBrowser({}, PROJECT_ROOT)
         browser.driver = FakeSuccessDriver(

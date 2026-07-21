@@ -906,11 +906,16 @@ class SkuOfflineBrowser(BrowserRPA):
             ]
             summary = " | ".join((assist_messages + hidden_messages)[:3])
             error_text = "提交按钮未产生平台请求" + (f"：{summary}" if summary else "")
+            error_category = (
+                "sole_sku_requires_product_offline"
+                if self._contains_sole_online_sku_validation(summary)
+                else "submit_blocked_before_request"
+            )
             self._annotate_page_error_context(
                 context,
                 stage_name="submit_before_request",
                 error_text=error_text,
-                error_category="submit_blocked_before_request",
+                error_category=error_category,
             )
             raise PublishSubmitError(
                 "Submit button was clicked but no submit request was captured. "
@@ -922,6 +927,17 @@ class SkuOfflineBrowser(BrowserRPA):
         if bool(success_detection.get("required", False)) and not success_detected:
             raise PublishSubmitError("Did not detect the configured success signal after submitting offline changes.")
         context["execution_result"] = "submitted"
+
+    @staticmethod
+    def _contains_sole_online_sku_validation(text: str) -> bool:
+        normalized = str(text or "").lower()
+        return any(
+            marker in normalized
+            for marker in (
+                "\u81f3\u5c11\u8981\u6709\u4e00\u4e2a\u5728\u7ebf\u72b6\u6001\u7684sku",
+                "\u81f3\u5c11\u4fdd\u7559\u4e00\u4e2a\u5728\u7ebfsku",
+            )
+        )
 
     def _collect_submit_block_diagnostics(self, submit_button: dict[str, str]) -> dict[str, Any]:
         if not self.driver:

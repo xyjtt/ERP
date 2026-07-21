@@ -567,9 +567,6 @@ def should_stop_store_on_error(error_category: str, execution_config: dict[str, 
             "identity_mismatch",
             "account_mapping",
             "browser_window_closed",
-            "delivery_service_backfill_failed",
-            "management_search_timeout",
-            "submit_blocked_before_request",
         ],
     )
     categories = {str(item).strip() for item in configured if str(item).strip()}
@@ -585,6 +582,9 @@ def should_retry_offline_error(error_category: str, execution_config: dict[str, 
             "product_unavailable",
             "sole_sku_requires_product_offline",
             "campaign_restriction",
+            "delivery_service_backfill_failed",
+            "management_search_timeout",
+            "submit_blocked_before_request",
         ],
     )
     categories = {str(item).strip() for item in configured if str(item).strip()}
@@ -695,6 +695,12 @@ def classify_offline_error(exc: Exception, result_context: dict[str, Any]) -> st
     error_type = exc.__class__.__name__
     error_message = str(exc or "")
     normalized_message = error_message.lower()
+    sole_sku_markers = (
+        "\u81f3\u5c11\u8981\u6709\u4e00\u4e2a\u5728\u7ebf\u72b6\u6001\u7684sku",
+        "\u81f3\u5c11\u4fdd\u7559\u4e00\u4e2a\u5728\u7ebfsku",
+    )
+    if any(marker in normalized_message for marker in sole_sku_markers):
+        return "sole_sku_requires_product_offline"
     if any(
         marker in normalized_message
         for marker in (

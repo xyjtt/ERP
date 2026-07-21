@@ -4,6 +4,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -11,7 +12,7 @@ RPA_ROOT = PROJECT_ROOT / "rpa"
 if str(RPA_ROOT) not in sys.path:
     sys.path.insert(0, str(RPA_ROOT))
 
-from exceptions import PublishValidationError
+from exceptions import PublishSubmitError, PublishValidationError
 from sku_offline_main import (
     build_jushuitan_handoff_records,
     build_store_operator_config,
@@ -206,7 +207,7 @@ class SkuOfflineMainTests(unittest.TestCase):
         )
         self.assertNotIn("password", resolved["browser"])
 
-    def test_should_stop_store_on_safety_categories(self) -> None:
+    def test_should_stop_store_only_on_safety_categories(self) -> None:
         execution_config = {
             "stop_store_on_error_categories": [
                 "login_required",
@@ -214,17 +215,14 @@ class SkuOfflineMainTests(unittest.TestCase):
                 "store_mismatch",
                 "identity_mismatch",
                 "browser_window_closed",
-            "delivery_service_backfill_failed",
-            "management_search_timeout",
-            "submit_blocked_before_request",
             ]
         }
 
         self.assertTrue(should_stop_store_on_error("identity_mismatch", execution_config))
         self.assertTrue(should_stop_store_on_error("browser_window_closed", execution_config))
-        self.assertTrue(should_stop_store_on_error("delivery_service_backfill_failed", execution_config))
-        self.assertTrue(should_stop_store_on_error("management_search_timeout", execution_config))
-        self.assertTrue(should_stop_store_on_error("submit_blocked_before_request", execution_config))
+        self.assertFalse(should_stop_store_on_error("delivery_service_backfill_failed", execution_config))
+        self.assertFalse(should_stop_store_on_error("management_search_timeout", execution_config))
+        self.assertFalse(should_stop_store_on_error("submit_blocked_before_request", execution_config))
         self.assertFalse(should_stop_store_on_error("sku_not_found", execution_config))
 
     def test_classify_window_closed_webdriver_error(self) -> None:
@@ -242,6 +240,23 @@ class SkuOfflineMainTests(unittest.TestCase):
         self.assertFalse(should_retry_offline_error("campaign_restriction", execution_config))
         self.assertFalse(should_retry_offline_error("task_not_found", execution_config))
         self.assertTrue(should_retry_offline_error("submit_failed", execution_config))
+
+    def test_classify_submit_validation_as_sole_sku_terminal(self) -> None:
+        error = PublishSubmitError(
+            "Submit button was clicked but no submit request was captured. "
+            "validation: 是否上架: 有产品规格的商品至少要有一个在线状态的sku。"
+        )
+
+        self.assertEqual(
+            classify_offline_error(error, {}),
+            "sole_sku_requires_product_offline",
+        )
+        self.assertFalse(
+            should_retry_offline_error(
+                "sole_sku_requires_product_offline",
+                {},
+            )
+        )
 
     def test_execute_preview_records_mapping_missing_without_opening_browser(self) -> None:
         task = OfflineTask(
@@ -284,6 +299,96 @@ class SkuOfflineMainTests(unittest.TestCase):
         self.assertEqual(summary["stopped_stores"], 1)
         self.assertEqual(run_report.rows[0]["error_category"], "account_mapping")
         self.assertEqual(run_report.rows[0]["page_error_stage"], "pre_execution_store_binding")
+
+    def test_business_exception_notifies_and_continues_next_item(self) -> None:
+        tasks = [
+            OfflineTask(
+                source_file="demo.csv",
+                source_sheet="CSV",
+                source_row_number=index + 2,
+                store_name="STORE-A",
+                platform="Alibaba",
+                product_id=str(1000 + index),
+                online_sku=f"SKU-{index}",
+                handling="all-channel-offline",
+                replacement_sku="",
+                change_image="",
+                platform_store_item_code=f"CODE-{index}",
+                raw={},
+            )
+            for index in range(2)
+        ]
+
+        class FakeBrowser:
+            def __init__(self, *_args, **_kwargs) -> None:
+                self.calls = 0
+                self.last_result_context: dict[str, str] = {}
+                self.last_screenshot_path = ""
+                self.last_html_snapshot_path = ""
+
+            def open(self) -> None:
+                return None
+
+            def prepare_session(self, *_args, **_kwargs) -> None:
+                return None
+
+            def reset_runtime_artifacts(self) -> None:
+                return None
+
+            def execute_offline_task(self, _system_config, task, **_kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    self.last_result_context = {
+                        "page_error_category": "sole_sku_requires_product_offline",
+                        "page_error_stage": "submit_before_request",
+                        "page_error_text": "at least one online sku is required",
+                    }
+                    raise PublishSubmitError("at least one online sku is required")
+                self.last_result_context = {}
+                return {"execution_result": "submitted"}
+
+            def close(self) -> None:
+                return None
+
+        run_report = FakeRunReport()
+        system_config = {
+            "execution": {
+                "max_retry": 1,
+                "require_store_account_mapping": True,
+                "store_accounts": [
+                    {
+                        "store_name": "STORE-A",
+                        "account_key": "store_a",
+                    }
+                ],
+            },
+            "notifications": {"dingtalk": {"enabled": True}},
+        }
+
+        with (
+            patch("sku_offline_main.SkuOfflineBrowser", FakeBrowser),
+            patch("sku_offline_main.send_failure_notification") as notify_failure,
+            patch("sku_offline_main.send_summary_notification"),
+        ):
+            summary = execute_preview(
+                project_root=PROJECT_ROOT,
+                operator_config={"browser": {}},
+                system_config=system_config,
+                preview={
+                    "selected_tasks": tasks,
+                    "duplicate_count": 0,
+                    "filtered_out_count": 0,
+                },
+                skip_login=True,
+                no_notify=False,
+                run_report=run_report,  # type: ignore[arg-type]
+            )
+
+        self.assertEqual(summary["failed"], 1)
+        self.assertEqual(summary["success"], 1)
+        self.assertEqual(summary["stopped_stores"], 0)
+        self.assertEqual(len(run_report.rows), 2)
+        notify_failure.assert_called_once()
 
     def test_jushuitan_handoff_preserves_distinct_platform_store_codes(self) -> None:
         first = OfflineTask(

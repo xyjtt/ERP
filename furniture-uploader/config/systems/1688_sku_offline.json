@@ -35,17 +35,17 @@
       "store_mismatch",
       "identity_mismatch",
       "account_mapping",
-      "browser_window_closed",
-      "delivery_service_backfill_failed",
-      "management_search_timeout",
-      "submit_blocked_before_request"
+      "browser_window_closed"
     ],
     "non_retryable_error_categories": [
       "task_not_found",
       "sku_not_found",
       "product_unavailable",
       "sole_sku_requires_product_offline",
-      "campaign_restriction"
+      "campaign_restriction",
+      "delivery_service_backfill_failed",
+      "management_search_timeout",
+      "submit_blocked_before_request"
     ],
     "safety": {
       "edit_entry_mode": "management",
