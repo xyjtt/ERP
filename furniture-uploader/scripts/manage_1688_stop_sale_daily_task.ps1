@@ -10,7 +10,15 @@ param(
     [string]$WorkerTaskName = "YYDD-1688-Crawler-Worker",
     [string]$BusinessDate = "",
     [ValidateRange(1, 1000)]
-    [int]$BatchSize = 25
+    [int]$BatchSize = 10,
+    [ValidateRange(1, 5)]
+    [int]$BatchMaxAttempts = 2,
+    [ValidateRange(0, 3600)]
+    [int]$BatchRetryBackoffSeconds = 60,
+    [ValidateRange(60, 21600)]
+    [int]$StopSale1688TimeoutSeconds = 3600,
+    [ValidateRange(60, 21600)]
+    [int]$StopSaleJushuitanTimeoutSeconds = 1800
 )
 
 $ErrorActionPreference = "Stop"
@@ -103,7 +111,11 @@ function Invoke-DailyRun {
             "--shared-runtime-root", $SharedRuntimeRoot,
             "--jushuitan-root", $JushuitanRoot,
             "--worker-task-name", $WorkerTaskName,
-            "--batch-size", [string]$BatchSize
+            "--batch-size", [string]$BatchSize,
+            "--batch-max-attempts", [string]$BatchMaxAttempts,
+            "--batch-retry-backoff-seconds", [string]$BatchRetryBackoffSeconds,
+            "--1688-timeout-seconds", [string]$StopSale1688TimeoutSeconds,
+            "--jushuitan-timeout-seconds", [string]$StopSaleJushuitanTimeoutSeconds
         )
         if ($Mode -eq "execute") {
             $arguments += "--yes"
@@ -134,7 +146,11 @@ switch ($Action) {
             "-SharedRuntimeRoot", ('"' + $SharedRuntimeRoot + '"'),
             "-JushuitanRoot", ('"' + $JushuitanRoot + '"'),
             "-WorkerTaskName", ('"' + $WorkerTaskName + '"'),
-            "-BatchSize", [string]$BatchSize
+            "-BatchSize", [string]$BatchSize,
+            "-BatchMaxAttempts", [string]$BatchMaxAttempts,
+            "-BatchRetryBackoffSeconds", [string]$BatchRetryBackoffSeconds,
+            "-StopSale1688TimeoutSeconds", [string]$StopSale1688TimeoutSeconds,
+            "-StopSaleJushuitanTimeoutSeconds", [string]$StopSaleJushuitanTimeoutSeconds
         ) -join " "
 
         $scheduledAction = New-ScheduledTaskAction `

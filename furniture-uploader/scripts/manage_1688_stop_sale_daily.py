@@ -29,6 +29,25 @@ DEFAULT_WORKER_TASK_NAME = "YYDD-1688-Crawler-Worker"
 DEFAULT_MANAGER_TASK_NAME = "YYDD-1688-Stop-Sale-Daily"
 DEFAULT_DAILY_TIME = "13:00"
 DEFAULT_MANAGER_LOCK_STALE_SECONDS = 36 * 60 * 60
+TERMINAL_OFFLINE_STATUSES = {"success", "already_offline"}
+TERMINAL_JUSHUITAN_STATUSES = {"success", "already_cleared"}
+NON_RETRYABLE_OFFLINE_CATEGORIES = {
+    "task_not_found",
+    "sku_not_found",
+    "product_unavailable",
+    "sole_sku_requires_product_offline",
+    "campaign_restriction",
+    "delivery_service_backfill_failed",
+    "submit_blocked_before_request",
+}
+SAFETY_ERROR_CATEGORIES = {
+    "login_required",
+    "risk_control",
+    "store_mismatch",
+    "identity_mismatch",
+    "account_mapping",
+    "browser_window_closed",
+}
 
 if str(PROJECT_ROOT / "rpa") not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT / "rpa"))
@@ -57,9 +76,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
     run.add_argument("--shared-runtime-root", default=str(DEFAULT_SHARED_RUNTIME_ROOT))
     run.add_argument("--jushuitan-root", default=str(DEFAULT_JUSHUITAN_ROOT))
     run.add_argument("--worker-task-name", default=DEFAULT_WORKER_TASK_NAME)
-    run.add_argument("--batch-size", type=int, default=25, help="Maximum input rows per recoverable store batch.")
-    run.add_argument("--1688-timeout-seconds", dest="timeout_1688_seconds", type=int, default=10800)
-    run.add_argument("--jushuitan-timeout-seconds", dest="timeout_jushuitan_seconds", type=int, default=7200)
+    run.add_argument("--batch-size", type=int, default=10, help="Maximum input rows per recoverable store batch.")
+    run.add_argument("--batch-max-attempts", type=int, default=2)
+    run.add_argument("--batch-retry-backoff-seconds", type=int, default=60)
+    run.add_argument("--1688-timeout-seconds", dest="timeout_1688_seconds", type=int, default=3600)
+    run.add_argument("--jushuitan-timeout-seconds", dest="timeout_jushuitan_seconds", type=int, default=1800)
     run.add_argument("--no-notify", action="store_true")
 
     return parser
@@ -342,6 +363,143 @@ def _count_statuses(records: list[dict[str, Any]], status_key: str = "status") -
     return counts
 
 
+def _identity_part(value: Any) -> str:
+    return "".join(str(value or "").split()).lower()
+
+
+def _row_value(row: dict[str, str], *names: str) -> str:
+    for name in names:
+        if name in row:
+            return str(row.get(name) or "").strip()
+    return ""
+
+
+def _offline_identity(store_name: Any, product_id: Any, online_sku: Any) -> tuple[str, str, str]:
+    return (
+        _identity_part(store_name),
+        _identity_part(product_id),
+        _identity_part(online_sku),
+    )
+
+
+def _task_identity(
+    store_name: Any,
+    product_id: Any,
+    online_sku: Any,
+    platform_store_item_code: Any,
+) -> tuple[str, str, str, str]:
+    return (
+        _identity_part(store_name),
+        _identity_part(product_id),
+        _identity_part(online_sku),
+        _identity_part(platform_store_item_code),
+    )
+
+
+def _offline_record_identity(record: dict[str, Any]) -> tuple[str, str, str]:
+    return _offline_identity(
+        record.get("store_name"),
+        record.get("product_id"),
+        record.get("online_sku"),
+    )
+
+
+def _task_record_identity(record: dict[str, Any]) -> tuple[str, str, str, str]:
+    return _task_identity(
+        record.get("store_name"),
+        record.get("product_id"),
+        record.get("online_sku"),
+        record.get("platform_store_item_code"),
+    )
+
+
+def build_batch_retry_input(
+    source_path: Path,
+    attempt_results: list[dict[str, Any]],
+    output_path: Path,
+) -> dict[str, Any]:
+    with source_path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        fieldnames = list(reader.fieldnames or [])
+        source_rows = list(reader)
+    if not fieldnames:
+        raise DailyManagerError(f"Stop-sale retry source has no header: {source_path}")
+
+    offline_by_identity: dict[tuple[str, str, str], dict[str, Any]] = {}
+    jushuitan_by_identity: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    for attempt in attempt_results:
+        offline_path = str(attempt.get("offline_report_path") or "").strip()
+        jushuitan_path = str(attempt.get("jushuitan_report_path") or "").strip()
+        if offline_path:
+            for record in load_jsonl_records(offline_path):
+                offline_by_identity[_offline_record_identity(record)] = record
+        if jushuitan_path:
+            for record in load_jsonl_records(jushuitan_path):
+                jushuitan_by_identity[_task_record_identity(record)] = record
+
+    retry_rows: list[dict[str, str]] = []
+    reasons: dict[str, int] = {}
+    business_terminal_count = 0
+    for row in source_rows:
+        store_name = _row_value(row, "店铺名称", "store_name")
+        product_id = _row_value(row, "商品ID", "product_id")
+        online_sku = _row_value(row, "线上商品编码", "online_sku")
+        platform_code = _row_value(row, "平台店铺商品编码", "platform_store_item_code")
+        offline_record = offline_by_identity.get(_offline_identity(store_name, product_id, online_sku))
+        retry_reason = ""
+
+        if offline_record is None:
+            retry_reason = "missing_1688_result"
+        else:
+            offline_status = str(offline_record.get("status") or "").strip()
+            offline_category = str(
+                offline_record.get("error_category")
+                or offline_record.get("page_error_category")
+                or ""
+            ).strip()
+            if offline_status in TERMINAL_OFFLINE_STATUSES:
+                jushuitan_record = jushuitan_by_identity.get(
+                    _task_identity(store_name, product_id, online_sku, platform_code)
+                )
+                if jushuitan_record is None:
+                    retry_reason = "missing_jushuitan_result"
+                else:
+                    jushuitan_status = str(jushuitan_record.get("status") or "").strip()
+                    if jushuitan_status not in TERMINAL_JUSHUITAN_STATUSES:
+                        category = str(jushuitan_record.get("category") or "unknown").strip() or "unknown"
+                        retry_reason = f"jushuitan_{category}"
+            elif offline_status == "failed" and (
+                offline_category in NON_RETRYABLE_OFFLINE_CATEGORIES
+                or offline_category in SAFETY_ERROR_CATEGORIES
+            ):
+                business_terminal_count += 1
+            else:
+                retry_reason = f"1688_{offline_category or offline_status or 'unknown'}"
+
+        if retry_reason:
+            retry_rows.append(row)
+            reasons[retry_reason] = reasons.get(retry_reason, 0) + 1
+
+    retry_path = ""
+    if retry_rows:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with output_path.open("w", encoding="utf-8-sig", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(retry_rows)
+        retry_path = str(output_path)
+
+    return {
+        "source_count": len(source_rows),
+        "retry_count": len(retry_rows),
+        "business_terminal_count": business_terminal_count,
+        "retry_reasons": dict(sorted(reasons.items())),
+        "retry_input_file": retry_path,
+        "offline_counts": _count_statuses(list(offline_by_identity.values())),
+        "jushuitan_counts": _count_statuses(list(jushuitan_by_identity.values())),
+    }
+
+
 def _load_pipeline_result(project_root: Path, run_id: str, return_code: int) -> dict[str, Any]:
     summary_path = project_root / "logs" / "sku_offline" / "pipelines" / f"{run_id}.summary.json"
     summary: dict[str, Any] = {}
@@ -418,6 +576,8 @@ def _manager_notification(summary: dict[str, Any]) -> str:
         f"店铺批次：{len(summary.get('stores', []))} 个",
         f"异常店铺批次：{summary.get('exception_store_count', 0)} 个",
         f"批次总数：{len(summary.get('batches', []))} 个",
+        f"批次尝试：{len(summary.get('batch_attempts', []))} 次",
+        f"重试耗尽：{summary.get('exhausted_retry_batch_count', 0)} 个",
         f"Worker：{summary.get('worker_status', '')}",
     ]
     for store in summary.get("stores", []):
@@ -477,6 +637,13 @@ def run_daily(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         "exception_store_count": 0,
         "offline_counts": {},
         "jushuitan_counts": {},
+        "batch_attempts": [],
+        "exhausted_retry_batch_count": 0,
+        "batch_size": int(args.batch_size),
+        "batch_max_attempts": int(args.batch_max_attempts),
+        "batch_retry_backoff_seconds": int(args.batch_retry_backoff_seconds),
+        "timeout_1688_seconds": int(args.timeout_1688_seconds),
+        "timeout_jushuitan_seconds": int(args.timeout_jushuitan_seconds),
         "worker_status": "not_started",
         "manager_dir": str(manager_dir),
         "preflight_log": str(manager_dir / "preflight.log"),
@@ -543,10 +710,12 @@ def run_daily(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
                         "selected_count": int(item.get("count") or 0),
                         "state": "success",
                         "batch_count": 0,
+                        "attempted_batch_count": 0,
                         "completed_batch_count": 0,
                         "safety_stopped": False,
                         "run_ids": [],
                         "batches": [],
+                        "batch_attempts": [],
                     }
                     if not input_file.exists():
                         store_result.update(
@@ -566,30 +735,86 @@ def run_daily(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
                     )
                     store_result["batch_count"] = len(batches)
                     for batch_index, batch_file in enumerate(batches, start=1):
-                        run_id = f"{manager_run_id}_s{index:02d}_b{batch_index:03d}"
-                        return_code = _run_logged(
-                            build_pipeline_command(args, batch_file, run_id),
-                            cwd=PROJECT_ROOT,
-                            log_path=manager_dir / f"{_safe_id(store_name)}_{run_id}.log",
-                        )
-                        result = _load_pipeline_result(PROJECT_ROOT, run_id, return_code)
-                        result["store_name"] = store_name
-                        result["input_file"] = str(batch_file)
-                        result["batch_number"] = batch_index
-                        store_result["run_ids"].append(run_id)
-                        store_result["batches"].append(result)
-                        summary["batches"].append(result)
-                        store_result["completed_batch_count"] = batch_index
+                        attempt_results: list[dict[str, Any]] = []
+                        current_input = batch_file
+                        final_result: dict[str, Any] | None = None
+                        for attempt_number in range(1, int(args.batch_max_attempts) + 1):
+                            run_id = f"{manager_run_id}_s{index:02d}_b{batch_index:03d}"
+                            if attempt_number > 1:
+                                run_id += f"_a{attempt_number:02d}"
+                            return_code = _run_logged(
+                                build_pipeline_command(args, current_input, run_id),
+                                cwd=PROJECT_ROOT,
+                                log_path=manager_dir / f"{_safe_id(store_name)}_{run_id}.log",
+                            )
+                            result = _load_pipeline_result(PROJECT_ROOT, run_id, return_code)
+                            result["store_name"] = store_name
+                            result["input_file"] = str(current_input)
+                            result["source_batch_file"] = str(batch_file)
+                            result["batch_number"] = batch_index
+                            result["attempt_number"] = attempt_number
+                            store_result["run_ids"].append(run_id)
+                            store_result["batch_attempts"].append(result)
+                            summary["batch_attempts"].append(result)
+                            attempt_results.append(result)
 
-                        if result.get("state") == "failed":
+                            retry_path = (
+                                batch_file.parent
+                                / f"{batch_file.stem}.retry_{attempt_number:02d}{batch_file.suffix}"
+                            )
+                            retry_plan = build_batch_retry_input(
+                                batch_file,
+                                attempt_results,
+                                retry_path,
+                            )
+                            result["retry_plan"] = retry_plan
+                            result["offline_counts"] = retry_plan["offline_counts"]
+                            result["jushuitan_counts"] = retry_plan["jushuitan_counts"]
+
+                            if result.get("safety_stop"):
+                                result["state"] = "completed_with_exceptions"
+                                final_result = result
+                                break
+                            if int(retry_plan["retry_count"]) == 0:
+                                result["state"] = (
+                                    "completed_with_exceptions"
+                                    if int(retry_plan["business_terminal_count"]) > 0
+                                    else "success"
+                                )
+                                final_result = result
+                                break
+                            if attempt_number >= int(args.batch_max_attempts):
+                                result["state"] = "failed"
+                                summary["exhausted_retry_batch_count"] += 1
+                                final_result = result
+                                break
+
+                            result["state"] = "retrying"
+                            current_input = Path(str(retry_plan["retry_input_file"]))
+                            if int(args.batch_retry_backoff_seconds) > 0:
+                                time.sleep(int(args.batch_retry_backoff_seconds))
+
+                        if final_result is None:
+                            raise DailyManagerError(
+                                f"Batch did not produce a final result: {store_name} #{batch_index}"
+                            )
+                        store_result["attempted_batch_count"] = batch_index
+                        store_result["batches"].append(final_result)
+                        summary["batches"].append(final_result)
+
+                        if final_result.get("state") == "failed":
                             store_result["state"] = "failed"
-                            infrastructure_failed = True
-                            break
-                        if result.get("state") == "completed_with_exceptions":
-                            store_result["state"] = "completed_with_exceptions"
-                        if result.get("safety_stop"):
+                        else:
+                            store_result["completed_batch_count"] += 1
+                            if (
+                                final_result.get("state") == "completed_with_exceptions"
+                                and store_result["state"] == "success"
+                            ):
+                                store_result["state"] = "completed_with_exceptions"
+                        if final_result.get("safety_stop"):
                             store_result["safety_stopped"] = True
-                            store_result["state"] = "completed_with_exceptions"
+                            if store_result["state"] != "failed":
+                                store_result["state"] = "completed_with_exceptions"
                             break
 
                     summary["stores"].append(store_result)
@@ -639,6 +864,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "run":
         if args.batch_size <= 0:
             raise ValueError("--batch-size must be positive")
+        if args.batch_max_attempts <= 0:
+            raise ValueError("--batch-max-attempts must be positive")
+        if args.batch_retry_backoff_seconds < 0:
+            raise ValueError("--batch-retry-backoff-seconds must be non-negative")
+        if args.timeout_1688_seconds <= 0 or args.timeout_jushuitan_seconds <= 0:
+            raise ValueError("Stage timeout values must be positive")
         if args.mode == "execute" and not args.yes:
             raise ValueError("execute mode requires --yes")
         return run_daily(args)[0]

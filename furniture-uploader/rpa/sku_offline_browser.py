@@ -487,6 +487,19 @@ class SkuOfflineBrowser(BrowserRPA):
                 except TimeoutException as exc:
                     self._assert_not_redirected_to_login(context)
                     self._assert_no_risk_control_block(context)
+                    body_text = self._extract_page_body_text()
+                    if self._management_search_shows_no_data(body_text):
+                        message = (
+                            f"Product {context.get('product_id', '')} is unavailable after "
+                            "management search returned an explicit no-data state."
+                        )
+                        self._annotate_page_error_context(
+                            context,
+                            stage_name="management_product_search",
+                            error_text=message,
+                            error_category="product_unavailable",
+                        )
+                        raise OfflineTaskStateError(message) from exc
                     message = (
                         f"Timed out locating product {context.get('product_id', '')} "
                         "after management search and query-url fallback."
@@ -505,6 +518,16 @@ class SkuOfflineBrowser(BrowserRPA):
                 raise OfflineTaskNotFoundError(
                     f"Product '{context.get('product_id', '')}' was not found on the management page."
                 )
+
+    @staticmethod
+    def _management_search_shows_no_data(body_text: str) -> bool:
+        no_data_markers = (
+            "暂无数据",
+            "没有找到商品",
+            "未找到相关商品",
+            "没有符合条件的商品",
+        )
+        return any(marker in str(body_text or "") for marker in no_data_markers)
 
     def _wait_for_management_result_row(
         self,

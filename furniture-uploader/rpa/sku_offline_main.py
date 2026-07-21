@@ -671,7 +671,6 @@ def should_retry_offline_error(error_category: str, execution_config: dict[str, 
             "sole_sku_requires_product_offline",
             "campaign_restriction",
             "delivery_service_backfill_failed",
-            "management_search_timeout",
             "submit_blocked_before_request",
         ],
     )

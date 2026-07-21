@@ -172,6 +172,11 @@ class FakeSuccessBrowser(SkuOfflineBrowser):
 
 
 class SkuOfflineBrowserTests(unittest.TestCase):
+    def test_management_search_no_data_requires_an_explicit_page_marker(self) -> None:
+        self.assertTrue(SkuOfflineBrowser._management_search_shows_no_data("查询完成\n暂无数据"))
+        self.assertTrue(SkuOfflineBrowser._management_search_shows_no_data("没有找到商品"))
+        self.assertFalse(SkuOfflineBrowser._management_search_shows_no_data("页面仍在加载"))
+
     def test_grouped_product_opens_once_and_submits_multiple_skus_once(self) -> None:
         tasks = [
             OfflineTask(

@@ -239,6 +239,7 @@ class SkuOfflineMainTests(unittest.TestCase):
         )
         self.assertFalse(should_retry_offline_error("campaign_restriction", execution_config))
         self.assertFalse(should_retry_offline_error("task_not_found", execution_config))
+        self.assertTrue(should_retry_offline_error("management_search_timeout", execution_config))
         self.assertTrue(should_retry_offline_error("submit_failed", execution_config))
 
     def test_classify_submit_validation_as_sole_sku_terminal(self) -> None:
