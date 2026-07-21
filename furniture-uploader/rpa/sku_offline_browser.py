@@ -887,15 +887,183 @@ class SkuOfflineBrowser(BrowserRPA):
                 phase="after_trace_miss",
             ):
                 return
+            diagnostics = self._collect_submit_block_diagnostics(submit_button)
+            context["submit_block_diagnostics"] = diagnostics
+            if self._probe_persisted_offline_after_trace_miss(selectors, context):
+                context["success_detected"] = "true"
+                context["submit_success_phase"] = "persisted_state_after_trace_miss"
+                context["execution_result"] = "submitted_untraced_verified"
+                return
+            assist_messages = [
+                str(item).strip()
+                for item in diagnostics.get("assist_messages", [])
+                if str(item).strip()
+            ]
+            hidden_messages = [
+                str(item.get("text", "")).strip()
+                for item in diagnostics.get("validation_nodes", [])
+                if isinstance(item, dict) and str(item.get("text", "")).strip()
+            ]
+            summary = " | ".join((assist_messages + hidden_messages)[:3])
+            error_text = "提交按钮未产生平台请求" + (f"：{summary}" if summary else "")
+            self._annotate_page_error_context(
+                context,
+                stage_name="submit_before_request",
+                error_text=error_text,
+                error_category="submit_blocked_before_request",
+            )
             raise PublishSubmitError(
                 "Submit button was clicked but no submit request was captured. "
                 "The page likely blocked submit due to hidden validation or disabled state."
+                + (f" validation: {summary}" if summary else "")
             )
         success_detected = self._wait_for_success(success_detection, context)
         context["success_detected"] = "true" if success_detected else "false"
         if bool(success_detection.get("required", False)) and not success_detected:
             raise PublishSubmitError("Did not detect the configured success signal after submitting offline changes.")
         context["execution_result"] = "submitted"
+
+    def _collect_submit_block_diagnostics(self, submit_button: dict[str, str]) -> dict[str, Any]:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        assist_messages = self._collect_assist_messages()
+        visible_inline_messages = self._collect_visible_inline_validation_messages()
+        payload = self.driver.execute_script(
+            r"""
+            const buttonSelector = String(arguments[0] || '');
+            const norm = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+            const isVisible = (node) => {
+              if (!node) return false;
+              const style = window.getComputedStyle(node);
+              const rect = node.getBoundingClientRect();
+              return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+            };
+            const validationSelectors = [
+              '[aria-invalid="true"]',
+              '.ant-form-item-has-error',
+              '.ant-form-item-explain-error',
+              '.next-form-item.has-error',
+              '.next-form-item-error',
+              '.next-form-item-help',
+              '.modern-message .message-span',
+              '.prop-error-message .message-span'
+            ];
+            const validationNodes = [];
+            const seen = new Set();
+            for (const selector of validationSelectors) {
+              for (const node of Array.from(document.querySelectorAll(selector))) {
+                const text = norm(node.innerText || node.textContent || '');
+                const key = `${selector}|${text}|${node.id || ''}`;
+                if (seen.has(key)) continue;
+                seen.add(key);
+                validationNodes.push({
+                  selector,
+                  id: String(node.id || ''),
+                  class_name: String(node.className || '').slice(0, 300),
+                  text: text.slice(0, 500),
+                  visible: isVisible(node),
+                  aria_invalid: String(node.getAttribute('aria-invalid') || '')
+                });
+                if (validationNodes.length >= 40) break;
+              }
+              if (validationNodes.length >= 40) break;
+            }
+
+            const sdk = window.SellPublishSdk;
+            const state = sdk && sdk.engine && sdk.engine.getJsonState ? sdk.engine.getJsonState() : {};
+            const components = (state && state.components) || {};
+            const componentDiagnostics = [];
+            for (const [name, component] of Object.entries(components)) {
+              const props = (component && component.props) || {};
+              const diagnostic = {};
+              for (const [key, value] of Object.entries(props)) {
+                if (!/error|invalid|message|validate|required|assist/i.test(key)) continue;
+                if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+                  diagnostic[key] = String(value).slice(0, 500);
+                } else if (Array.isArray(value)) {
+                  diagnostic[key] = { type: 'array', length: value.length };
+                } else if (value && typeof value === 'object') {
+                  diagnostic[key] = { type: 'object', keys: Object.keys(value).slice(0, 30) };
+                }
+              }
+              if (Object.keys(diagnostic).length > 0) {
+                componentDiagnostics.push({ name, diagnostic });
+              }
+              if (componentDiagnostics.length >= 40) break;
+            }
+
+            let button = null;
+            try {
+              button = buttonSelector ? document.querySelector(buttonSelector) : null;
+            } catch (error) {
+              button = null;
+            }
+            button = button || document.querySelector('#submitFormButton');
+            return {
+              validation_nodes: validationNodes,
+              sdk_component_diagnostics: componentDiagnostics,
+              button: button ? {
+                id: String(button.id || ''),
+                class_name: String(button.className || '').slice(0, 300),
+                disabled: Boolean(button.disabled),
+                aria_disabled: String(button.getAttribute('aria-disabled') || ''),
+                visible: isVisible(button),
+                text: norm(button.innerText || button.textContent || '').slice(0, 200)
+              } : { missing: true }
+            };
+            """,
+            submit_button.get("value", "") if submit_button.get("by") == "css" else "#submitFormButton",
+        )
+        if not isinstance(payload, dict):
+            payload = {}
+        payload["assist_messages"] = assist_messages[:30]
+        payload["visible_inline_messages"] = visible_inline_messages[:30]
+        return payload
+
+    def _probe_persisted_offline_after_trace_miss(
+        self,
+        selectors: dict[str, Any],
+        context: dict[str, Any],
+    ) -> bool:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        try:
+            self.driver.refresh()
+            self._pause(5.0)
+            self._assert_not_redirected_to_login(context)
+            self._assert_no_risk_control_block(context)
+            expected_product_id = str(context.get("product_id", "")).strip()
+            actual_product_id = self._extract_product_id_from_current_url()
+            context["trace_miss_probe_product_id"] = actual_product_id
+            if expected_product_id and actual_product_id != expected_product_id:
+                context["trace_miss_persistence_probe"] = "identity_mismatch"
+                return False
+            sku_row = self._find_sku_row_by_runtime_value(context)
+            if sku_row is None:
+                sku_row_selector = self._resolve_selector(selectors.get("sku_row", {}), context)
+                if not self._selector_is_configured(sku_row_selector):
+                    context["trace_miss_persistence_probe"] = "sku_selector_missing"
+                    return False
+                sku_row = self._wait_for_element(sku_row_selector)
+            switch_selector = selectors.get("sku_switch", {})
+            if not switch_selector:
+                context["trace_miss_persistence_probe"] = "switch_selector_missing"
+                return False
+            switch_element = sku_row.find_element(
+                BY_MAPPING.get(str(switch_selector.get("by", "css")).strip().lower(), By.CSS_SELECTOR),
+                str(switch_selector.get("value", "")).strip(),
+            )
+            switch_label = self._read_switch_label(switch_element)
+            aria_checked = str(switch_element.get_attribute("aria-checked") or "")
+            context["trace_miss_probe_switch_label"] = switch_label
+            context["trace_miss_probe_switch_aria_checked"] = aria_checked
+            persisted = self._is_already_offline(switch_element, switch_label)
+            context["trace_miss_persistence_probe"] = "offline" if persisted else "online"
+            return persisted
+        except Exception as exc:
+            context["trace_miss_persistence_probe"] = "error"
+            context["trace_miss_persistence_probe_error"] = str(exc)[:500]
+            return False
 
     def _record_submit_success_if_detected(
         self,

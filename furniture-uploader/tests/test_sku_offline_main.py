@@ -216,6 +216,7 @@ class SkuOfflineMainTests(unittest.TestCase):
                 "browser_window_closed",
             "delivery_service_backfill_failed",
             "management_search_timeout",
+            "submit_blocked_before_request",
             ]
         }
 
@@ -223,6 +224,7 @@ class SkuOfflineMainTests(unittest.TestCase):
         self.assertTrue(should_stop_store_on_error("browser_window_closed", execution_config))
         self.assertTrue(should_stop_store_on_error("delivery_service_backfill_failed", execution_config))
         self.assertTrue(should_stop_store_on_error("management_search_timeout", execution_config))
+        self.assertTrue(should_stop_store_on_error("submit_blocked_before_request", execution_config))
         self.assertFalse(should_stop_store_on_error("sku_not_found", execution_config))
 
     def test_classify_window_closed_webdriver_error(self) -> None:

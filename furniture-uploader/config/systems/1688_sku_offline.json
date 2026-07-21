@@ -37,7 +37,8 @@
       "account_mapping",
       "browser_window_closed",
       "delivery_service_backfill_failed",
-      "management_search_timeout"
+      "management_search_timeout",
+      "submit_blocked_before_request"
     ],
     "non_retryable_error_categories": [
       "task_not_found",
