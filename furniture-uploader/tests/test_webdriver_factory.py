@@ -16,6 +16,7 @@ from webdriver_factory import (
     detect_edge_version_from_installation,
     extract_version_from_text,
     find_compatible_cached_edge_driver,
+    open_webdriver,
     resolve_browser_type,
     resolve_edge_driver_path,
 )
@@ -75,6 +76,26 @@ class WebdriverFactoryTests(unittest.TestCase):
                 Path(resolved),
                 cache_root / "150.0.4078.65" / "msedgedriver.exe",
             )
+
+    @patch("webdriver_factory.resolve_edge_driver_path", return_value="C:/cache/msedgedriver.exe")
+    @patch("webdriver_factory.webdriver.Edge")
+    def test_profile_launch_disables_crashed_session_restore(self, edge, _resolve_driver) -> None:
+        open_webdriver(
+            headless=False,
+            debugger_address="",
+            user_data_dir="D:/profiles/wolai",
+            profile_directory="Default",
+            browser_binary_path="",
+            browser_type="edge",
+            page_load_strategy="eager",
+        )
+
+        options = edge.call_args.kwargs["options"]
+        self.assertIn("--disable-session-crashed-bubble", options.arguments)
+        self.assertIn("--hide-crash-restore-bubble", options.arguments)
+        self.assertIn("--disable-features=InfiniteSessionRestore", options.arguments)
+        self.assertEqual(options.experimental_options["prefs"]["profile.exit_type"], "Normal")
+        self.assertTrue(options.experimental_options["prefs"]["profile.exited_cleanly"])
 
     @patch("webdriver_factory.EdgeChromiumDriverManager")
     @patch("webdriver_factory.find_compatible_cached_edge_driver")

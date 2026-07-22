@@ -238,6 +238,10 @@ class SkuOfflineMainTests(unittest.TestCase):
             classify_offline_error(Exception("no such window: target window already closed"), {}),
             "browser_window_closed",
         )
+        self.assertEqual(
+            classify_offline_error(Exception("tab crashed"), {}),
+            "browser_window_closed",
+        )
 
     def test_classify_refused_local_webdriver_session_as_window_closed(self) -> None:
         error = Exception(

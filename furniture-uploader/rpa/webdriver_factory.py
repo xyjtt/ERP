@@ -57,6 +57,7 @@ def open_webdriver(
                 options.add_argument(f"--user-data-dir={user_data_dir}")
             if profile_directory:
                 options.add_argument(f"--profile-directory={profile_directory}")
+            configure_profile_session_restore(options)
         if headless and not debugger_address:
             options.add_argument("--headless=new")
         driver = webdriver.Edge(
@@ -82,6 +83,7 @@ def open_webdriver(
             options.add_argument(f"--user-data-dir={user_data_dir}")
         if profile_directory:
             options.add_argument(f"--profile-directory={profile_directory}")
+        configure_profile_session_restore(options)
     if headless and not debugger_address:
         options.add_argument("--headless=new")
     driver = webdriver.Chrome(
@@ -89,6 +91,19 @@ def open_webdriver(
         options=options,
     )
     return driver, attached_to_existing_browser
+
+
+def configure_profile_session_restore(options: EdgeOptions | ChromeOptions) -> None:
+    options.add_argument("--disable-session-crashed-bubble")
+    options.add_argument("--hide-crash-restore-bubble")
+    options.add_argument("--disable-features=InfiniteSessionRestore")
+    options.add_experimental_option(
+        "prefs",
+        {
+            "profile.exit_type": "Normal",
+            "profile.exited_cleanly": True,
+        },
+    )
 
 
 def resolve_edge_driver_path(

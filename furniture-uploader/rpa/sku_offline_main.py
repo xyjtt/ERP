@@ -798,6 +798,7 @@ def classify_offline_error(exc: Exception, result_context: dict[str, Any]) -> st
             "target window already closed",
             "web view not found",
             "disconnected: not connected to devtools",
+            "tab crashed",
         )
     ):
         return "browser_window_closed"
