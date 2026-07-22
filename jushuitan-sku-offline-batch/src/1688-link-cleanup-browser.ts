@@ -20,6 +20,7 @@ import {
   ensureProductPage,
   login,
   selectExactStore,
+  setPageSizeTo500,
   Target,
 } from "./jushuitan";
 import { normalizeStoreSelectionError } from "./store-picker";
@@ -138,6 +139,16 @@ async function collectRows(target: Target): Promise<{ locator: Locator; rows: Ro
   return { locator, rows };
 }
 
+async function collectPaginationTotal(target: Target): Promise<number> {
+  const text = await target
+    .locator(".ant-pagination-total-text, .ant-pagination")
+    .first()
+    .innerText()
+    .catch(() => "");
+  const match = text.match(/共\s*(\d+)\s*条/);
+  return match ? Number(match[1]) : 0;
+}
+
 async function saveTaskEvidence(
   page: Page,
   target: Target,
@@ -218,7 +229,15 @@ async function queryTaskRows(
   await dismissQuickSaveModal(page);
   await dismissVisibleGuides(page);
   await assertNoRiskControl(page);
+  const expandedResultSet = await setPageSizeTo500(page, target);
   const collected = await collectRows(target);
+  const paginationTotal = await collectPaginationTotal(target);
+  if (!expandedResultSet && paginationTotal > collected.rows.length) {
+    throw new CleanupBrowserError(
+      "pagination_unavailable",
+      `Jushuitan returned ${paginationTotal} rows but only ${collected.rows.length} are visible`,
+    );
+  }
   await saveTaskEvidence(page, target, options, task, selectStore ? "query" : "verify");
   return { target, ...collected };
 }

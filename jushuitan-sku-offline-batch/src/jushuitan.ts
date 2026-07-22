@@ -1325,50 +1325,57 @@ async function hasNoSearchResults(target: Target): Promise<boolean> {
   }
 }
 
-async function setPageSizeTo500(page: Page): Promise<void> {
-  const triggerCandidates = [
-    page.getByText(/^\d+条\/页$/),
-    page.locator(".ant-pagination-options .ant-select-selector"),
-    page.locator(".ant-pagination-options .ant-select-selection-item"),
-  ];
+export async function setPageSizeTo500(page: Page, preferredTarget: Target = page): Promise<boolean> {
+  const triggerTargets = [preferredTarget, ...allTargets(page)];
+  for (const target of triggerTargets) {
+    const triggerCandidates = [
+      target.getByText(/^\d+条\/页$/),
+      target.locator(".ant-pagination-options .ant-select-selector"),
+      target.locator(".ant-pagination-options .ant-select-selection-item"),
+    ];
 
-  for (const candidate of triggerCandidates) {
-    const count = await candidate.count().catch(() => 0);
-    for (let index = 0; index < Math.min(count, 6); index += 1) {
-      const trigger = candidate.nth(index);
-      if (!(await trigger.isVisible().catch(() => false))) {
-        continue;
-      }
+    for (const candidate of triggerCandidates) {
+      const count = await candidate.count().catch(() => 0);
+      for (let index = 0; index < Math.min(count, 6); index += 1) {
+        const trigger = candidate.nth(index);
+        if (!(await trigger.isVisible().catch(() => false))) {
+          continue;
+        }
 
-      const currentText = ((await trigger.innerText().catch(() => "")) || "").replace(/\s+/g, "");
-      if (currentText.includes("500条/页")) {
-        return;
-      }
+        const currentText = ((await trigger.innerText().catch(() => "")) || "").replace(/\s+/g, "");
+        if (currentText.includes("500条/页")) {
+          return true;
+        }
 
-      await trigger.click({ force: true }).catch(() => undefined);
-      await page.waitForTimeout(500);
+        await trigger.click({ force: true }).catch(() => undefined);
+        await page.waitForTimeout(500);
 
-      const optionCandidates = [
-        page.getByText(/^500条\/页$/, { exact: true }),
-        page.locator('.ant-select-item-option[title="500条/页"]'),
-        page.locator('.ant-select-item-option').filter({ hasText: /^500条\/页$/ }),
-      ];
+        const optionTargets = [preferredTarget, ...allTargets(page)];
+        for (const optionTarget of optionTargets) {
+          const optionCandidates = [
+            optionTarget.getByText(/^500条\/页$/, { exact: true }),
+            optionTarget.locator('.ant-select-item-option[title="500条/页"]'),
+            optionTarget.locator('.ant-select-item-option').filter({ hasText: /^500条\/页$/ }),
+          ];
 
-      for (const optionCandidate of optionCandidates) {
-        const optionCount = await optionCandidate.count().catch(() => 0);
-        for (let optionIndex = 0; optionIndex < Math.min(optionCount, 6); optionIndex += 1) {
-          const option = optionCandidate.nth(optionIndex);
-          if (!(await option.isVisible().catch(() => false))) {
-            continue;
+          for (const optionCandidate of optionCandidates) {
+            const optionCount = await optionCandidate.count().catch(() => 0);
+            for (let optionIndex = 0; optionIndex < Math.min(optionCount, 6); optionIndex += 1) {
+              const option = optionCandidate.nth(optionIndex);
+              if (!(await option.isVisible().catch(() => false))) {
+                continue;
+              }
+
+              await option.click({ force: true }).catch(() => undefined);
+              await page.waitForTimeout(1200);
+              return true;
+            }
           }
-
-          await option.click({ force: true }).catch(() => undefined);
-          await page.waitForTimeout(1200);
-          return;
         }
       }
     }
   }
+  return false;
 }
 
 async function getSelectableResultsTable(target: Target): Promise<Locator | null> {
