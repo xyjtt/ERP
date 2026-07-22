@@ -344,15 +344,46 @@ class StopSaleAuditRepository:
                         """,
                         (str(run_id),),
                     ).fetchone()
+                    connection.commit()
+                if (
+                    active_row is not None
+                    and str(active_row[0] or "") == "running"
+                    and active_row[1] is None
+                ):
+                    return
+
+                # SQL Server Native Client 10 can occasionally expose an empty
+                # OUTPUT result even when the UPDATE committed. Verify through a
+                # fresh connection before treating the run as externally closed.
+                with connect_app_database(self.config) as verification_connection:
+                    verification_cursor = verification_connection.cursor()
+                    verified_row = verification_cursor.execute(
+                        f"""
+                        SELECT status, finished_at
+                        FROM {run_table}
+                        WHERE run_id = ?
+                        """,
+                        (str(run_id),),
+                    ).fetchone()
                     if (
-                        active_row is None
-                        or str(active_row[0] or "") != "running"
-                        or active_row[1] is not None
+                        verified_row is None
+                        or str(verified_row[0] or "") != "running"
+                        or verified_row[1] is not None
                     ):
                         raise RuntimeError(
                             f"Stop-sale audit run is no longer active: {run_id}"
                         )
-                    connection.commit()
+                    verification_cursor.execute(
+                        f"""
+                        UPDATE {run_table}
+                        SET updated_at = SYSUTCDATETIME()
+                        WHERE run_id = ?
+                          AND status = 'running'
+                          AND finished_at IS NULL
+                        """,
+                        (str(run_id),),
+                    )
+                    verification_connection.commit()
                 return
             except pyodbc.Error:
                 if attempt + 1 >= max_attempts:

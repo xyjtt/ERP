@@ -103,17 +103,52 @@ class StopSaleAuditTests(unittest.TestCase):
         connection.commit.assert_called_once_with()
 
     def test_heartbeat_rejects_a_run_that_is_no_longer_active(self) -> None:
-        inactive_result = SimpleNamespace(fetchone=lambda: None)
-        cursor = SimpleNamespace()
-        cursor.execute = unittest.mock.Mock(return_value=inactive_result)
-        connection = unittest.mock.MagicMock()
-        connection.__enter__.return_value = connection
-        connection.cursor.return_value = cursor
+        update_result = SimpleNamespace(fetchone=lambda: None)
+        update_cursor = SimpleNamespace()
+        update_cursor.execute = unittest.mock.Mock(return_value=update_result)
+        update_connection = unittest.mock.MagicMock()
+        update_connection.__enter__.return_value = update_connection
+        update_connection.cursor.return_value = update_cursor
+        verification_result = SimpleNamespace(fetchone=lambda: None)
+        verification_cursor = SimpleNamespace()
+        verification_cursor.execute = unittest.mock.Mock(return_value=verification_result)
+        verification_connection = unittest.mock.MagicMock()
+        verification_connection.__enter__.return_value = verification_connection
+        verification_connection.cursor.return_value = verification_cursor
         config = SimpleNamespace(schema="app")
 
-        with patch("stop_sale_audit.connect_app_database", return_value=connection):
+        with patch(
+            "stop_sale_audit.connect_app_database",
+            side_effect=[update_connection, verification_connection],
+        ):
             with self.assertRaisesRegex(RuntimeError, "no longer active"):
                 StopSaleAuditRepository(config).heartbeat_run("run-1")
+
+    def test_heartbeat_verifies_empty_output_with_a_fresh_connection(self) -> None:
+        update_result = SimpleNamespace(fetchone=lambda: None)
+        update_cursor = SimpleNamespace()
+        update_cursor.execute = unittest.mock.Mock(return_value=update_result)
+        update_connection = unittest.mock.MagicMock()
+        update_connection.__enter__.return_value = update_connection
+        update_connection.cursor.return_value = update_cursor
+        verification_result = SimpleNamespace(fetchone=lambda: ("running", None))
+        verification_cursor = SimpleNamespace()
+        verification_cursor.execute = unittest.mock.Mock(
+            side_effect=[verification_result, verification_cursor]
+        )
+        verification_connection = unittest.mock.MagicMock()
+        verification_connection.__enter__.return_value = verification_connection
+        verification_connection.cursor.return_value = verification_cursor
+        config = SimpleNamespace(schema="app")
+
+        with patch(
+            "stop_sale_audit.connect_app_database",
+            side_effect=[update_connection, verification_connection],
+        ):
+            StopSaleAuditRepository(config).heartbeat_run("run-1")
+
+        self.assertEqual(verification_cursor.execute.call_count, 2)
+        verification_connection.commit.assert_called_once_with()
 
     def test_heartbeat_retries_a_transient_database_error(self) -> None:
         active_result = SimpleNamespace(fetchone=lambda: ("running", None))
