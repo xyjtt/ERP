@@ -239,6 +239,18 @@ class SkuOfflineMainTests(unittest.TestCase):
             "browser_window_closed",
         )
 
+    def test_classify_refused_local_webdriver_session_as_window_closed(self) -> None:
+        error = Exception(
+            "HTTPConnectionPool(host='localhost', port=63914): Max retries exceeded "
+            "with url: /session/abc/window (Caused by NewConnectionError: "
+            "Failed to establish a new connection: [WinError 10061] 由于目标计算机积极拒绝)"
+        )
+
+        self.assertEqual(
+            classify_offline_error(error, {}),
+            "browser_window_closed",
+        )
+
     def test_should_not_retry_terminal_item_categories(self) -> None:
         execution_config: dict[str, object] = {}
 

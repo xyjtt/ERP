@@ -44,6 +44,17 @@ class BrowserRPAHelperTests(unittest.TestCase):
     def setUp(self) -> None:
         self.browser = BrowserRPA({}, PROJECT_ROOT)
 
+    def test_close_clears_driver_when_session_is_already_unavailable(self) -> None:
+        class DeadDriver:
+            def quit(self) -> None:
+                raise RuntimeError("driver connection refused")
+
+        self.browser.driver = DeadDriver()
+
+        self.browser.close()
+
+        self.assertIsNone(self.browser.driver)
+
     def test_build_tinymce_html_wraps_plain_text_lines(self) -> None:
         html_value = self.browser._build_tinymce_html("line one\nline two")
         self.assertEqual(html_value, "<p>line one</p><p>line two</p>")

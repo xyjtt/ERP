@@ -801,6 +801,20 @@ def classify_offline_error(exc: Exception, result_context: dict[str, Any]) -> st
         )
     ):
         return "browser_window_closed"
+    if (
+        "localhost" in normalized_message
+        and "/session/" in normalized_message
+        and any(
+            marker in normalized_message
+            for marker in (
+                "failed to establish a new connection",
+                "connection refused",
+                "actively refused",
+                "积极拒绝",
+            )
+        )
+    ):
+        return "browser_window_closed"
     if error_type == "OfflineLoginRequiredError":
         return "login_required"
     if error_type == "OfflineRiskControlError":

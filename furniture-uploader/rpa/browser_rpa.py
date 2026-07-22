@@ -79,8 +79,12 @@ class BrowserRPA:
             if self.attached_to_existing_browser and self.browser_config.get("keep_browser_open_on_close", True):
                 self.driver = None
                 return
-            self.driver.quit()
+            driver = self.driver
             self.driver = None
+            try:
+                driver.quit()
+            except Exception as exc:
+                print(f"[WARN] Browser driver was already unavailable during close: {exc}")
 
     def reset_runtime_artifacts(self) -> None:
         self.last_screenshot_path = ""
