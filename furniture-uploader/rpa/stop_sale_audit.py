@@ -6,6 +6,7 @@ import json
 import os
 import re
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -315,23 +316,43 @@ class StopSaleAuditRepository:
             ).fetchone()
             return int(row[0] or 0)
 
-    def heartbeat_run(self, run_id: str) -> None:
+    def heartbeat_run(
+        self,
+        run_id: str,
+        *,
+        max_attempts: int = 3,
+        retry_seconds: float = 2.0,
+    ) -> None:
+        if max_attempts <= 0 or retry_seconds < 0:
+            raise ValueError("Heartbeat retry settings are invalid.")
+
+        import pyodbc
+
         run_table = self._table("ali1688_stop_sale_run")
-        with connect_app_database(self.config) as connection:
-            cursor = connection.cursor()
-            cursor.execute(
-                f"""
-                UPDATE {run_table}
-                SET updated_at = SYSUTCDATETIME()
-                WHERE run_id = ?
-                  AND status = 'running'
-                  AND finished_at IS NULL
-                """,
-                (str(run_id),),
-            )
-            if cursor.rowcount != 1:
-                raise RuntimeError(f"Stop-sale audit run is no longer active: {run_id}")
-            connection.commit()
+        for attempt in range(max_attempts):
+            try:
+                with connect_app_database(self.config) as connection:
+                    cursor = connection.cursor()
+                    cursor.execute(
+                        f"""
+                        UPDATE {run_table}
+                        SET updated_at = SYSUTCDATETIME()
+                        WHERE run_id = ?
+                          AND status = 'running'
+                          AND finished_at IS NULL
+                        """,
+                        (str(run_id),),
+                    )
+                    if cursor.rowcount != 1:
+                        raise RuntimeError(
+                            f"Stop-sale audit run is no longer active: {run_id}"
+                        )
+                    connection.commit()
+                return
+            except pyodbc.Error:
+                if attempt + 1 >= max_attempts:
+                    raise
+                time.sleep(retry_seconds)
 
     def start_run(
         self,

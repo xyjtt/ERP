@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import pyodbc
 from pathlib import Path
 import sys
 import tempfile
@@ -110,6 +111,27 @@ class StopSaleAuditTests(unittest.TestCase):
         with patch("stop_sale_audit.connect_app_database", return_value=connection):
             with self.assertRaisesRegex(RuntimeError, "no longer active"):
                 StopSaleAuditRepository(config).heartbeat_run("run-1")
+
+    def test_heartbeat_retries_a_transient_database_error(self) -> None:
+        cursor = SimpleNamespace(rowcount=1)
+        cursor.execute = unittest.mock.Mock(return_value=cursor)
+        connection = unittest.mock.MagicMock()
+        connection.__enter__.return_value = connection
+        connection.cursor.return_value = cursor
+        config = SimpleNamespace(schema="app")
+
+        with (
+            patch(
+                "stop_sale_audit.connect_app_database",
+                side_effect=[pyodbc.OperationalError("temporary"), connection],
+            ) as connect,
+            patch("stop_sale_audit.time.sleep") as sleep,
+        ):
+            StopSaleAuditRepository(config).heartbeat_run("run-1")
+
+        self.assertEqual(connect.call_count, 2)
+        sleep.assert_called_once_with(2.0)
+        connection.commit.assert_called_once_with()
 
 
 if __name__ == "__main__":
