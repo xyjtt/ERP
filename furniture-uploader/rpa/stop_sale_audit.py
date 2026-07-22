@@ -333,33 +333,25 @@ class StopSaleAuditRepository:
             try:
                 with connect_app_database(self.config) as connection:
                     cursor = connection.cursor()
-                    cursor.execute(
+                    active_row = cursor.execute(
                         f"""
                         UPDATE {run_table}
                         SET updated_at = SYSUTCDATETIME()
+                        OUTPUT inserted.status, inserted.finished_at
                         WHERE run_id = ?
                           AND status = 'running'
                           AND finished_at IS NULL
                         """,
                         (str(run_id),),
-                    )
-                    if cursor.rowcount != 1:
-                        active_row = cursor.execute(
-                            f"""
-                            SELECT status, finished_at
-                            FROM {run_table}
-                            WHERE run_id = ?
-                            """,
-                            (str(run_id),),
-                        ).fetchone()
-                        if (
-                            active_row is None
-                            or str(active_row[0] or "") != "running"
-                            or active_row[1] is not None
-                        ):
-                            raise RuntimeError(
-                                f"Stop-sale audit run is no longer active: {run_id}"
-                            )
+                    ).fetchone()
+                    if (
+                        active_row is None
+                        or str(active_row[0] or "") != "running"
+                        or active_row[1] is not None
+                    ):
+                        raise RuntimeError(
+                            f"Stop-sale audit run is no longer active: {run_id}"
+                        )
                     connection.commit()
                 return
             except pyodbc.Error:
