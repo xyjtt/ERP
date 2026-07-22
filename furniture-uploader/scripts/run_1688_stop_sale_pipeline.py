@@ -471,6 +471,7 @@ def run_pipeline(
     result_1688_return_code = 1
     jushuitan_return_code: int | None = None
     offline_records: list[dict[str, Any]] = []
+    jushuitan_records: list[dict[str, Any]] = []
     error_message = ""
     pending_exception: Exception | None = None
     expected_count = (
@@ -508,8 +509,6 @@ def run_pipeline(
         )
         result_1688_return_code = result_1688.returncode
         offline_records = load_jsonl_records(offline_report_path)
-        if audit_started and audit_repository is not None:
-            audit_repository.record_1688_results(run_id, offline_records)
 
         handoff_count = count_handoff_records(handoff_path)
         if result_1688_return_code == 0 and handoff_count > 0:
@@ -528,14 +527,24 @@ def run_pipeline(
                 heartbeat=audit_heartbeat,
             )
             jushuitan_return_code = result_jushuitan.returncode
-            if audit_started and audit_repository is not None:
-                audit_repository.record_jushuitan_results(
-                    run_id,
-                    load_jsonl_records(jushuitan_report_path),
-                )
+            jushuitan_records = load_jsonl_records(jushuitan_report_path)
     except Exception as exc:
         error_message = f"{type(exc).__name__}: {exc}"
         pending_exception = exc
+
+    if audit_started and audit_repository is not None:
+        try:
+            # Keep item rows pending while the browser stages are active. This
+            # prevents external run reconcilers from treating an offline-only
+            # result as a completed 1688 + Jushuitan pipeline.
+            audit_repository.record_1688_results(run_id, offline_records)
+            if jushuitan_records:
+                audit_repository.record_jushuitan_results(run_id, jushuitan_records)
+        except Exception as exc:
+            audit_error = f"{type(exc).__name__}: {exc}"
+            error_message = f"{error_message}; audit write: {audit_error}" if error_message else audit_error
+            if pending_exception is None:
+                pending_exception = exc
 
     handoff_count = count_handoff_records(handoff_path)
 
