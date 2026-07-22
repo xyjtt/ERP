@@ -101,8 +101,9 @@ class StopSaleAuditTests(unittest.TestCase):
         connection.commit.assert_called_once_with()
 
     def test_heartbeat_rejects_a_run_that_is_no_longer_active(self) -> None:
+        inactive_result = SimpleNamespace(fetchone=lambda: ("success", "finished"))
         cursor = SimpleNamespace(rowcount=0)
-        cursor.execute = unittest.mock.Mock(return_value=cursor)
+        cursor.execute = unittest.mock.Mock(side_effect=[cursor, inactive_result])
         connection = unittest.mock.MagicMock()
         connection.__enter__.return_value = connection
         connection.cursor.return_value = cursor
@@ -111,6 +112,21 @@ class StopSaleAuditTests(unittest.TestCase):
         with patch("stop_sale_audit.connect_app_database", return_value=connection):
             with self.assertRaisesRegex(RuntimeError, "no longer active"):
                 StopSaleAuditRepository(config).heartbeat_run("run-1")
+
+    def test_heartbeat_accepts_unknown_rowcount_when_run_is_still_active(self) -> None:
+        active_result = SimpleNamespace(fetchone=lambda: ("running", None))
+        cursor = SimpleNamespace(rowcount=-1)
+        cursor.execute = unittest.mock.Mock(side_effect=[cursor, active_result])
+        connection = unittest.mock.MagicMock()
+        connection.__enter__.return_value = connection
+        connection.cursor.return_value = cursor
+        config = SimpleNamespace(schema="app")
+
+        with patch("stop_sale_audit.connect_app_database", return_value=connection):
+            StopSaleAuditRepository(config).heartbeat_run("run-1")
+
+        self.assertEqual(cursor.execute.call_count, 2)
+        connection.commit.assert_called_once_with()
 
     def test_heartbeat_retries_a_transient_database_error(self) -> None:
         cursor = SimpleNamespace(rowcount=1)

@@ -344,9 +344,22 @@ class StopSaleAuditRepository:
                         (str(run_id),),
                     )
                     if cursor.rowcount != 1:
-                        raise RuntimeError(
-                            f"Stop-sale audit run is no longer active: {run_id}"
-                        )
+                        active_row = cursor.execute(
+                            f"""
+                            SELECT status, finished_at
+                            FROM {run_table}
+                            WHERE run_id = ?
+                            """,
+                            (str(run_id),),
+                        ).fetchone()
+                        if (
+                            active_row is None
+                            or str(active_row[0] or "") != "running"
+                            or active_row[1] is not None
+                        ):
+                            raise RuntimeError(
+                                f"Stop-sale audit run is no longer active: {run_id}"
+                            )
                     connection.commit()
                 return
             except pyodbc.Error:

@@ -296,13 +296,14 @@ def derive_audit_status(
     jushuitan_return_code: int | None,
     offline_records: list[dict[str, Any]],
     expected_count: int = 0,
+    pipeline_error: bool = False,
 ) -> str:
     successful = sum(
         1 for record in offline_records if record.get("status") in {"success", "already_offline"}
     )
     failed = sum(1 for record in offline_records if record.get("status") == "failed")
     missing = max(0, int(expected_count) - len(offline_records))
-    if failed > 0 or missing > 0:
+    if pipeline_error or failed > 0 or missing > 0:
         return "partial" if successful > 0 else "failed"
     if offline_return_code == 0 and (jushuitan_return_code is None or jushuitan_return_code == 0):
         return "success"
@@ -543,6 +544,7 @@ def run_pipeline(
         jushuitan_return_code=jushuitan_return_code,
         offline_records=offline_records,
         expected_count=expected_count,
+        pipeline_error=pending_exception is not None,
     )
     summary = {
         "run_id": run_id,

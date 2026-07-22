@@ -154,6 +154,17 @@ class Run1688StopSalePipelineTests(unittest.TestCase):
 
         self.assertEqual(status, "failed")
 
+    def test_pipeline_exception_cannot_be_recorded_as_audit_success(self) -> None:
+        status = derive_audit_status(
+            offline_return_code=0,
+            jushuitan_return_code=None,
+            offline_records=[{"status": "already_offline"}],
+            expected_count=1,
+            pipeline_error=True,
+        )
+
+        self.assertEqual(status, "partial")
+
     def test_execute_records_terminal_audit_when_subprocess_start_fails(self) -> None:
         class FakeConfig:
             def safe_dict(self):
