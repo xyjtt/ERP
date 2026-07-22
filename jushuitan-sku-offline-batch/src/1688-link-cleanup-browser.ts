@@ -20,7 +20,6 @@ import {
   ensureProductPage,
   login,
   selectExactStore,
-  setPageSizeTo500,
   Target,
 } from "./jushuitan";
 import { normalizeStoreSelectionError } from "./store-picker";
@@ -139,16 +138,6 @@ async function collectRows(target: Target): Promise<{ locator: Locator; rows: Ro
   return { locator, rows };
 }
 
-async function collectPaginationTotal(target: Target): Promise<number> {
-  const text = await target
-    .locator(".ant-pagination-total-text, .ant-pagination")
-    .first()
-    .innerText()
-    .catch(() => "");
-  const match = text.match(/共\s*(\d+)\s*条/);
-  return match ? Number(match[1]) : 0;
-}
-
 async function saveTaskEvidence(
   page: Page,
   target: Target,
@@ -197,17 +186,11 @@ async function queryTaskRows(
   existingTarget?: Target,
 ): Promise<{ target: Target; rows: RowEvidence[]; locator: Locator }> {
   await assertNoRiskControl(page);
-  if (existingTarget) {
-    await dismissVisibleGuides(page);
-    const collected = await collectRows(existingTarget);
-    await saveTaskEvidence(page, existingTarget, options, task, "query");
-    return { target: existingTarget, ...collected };
-  }
-
-  const target = await ensureProductPage(page);
+  const target = existingTarget ?? await ensureProductPage(page);
   await fillExact(target, productIdSelectors, task.product_id);
-  // Query the whole product once so subsequent SKU rows can reuse this result set.
-  await fillExact(target, onlineSkuSelectors, "");
+  // Keep the product page and store selection, but query each SKU exactly so large
+  // products do not hide the target row on later pagination pages.
+  await fillExact(target, onlineSkuSelectors, task.online_sku);
   if (selectStore) {
     await page.waitForTimeout(600);
     await dismissVisibleModals(page);
@@ -229,15 +212,7 @@ async function queryTaskRows(
   await dismissQuickSaveModal(page);
   await dismissVisibleGuides(page);
   await assertNoRiskControl(page);
-  const expandedResultSet = await setPageSizeTo500(page, target);
   const collected = await collectRows(target);
-  const paginationTotal = await collectPaginationTotal(target);
-  if (!expandedResultSet && paginationTotal > collected.rows.length) {
-    throw new CleanupBrowserError(
-      "pagination_unavailable",
-      `Jushuitan returned ${paginationTotal} rows but only ${collected.rows.length} are visible`,
-    );
-  }
   await saveTaskEvidence(page, target, options, task, selectStore ? "query" : "verify");
   return { target, ...collected };
 }
