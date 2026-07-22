@@ -149,6 +149,8 @@ python scripts\run_1688_stop_sale_pipeline.py `
 
 execute 使用统一 `run_id` 关联 1688 JSONL、聚水潭 JSONL 和新库两张审计表。preview 不创建新库记录。
 
+真实执行期间 pipeline 每 30 秒刷新 `app.ali1688_stop_sale_run.updated_at`。跨机器门禁按最近心跳判断活跃批次；若审计心跳失败，当前 pipeline 会终止自己启动的子进程树并记录异常，避免线上操作脱离正式审计。
+
 单条 canary 建议使用上面的 15 分钟/10 分钟超时。按店铺执行 10 条时默认上限分别为 45 分钟和 20 分钟。超时只终止该 pipeline 子进程拥有的 PID 进程树，写入 `PipelineStageTimeoutError`、审计和钉钉，不允许使用全局关闭 Edge 的命令。
 
 补偿执行必须只包含未完成项。已经完成 1688 与聚水潭闭环的商品不得重新加入补偿 CSV；1688 已完成但聚水潭失败的任务允许通过完整 pipeline 幂等重放，预期结果为 `already_offline + success/already_cleared`。

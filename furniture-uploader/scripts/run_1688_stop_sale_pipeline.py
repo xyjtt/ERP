@@ -8,9 +8,10 @@ import re
 import signal
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -70,7 +71,12 @@ def run_stage_command(
     timeout_seconds: int,
     stage: str,
     env: dict[str, str] | None = None,
+    heartbeat: Callable[[], None] | None = None,
+    heartbeat_interval_seconds: float = 30.0,
 ) -> subprocess.CompletedProcess[Any]:
+    if heartbeat is not None and heartbeat_interval_seconds <= 0:
+        raise ValueError("heartbeat_interval_seconds must be positive")
+
     popen_options: dict[str, Any] = {
         "cwd": cwd,
         "env": env,
@@ -80,11 +86,34 @@ def run_stage_command(
     else:
         popen_options["start_new_session"] = True
     process = subprocess.Popen(command, **popen_options)
-    try:
-        return_code = process.wait(timeout=timeout_seconds)
-    except subprocess.TimeoutExpired as exc:
-        terminate_stage_process_tree(process)
-        raise PipelineStageTimeoutError(stage, timeout_seconds) from exc
+    if heartbeat is None:
+        try:
+            return_code = process.wait(timeout=timeout_seconds)
+        except subprocess.TimeoutExpired as exc:
+            terminate_stage_process_tree(process)
+            raise PipelineStageTimeoutError(stage, timeout_seconds) from exc
+        return subprocess.CompletedProcess(command, return_code)
+
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        remaining_seconds = deadline - time.monotonic()
+        if remaining_seconds <= 0:
+            terminate_stage_process_tree(process)
+            raise PipelineStageTimeoutError(stage, timeout_seconds)
+        try:
+            return_code = process.wait(
+                timeout=min(float(heartbeat_interval_seconds), remaining_seconds)
+            )
+            break
+        except subprocess.TimeoutExpired as exc:
+            if time.monotonic() >= deadline:
+                terminate_stage_process_tree(process)
+                raise PipelineStageTimeoutError(stage, timeout_seconds) from exc
+            try:
+                heartbeat()
+            except Exception:
+                terminate_stage_process_tree(process)
+                raise
     return subprocess.CompletedProcess(command, return_code)
 
 
@@ -464,11 +493,17 @@ def run_pipeline(
             audit_started = True
 
         command_1688 = build_1688_command(args, handoff_path)
+        audit_heartbeat = (
+            (lambda: audit_repository.heartbeat_run(run_id))
+            if audit_started and audit_repository is not None
+            else None
+        )
         result_1688 = run_stage_command(
             command_1688,
             cwd=PROJECT_ROOT,
             timeout_seconds=args.timeout_1688_seconds,
             stage="1688",
+            heartbeat=audit_heartbeat,
         )
         result_1688_return_code = result_1688.returncode
         offline_records = load_jsonl_records(offline_report_path)
@@ -489,6 +524,7 @@ def run_pipeline(
                 timeout_seconds=args.timeout_jushuitan_seconds,
                 stage="jushuitan",
                 env=build_jushuitan_environment(handoff_path),
+                heartbeat=audit_heartbeat,
             )
             jushuitan_return_code = result_jushuitan.returncode
             if audit_started and audit_repository is not None:

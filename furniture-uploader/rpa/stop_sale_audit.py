@@ -309,11 +309,29 @@ class StopSaleAuditRepository:
                 FROM {run_table}
                 WHERE status = 'running'
                   AND finished_at IS NULL
-                  AND started_at >= DATEADD(MINUTE, ?, SYSUTCDATETIME())
+                  AND COALESCE(updated_at, started_at) >= DATEADD(MINUTE, ?, SYSUTCDATETIME())
                 """,
                 (-age_minutes,),
             ).fetchone()
             return int(row[0] or 0)
+
+    def heartbeat_run(self, run_id: str) -> None:
+        run_table = self._table("ali1688_stop_sale_run")
+        with connect_app_database(self.config) as connection:
+            cursor = connection.cursor()
+            cursor.execute(
+                f"""
+                UPDATE {run_table}
+                SET updated_at = SYSUTCDATETIME()
+                WHERE run_id = ?
+                  AND status = 'running'
+                  AND finished_at IS NULL
+                """,
+                (str(run_id),),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError(f"Stop-sale audit run is no longer active: {run_id}")
+            connection.commit()
 
     def start_run(
         self,

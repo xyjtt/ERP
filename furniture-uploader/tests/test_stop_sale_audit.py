@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+from types import SimpleNamespace
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -16,6 +17,7 @@ if str(RPA_ROOT) not in sys.path:
     sys.path.insert(0, str(RPA_ROOT))
 
 from stop_sale_audit import (
+    StopSaleAuditRepository,
     hydrate_dingtalk_credentials,
     load_jsonl_records,
     resolve_stop_sale_app_config,
@@ -79,6 +81,35 @@ class StopSaleAuditTests(unittest.TestCase):
             self.assertEqual(result, {"DINGTALK_WEBHOOK": True, "DINGTALK_SECRET": True})
             self.assertNotIn("example.invalid", repr(result))
             self.assertNotIn("signing-secret", repr(result))
+
+    def test_heartbeat_updates_only_an_active_run(self) -> None:
+        cursor = SimpleNamespace(rowcount=1)
+        cursor.execute = unittest.mock.Mock(return_value=cursor)
+        connection = unittest.mock.MagicMock()
+        connection.__enter__.return_value = connection
+        connection.cursor.return_value = cursor
+        config = SimpleNamespace(schema="app")
+
+        with patch("stop_sale_audit.connect_app_database", return_value=connection):
+            StopSaleAuditRepository(config).heartbeat_run("run-1")
+
+        statement = cursor.execute.call_args.args[0]
+        self.assertIn("status = 'running'", statement)
+        self.assertIn("finished_at IS NULL", statement)
+        self.assertEqual(cursor.execute.call_args.args[1], ("run-1",))
+        connection.commit.assert_called_once_with()
+
+    def test_heartbeat_rejects_a_run_that_is_no_longer_active(self) -> None:
+        cursor = SimpleNamespace(rowcount=0)
+        cursor.execute = unittest.mock.Mock(return_value=cursor)
+        connection = unittest.mock.MagicMock()
+        connection.__enter__.return_value = connection
+        connection.cursor.return_value = cursor
+        config = SimpleNamespace(schema="app")
+
+        with patch("stop_sale_audit.connect_app_database", return_value=connection):
+            with self.assertRaisesRegex(RuntimeError, "no longer active"):
+                StopSaleAuditRepository(config).heartbeat_run("run-1")
 
 
 if __name__ == "__main__":

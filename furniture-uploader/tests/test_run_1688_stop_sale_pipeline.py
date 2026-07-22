@@ -286,6 +286,65 @@ class Run1688StopSalePipelineTests(unittest.TestCase):
 
         terminate.assert_called_once()
 
+    def test_running_stage_refreshes_the_audit_heartbeat(self) -> None:
+        class FakeProcess:
+            pid = 4321
+
+            def __init__(self) -> None:
+                self.wait_count = 0
+
+            def wait(self, timeout=None):
+                self.wait_count += 1
+                if self.wait_count == 1:
+                    raise subprocess.TimeoutExpired(cmd="python", timeout=timeout)
+                return 0
+
+            def poll(self):
+                return None
+
+        heartbeat_calls: list[bool] = []
+        with patch("run_1688_stop_sale_pipeline.subprocess.Popen", return_value=FakeProcess()):
+            result = run_stage_command(
+                ["python", "worker.py"],
+                cwd=PROJECT_ROOT,
+                timeout_seconds=30,
+                stage="1688",
+                heartbeat=lambda: heartbeat_calls.append(True),
+                heartbeat_interval_seconds=1,
+            )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(heartbeat_calls, [True])
+
+    def test_audit_heartbeat_failure_stops_the_owned_process_tree(self) -> None:
+        class FakeProcess:
+            pid = 4321
+
+            def wait(self, timeout=None):
+                raise subprocess.TimeoutExpired(cmd="python", timeout=timeout)
+
+            def poll(self):
+                return None
+
+        def fail_heartbeat() -> None:
+            raise RuntimeError("audit unavailable")
+
+        with (
+            patch("run_1688_stop_sale_pipeline.subprocess.Popen", return_value=FakeProcess()),
+            patch("run_1688_stop_sale_pipeline.terminate_stage_process_tree") as terminate,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "audit unavailable"):
+                run_stage_command(
+                    ["python", "worker.py"],
+                    cwd=PROJECT_ROOT,
+                    timeout_seconds=30,
+                    stage="1688",
+                    heartbeat=fail_heartbeat,
+                    heartbeat_interval_seconds=1,
+                )
+
+        terminate.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
