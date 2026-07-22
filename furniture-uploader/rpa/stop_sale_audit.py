@@ -299,6 +299,22 @@ class StopSaleAuditRepository:
             ).fetchone()
             return int(row[0] or 0)
 
+    def count_recent_active_stop_sale_runs(self, max_age_minutes: int = 240) -> int:
+        age_minutes = max(1, int(max_age_minutes))
+        run_table = self._table("ali1688_stop_sale_run")
+        with connect_app_database(self.config) as connection:
+            row = connection.cursor().execute(
+                f"""
+                SELECT COUNT(*)
+                FROM {run_table}
+                WHERE status = 'running'
+                  AND finished_at IS NULL
+                  AND started_at >= DATEADD(MINUTE, ?, SYSUTCDATETIME())
+                """,
+                (-age_minutes,),
+            ).fetchone()
+            return int(row[0] or 0)
+
     def start_run(
         self,
         *,

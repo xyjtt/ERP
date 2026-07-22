@@ -121,6 +121,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lock-stale-seconds", type=int, default=21600)
     parser.add_argument("--lock-poll-seconds", type=float, default=10.0)
     parser.add_argument(
+        "--active-stop-sale-max-age-minutes",
+        type=int,
+        default=240,
+        help="Block cross-machine execution while another recent audit run is still running.",
+    )
+    parser.add_argument(
         "--1688-timeout-seconds",
         dest="timeout_1688_seconds",
         type=int,
@@ -296,6 +302,26 @@ def send_pipeline_notification(content: str, *, disabled: bool) -> bool:
     )
 
 
+def notify_execute_startup_failure(
+    *,
+    run_id: str,
+    exc: Exception,
+    disabled: bool,
+) -> None:
+    if disabled:
+        return
+    message = str(exc).replace("\r", " ").replace("\n", " ").strip()[:500]
+    send_pipeline_notification(
+        "【1688 停产下架】\n"
+        f"批次：{run_id}\n"
+        "状态：未启动或安全阻止\n"
+        f"原因：{type(exc).__name__}: {message}\n"
+        "处理：未执行线上商品操作，请查看审计和执行日志\n"
+        "退出码：1",
+        disabled=False,
+    )
+
+
 def query_crawler_worker_state(task_name: str) -> dict[str, Any]:
     if sys.platform != "win32":
         return {
@@ -345,6 +371,18 @@ def assert_crawler_worker_paused(task_name: str) -> dict[str, Any]:
             "pause the scheduled Worker, and wait for its owned processes to exit before stop-sale execute."
         )
     return state
+
+
+def assert_no_recent_stop_sale_runs(
+    audit_repository: StopSaleAuditRepository,
+    max_age_minutes: int,
+) -> None:
+    active_count = audit_repository.count_recent_active_stop_sale_runs(max_age_minutes)
+    if active_count > 0:
+        raise RuntimeError(
+            f"Stop-sale audit has {active_count} recent running batch(es); "
+            "cross-machine execute is blocked until they finish."
+        )
 
 
 def resolve_shared_lock_path(args: argparse.Namespace) -> Path:
@@ -529,6 +567,8 @@ def main() -> int:
         raise ValueError("Shared lock timing values must be positive (wait may be zero)")
     if args.timeout_1688_seconds <= 0 or args.timeout_jushuitan_seconds <= 0:
         raise ValueError("Stage timeout values must be positive")
+    if args.active_stop_sale_max_age_minutes <= 0:
+        raise ValueError("--active-stop-sale-max-age-minutes must be positive")
     if args.mode == "execute" and not args.yes:
         raise ValueError("execute mode requires --yes")
     if args.mode == "execute" and not args.no_notify:
@@ -549,17 +589,25 @@ def main() -> int:
     audit_repository: StopSaleAuditRepository | None = None
     audit_tasks: list[Any] = []
     if args.mode == "execute":
-        audit_config = resolve_stop_sale_app_config(args.shared_runtime_root)
-        audit_repository = StopSaleAuditRepository(audit_config)
-        contract = audit_repository.check_contract()
-        if not contract["ready"]:
-            raise RuntimeError(
-                "JSReportReplica stop-sale audit tables are missing: "
-                + ", ".join(contract["missing_tables"])
+        try:
+            audit_config = resolve_stop_sale_app_config(args.shared_runtime_root)
+            audit_repository = StopSaleAuditRepository(audit_config)
+            contract = audit_repository.check_contract()
+            if not contract["ready"]:
+                raise RuntimeError(
+                    "JSReportReplica stop-sale audit tables are missing: "
+                    + ", ".join(contract["missing_tables"])
+                )
+            audit_tasks = load_selected_audit_tasks(args)
+            if not audit_tasks:
+                raise ValueError("No executable stop-sale tasks were selected for execute mode.")
+        except Exception as exc:
+            notify_execute_startup_failure(
+                run_id=run_id,
+                exc=exc,
+                disabled=args.no_notify,
             )
-        audit_tasks = load_selected_audit_tasks(args)
-        if not audit_tasks:
-            raise ValueError("No executable stop-sale tasks were selected for execute mode.")
+            raise
     lock, timeout_error, lock_path = build_shared_lock(args, run_id)
     try:
         with lock:
@@ -571,6 +619,10 @@ def main() -> int:
                         f"Crawler task center still has {active_crawler_tasks} active task(s); "
                         "stop-sale execute is blocked until they reach a terminal state."
                     )
+                assert_no_recent_stop_sale_runs(
+                    audit_repository,
+                    args.active_stop_sale_max_age_minutes,
+                )
             return run_pipeline(
                 args,
                 run_id=run_id,
@@ -605,6 +657,12 @@ def main() -> int:
                 disabled=args.no_notify,
             )
             return 124
+        if args.mode == "execute":
+            notify_execute_startup_failure(
+                run_id=run_id,
+                exc=exc,
+                disabled=args.no_notify,
+            )
         raise
 
 

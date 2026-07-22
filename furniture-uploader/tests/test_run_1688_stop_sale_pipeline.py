@@ -17,6 +17,7 @@ if str(SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_ROOT))
 
 from run_1688_stop_sale_pipeline import (
+    assert_no_recent_stop_sale_runs,
     assert_crawler_worker_paused,
     build_argument_parser,
     build_1688_command,
@@ -24,6 +25,7 @@ from run_1688_stop_sale_pipeline import (
     build_jushuitan_environment,
     derive_audit_status,
     load_selected_audit_tasks,
+    notify_execute_startup_failure,
     PipelineStageTimeoutError,
     run_stage_command,
     run_pipeline,
@@ -94,6 +96,40 @@ class Run1688StopSalePipelineTests(unittest.TestCase):
 
         self.assertEqual(args.timeout_1688_seconds, 2700)
         self.assertEqual(args.timeout_jushuitan_seconds, 1200)
+        self.assertEqual(args.active_stop_sale_max_age_minutes, 240)
+
+    def test_cross_machine_guard_rejects_recent_running_batch(self) -> None:
+        repository = SimpleNamespace(count_recent_active_stop_sale_runs=lambda _minutes: 1)
+
+        with self.assertRaisesRegex(RuntimeError, "cross-machine execute is blocked"):
+            assert_no_recent_stop_sale_runs(repository, 240)
+
+    def test_cross_machine_guard_accepts_no_recent_running_batch(self) -> None:
+        repository = SimpleNamespace(count_recent_active_stop_sale_runs=lambda _minutes: 0)
+
+        assert_no_recent_stop_sale_runs(repository, 240)
+
+    def test_startup_failure_notification_is_sanitized(self) -> None:
+        with patch("run_1688_stop_sale_pipeline.send_pipeline_notification") as notify:
+            notify_execute_startup_failure(
+                run_id="run-1",
+                exc=RuntimeError("blocked\nsecond line"),
+                disabled=False,
+            )
+
+        content = notify.call_args.args[0]
+        self.assertIn("RuntimeError: blocked second line", content)
+        self.assertEqual(notify.call_args.kwargs["disabled"], False)
+
+    def test_startup_failure_notification_respects_disabled_flag(self) -> None:
+        with patch("run_1688_stop_sale_pipeline.send_pipeline_notification") as notify:
+            notify_execute_startup_failure(
+                run_id="run-1",
+                exc=RuntimeError("blocked"),
+                disabled=True,
+            )
+
+        notify.assert_not_called()
 
     def test_audit_status_is_partial_when_some_items_succeeded(self) -> None:
         status = derive_audit_status(
