@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import sys
+from tempfile import TemporaryDirectory
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -10,7 +12,13 @@ RPA_ROOT = PROJECT_ROOT / "rpa"
 if str(RPA_ROOT) not in sys.path:
     sys.path.insert(0, str(RPA_ROOT))
 
-from webdriver_factory import extract_version_from_text, resolve_browser_type
+from webdriver_factory import (
+    detect_edge_version_from_installation,
+    extract_version_from_text,
+    find_compatible_cached_edge_driver,
+    resolve_browser_type,
+    resolve_edge_driver_path,
+)
 
 
 class WebdriverFactoryTests(unittest.TestCase):
@@ -37,6 +45,50 @@ class WebdriverFactoryTests(unittest.TestCase):
             extract_version_from_text("Microsoft Edge Edg/145.1.2.3"),
             "145.1.2.3",
         )
+
+    def test_detect_edge_version_reads_versioned_install_directory(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            install_root = Path(temp_dir) / "Microsoft" / "Edge" / "Application"
+            version_dir = install_root / "150.0.4078.83"
+            version_dir.mkdir(parents=True)
+            (version_dir / "msedge.exe").touch()
+
+            self.assertEqual(
+                detect_edge_version_from_installation(str(install_root / "msedge.exe")),
+                "150.0.4078.83",
+            )
+
+    def test_cached_edge_driver_uses_latest_compatible_build(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            cache_root = Path(temp_dir)
+            for version in ("149.0.4022.98", "150.0.4078.48", "150.0.4078.65"):
+                version_dir = cache_root / version
+                version_dir.mkdir()
+                (version_dir / "msedgedriver.exe").touch()
+
+            resolved = find_compatible_cached_edge_driver(
+                "150.0.4078.83",
+                cache_roots=(cache_root,),
+            )
+
+            self.assertEqual(
+                Path(resolved),
+                cache_root / "150.0.4078.65" / "msedgedriver.exe",
+            )
+
+    @patch("webdriver_factory.EdgeChromiumDriverManager")
+    @patch("webdriver_factory.find_compatible_cached_edge_driver")
+    @patch("webdriver_factory.detect_edge_version", return_value="150.0.4078.83")
+    def test_resolve_edge_driver_uses_cache_before_network(
+        self,
+        _detect_mock,
+        cache_mock,
+        manager_mock,
+    ) -> None:
+        cache_mock.return_value = "C:/cache/msedgedriver.exe"
+
+        self.assertEqual(resolve_edge_driver_path(), "C:/cache/msedgedriver.exe")
+        manager_mock.assert_not_called()
 
 
 if __name__ == "__main__":

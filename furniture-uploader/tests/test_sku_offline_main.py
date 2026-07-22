@@ -188,7 +188,12 @@ class SkuOfflineMainTests(unittest.TestCase):
         self.assertEqual(binding["account_key"], "muke_lixiang")
 
     def test_build_store_operator_config_injects_profile_without_secrets(self) -> None:
-        operator_config = {"browser": {"headless": False}}
+        operator_config = {
+            "browser": {
+                "headless": False,
+                "debugger_address": "127.0.0.1:9222",
+            }
+        }
         resolved = build_store_operator_config(
             operator_config,
             account_binding={
@@ -205,6 +210,9 @@ class SkuOfflineMainTests(unittest.TestCase):
             resolved["browser"]["user_data_dir"],
             "D:/script_1688/.local/browser_profiles/1688_profile_gonglai",
         )
+        self.assertEqual(resolved["browser"]["debugger_address"], "")
+        self.assertEqual(resolved["browser"]["page_load_strategy"], "eager")
+        self.assertEqual(resolved["browser"]["page_load_timeout_seconds"], 60)
         self.assertNotIn("password", resolved["browser"])
 
     def test_should_stop_store_only_on_safety_categories(self) -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -123,6 +124,9 @@ class FakeSuccessDriver:
     def refresh(self) -> None:
         self.refresh_count += 1
 
+    def execute_script(self, script: str, *args: object) -> None:
+        return None
+
 
 class FakeClickableElement:
     def __init__(self) -> None:
@@ -172,6 +176,38 @@ class FakeSuccessBrowser(SkuOfflineBrowser):
 
 
 class SkuOfflineBrowserTests(unittest.TestCase):
+    def test_stop_sale_config_only_backfills_delivery_service(self) -> None:
+        config = json.loads(
+            (PROJECT_ROOT / "config" / "systems" / "1688_sku_offline.json").read_text(
+                encoding="utf-8"
+            )
+        )
+
+        self.assertEqual(
+            config["workflow"]["pre_submit_backfill"]["mode"],
+            "delivery_service_only",
+        )
+
+    def test_navigation_timeout_stops_loading_and_continues_validation(self) -> None:
+        class TimeoutDriver(FakeSuccessDriver):
+            def __init__(self) -> None:
+                super().__init__()
+                self.scripts: list[str] = []
+
+            def get(self, url: str) -> None:
+                self.current_url = url
+                raise TimeoutException("renderer still loading")
+
+            def execute_script(self, script: str, *args: object) -> None:
+                self.scripts.append(script)
+
+        browser = SkuOfflineBrowser({}, PROJECT_ROOT)
+        driver = TimeoutDriver()
+        browser.driver = driver
+
+        self.assertTrue(browser._navigate_with_timeout_recovery("https://work.1688.com/"))
+        self.assertEqual(driver.scripts, ["window.stop();"])
+
     def test_management_search_no_data_requires_an_explicit_page_marker(self) -> None:
         self.assertTrue(SkuOfflineBrowser._management_search_shows_no_data("查询完成\n暂无数据"))
         self.assertTrue(SkuOfflineBrowser._management_search_shows_no_data("没有找到商品"))

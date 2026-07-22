@@ -56,6 +56,9 @@ class BrowserRPA:
         user_data_dir = str(self.browser_config.get("user_data_dir", "")).strip()
         profile_directory = str(self.browser_config.get("profile_directory", "")).strip()
         browser_type = str(self.browser_config.get("browser_type", "")).strip()
+        page_load_strategy = str(self.browser_config.get("page_load_strategy", "normal")).strip().lower()
+        if page_load_strategy not in {"normal", "eager", "none"}:
+            page_load_strategy = "normal"
 
         self.driver, self.attached_to_existing_browser = open_webdriver(
             headless=bool(self.browser_config.get("headless")),
@@ -64,8 +67,12 @@ class BrowserRPA:
             profile_directory=profile_directory,
             browser_binary_path=browser_binary_path,
             browser_type=browser_type,
+            page_load_strategy=page_load_strategy,
         )
         self.driver.implicitly_wait(self.browser_config.get("implicit_wait_seconds", 10))
+        page_load_timeout = float(self.browser_config.get("page_load_timeout_seconds", 60))
+        if page_load_timeout > 0:
+            self.driver.set_page_load_timeout(page_load_timeout)
 
     def close(self) -> None:
         if self.driver:

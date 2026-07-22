@@ -5,6 +5,7 @@ import time
 import re
 from typing import Any
 from urllib.parse import parse_qs, urlparse
+from datetime import datetime
 
 from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.by import By
@@ -27,14 +28,34 @@ from sku_offline_tasks import OfflineTask, store_name_matches
 
 
 class SkuOfflineBrowser(BrowserRPA):
+    def _emit_stage(self, stage: str, context: dict[str, Any]) -> None:
+        payload = {
+            "time": datetime.now().isoformat(timespec="seconds"),
+            "stage": stage,
+            "store_name": str(context.get("store_name", "")),
+            "product_id": str(context.get("product_id", "")),
+            "online_sku": str(context.get("online_sku", "")),
+        }
+        print(f"[SKU-OFFLINE-STAGE] {json.dumps(payload, ensure_ascii=False)}", flush=True)
+
     def open_management_page(self, system_config: dict[str, Any]) -> None:
         if not self.driver:
             raise RuntimeError("Browser has not been opened.")
         management_url = str(system_config.get("management_url", "")).strip()
         if not management_url:
             raise ValueError("1688 sku offline management_url is not configured.")
-        self.driver.get(management_url)
+        self._navigate_with_timeout_recovery(management_url)
         self._pause(self.browser_config.get("page_load_wait_seconds", 2))
+
+    def _navigate_with_timeout_recovery(self, url: str) -> bool:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        try:
+            self.driver.get(url)
+            return False
+        except TimeoutException:
+            self.driver.execute_script("window.stop();")
+            return True
 
     def prepare_session(self, system_config: dict[str, Any], *, skip_login: bool) -> None:
         if not skip_login:
@@ -97,12 +118,14 @@ class SkuOfflineBrowser(BrowserRPA):
         outcomes: list[dict[str, Any]] = []
 
         try:
+            self._emit_stage("open_task_edit_page:start", first_context)
             self._open_task_edit_page(
                 system_config,
                 selectors,
                 first_context,
                 safety_config,
             )
+            self._emit_stage("open_task_edit_page:done", first_context)
             self._assert_not_redirected_to_login()
             self._assert_no_risk_control_block(first_context)
             self._assert_edit_page_identity(first_context, safety_config)
@@ -120,7 +143,9 @@ class SkuOfflineBrowser(BrowserRPA):
                     if key in first_context:
                         context[key] = first_context[key]
                 try:
+                    self._emit_stage("toggle_sku:start", context)
                     changed = self._toggle_sku_offline(selectors, context)
+                    self._emit_stage("toggle_sku:done", context)
                 except Exception as exc:
                     if isinstance(
                         exc,
@@ -181,6 +206,7 @@ class SkuOfflineBrowser(BrowserRPA):
                     str(item["task"].online_sku).strip() for item in changed_outcomes
                 ]
                 try:
+                    self._emit_stage("submit_group:start", submit_context)
                     for item in changed_outcomes:
                         self._ensure_target_sku_still_offline(selectors, item["context"])
                     self._submit_changes(
@@ -190,11 +216,13 @@ class SkuOfflineBrowser(BrowserRPA):
                         pre_submit_backfill,
                         submit_context,
                     )
+                    self._emit_stage("submit_changes:done", submit_context)
                     self._verify_group_persisted_offline(
                         selectors,
                         post_submit_verification,
                         [item["context"] for item in changed_outcomes],
                     )
+                    self._emit_stage("verify_persisted:done", submit_context)
                 except Exception as exc:
                     self.last_result_context = submit_context
                     self._record_page_metadata(submit_context)
@@ -627,7 +655,11 @@ class SkuOfflineBrowser(BrowserRPA):
                 raise RuntimeError("Browser has not been opened.")
             context["edit_entry_mode"] = "direct"
             self.driver.switch_to.default_content()
-            self.driver.get(f"https://offer-new.1688.com/popular/publish.htm?id={product_id}&operator=edit")
+            navigation_timed_out = self._navigate_with_timeout_recovery(
+                f"https://offer-new.1688.com/popular/publish.htm?id={product_id}&operator=edit"
+            )
+            if navigation_timed_out:
+                context["edit_navigation_recovered_from_timeout"] = "true"
             self._pause(6.0)
             self._raise_if_edit_page_unavailable(context)
             self._activate_sales_info_section(selectors, context)
@@ -2261,13 +2293,17 @@ class SkuOfflineBrowser(BrowserRPA):
             return
 
         self._resolve_current_page_category_context(context)
+        self._emit_stage("pre_submit:state_patch:start", context)
         self._apply_pre_submit_state_patch(backfill_config, context)
+        self._emit_stage("pre_submit:state_patch:done", context)
         enum_sanitize_actions = self._sanitize_invalid_enum_category_props(context)
         context["pre_submit_enum_sanitization"] = enum_sanitize_actions
         rules = self._resolve_pre_submit_backfill_rules(backfill_config, context)
         field_rules = self._resolve_pre_submit_field_rules(backfill_config)
         shipment_table_rules = self._resolve_pre_submit_shipment_table_rules(backfill_config)
+        self._emit_stage("pre_submit:delivery_service:start", context)
         delivery_service_action = self._ensure_required_delivery_service(context)
+        self._emit_stage("pre_submit:delivery_service:done", context)
         if delivery_service_action and delivery_service_action.get("status") == "apply_failed":
             error_text = "提交前必填属性缺失: 配送服务"
             self._annotate_page_error_context(
@@ -2290,6 +2326,7 @@ class SkuOfflineBrowser(BrowserRPA):
             )
             return
 
+        self._emit_stage("pre_submit:before_scan:start", context)
         before_scan = self._scan_pre_submit_backfill_rules(rules) if rules else []
         field_before_scan = self._scan_pre_submit_field_rules(field_rules, context) if field_rules else []
         shipment_before_scan = (
@@ -2297,6 +2334,7 @@ class SkuOfflineBrowser(BrowserRPA):
             if shipment_table_rules
             else []
         )
+        self._emit_stage("pre_submit:before_scan:done", context)
         context["pre_submit_backfill_before"] = before_scan
         context["pre_submit_field_backfill_before"] = field_before_scan
         context["pre_submit_shipment_table_before"] = shipment_before_scan
@@ -2338,12 +2376,17 @@ class SkuOfflineBrowser(BrowserRPA):
             )
 
         # Some category props render lazily after initial interaction; retry missing ones once.
+        self._emit_stage("pre_submit:category_rules:done", context)
         retry_actions = self._retry_missing_category_prop_rules(rules, context)
+        self._emit_stage("pre_submit:category_retry:done", context)
         applied_actions.extend(retry_actions)
 
+        self._emit_stage("pre_submit:shipment_rules:start", context)
         shipment_actions = self._apply_pre_submit_shipment_table_rules(shipment_table_rules, context)
+        self._emit_stage("pre_submit:shipment_rules:done", context)
         field_actions = self._apply_pre_submit_field_rules(field_rules, context)
 
+        self._emit_stage("pre_submit:after_scan:start", context)
         after_scan = self._scan_pre_submit_backfill_rules(rules) if rules else []
         field_after_scan = self._scan_pre_submit_field_rules(field_rules, context) if field_rules else []
         shipment_after_scan = (
@@ -2351,6 +2394,7 @@ class SkuOfflineBrowser(BrowserRPA):
             if shipment_table_rules
             else []
         )
+        self._emit_stage("pre_submit:after_scan:done", context)
         context["pre_submit_backfill_after"] = after_scan
         context["pre_submit_field_backfill_after"] = field_after_scan
         context["pre_submit_shipment_table_after"] = shipment_after_scan
@@ -3699,7 +3743,9 @@ class SkuOfflineBrowser(BrowserRPA):
 
         self._pause(initial_wait_seconds)
         while True:
-            self.driver.get(verify_url)
+            navigation_timed_out = self._navigate_with_timeout_recovery(verify_url)
+            if navigation_timed_out:
+                contexts[0]["verification_navigation_recovered_from_timeout"] = "true"
             self._pause(5.0)
             self._assert_not_redirected_to_login(contexts[0])
             self._assert_no_risk_control_block(contexts[0])

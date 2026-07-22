@@ -632,6 +632,9 @@ def build_store_operator_config(
     if debugger_address:
         browser_config["debugger_address"] = debugger_address
     elif profile_dir:
+        browser_config["debugger_address"] = ""
+        browser_config.setdefault("page_load_strategy", "eager")
+        browser_config.setdefault("page_load_timeout_seconds", 60)
         if bool(execution_config.get("require_browser_profile_exists", False)) and not Path(profile_dir).exists():
             raise OfflineAccountMappingError(
                 f"Configured browser profile does not exist for account '{account_key}': {profile_dir}"

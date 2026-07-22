@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import os
 import shutil
 import urllib.request
 import zipfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any
+from typing import Any, Iterable
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options as ChromeOptions
@@ -35,6 +36,7 @@ def open_webdriver(
     profile_directory: str,
     browser_binary_path: str,
     browser_type: str = "",
+    page_load_strategy: str = "normal",
 ) -> tuple[Any, bool]:
     resolved_browser_type = resolve_browser_type(
         browser_type=browser_type,
@@ -44,6 +46,7 @@ def open_webdriver(
 
     if resolved_browser_type == "edge":
         options = EdgeOptions()
+        options.page_load_strategy = page_load_strategy
         if browser_binary_path:
             options.binary_location = browser_binary_path
         if debugger_address:
@@ -68,6 +71,7 @@ def open_webdriver(
         return driver, attached_to_existing_browser
 
     options = ChromeOptions()
+    options.page_load_strategy = page_load_strategy
     if browser_binary_path:
         options.binary_location = browser_binary_path
     if debugger_address:
@@ -92,13 +96,17 @@ def resolve_edge_driver_path(
     debugger_address: str = "",
     browser_binary_path: str = "",
 ) -> str:
+    version = detect_edge_version(
+        debugger_address=debugger_address,
+        browser_binary_path=browser_binary_path,
+    )
+    cached_driver = find_compatible_cached_edge_driver(version) if version else ""
+    if cached_driver:
+        return cached_driver
+
     try:
         return EdgeChromiumDriverManager().install()
     except Exception:
-        version = detect_edge_version(
-            debugger_address=debugger_address,
-            browser_binary_path=browser_binary_path,
-        )
         if not version:
             raise
         return download_edge_driver(version)
@@ -114,13 +122,98 @@ def detect_edge_version(
         if version:
             return version
 
+    return detect_edge_version_from_installation(browser_binary_path)
+
+
+def detect_edge_version_from_installation(browser_binary_path: str = "") -> str:
+    install_roots: list[Path] = []
     binary_path = Path(str(browser_binary_path).strip())
     if binary_path.name:
-        version = extract_version_from_text(binary_path.name)
-        if version:
-            return version
+        direct_version = parse_version(binary_path.parent.name)
+        if direct_version:
+            return direct_version
+        install_roots.append(binary_path.parent)
 
-    return ""
+    for env_name, suffix in (
+        ("PROGRAMFILES(X86)", Path("Microsoft/Edge/Application")),
+        ("PROGRAMFILES", Path("Microsoft/Edge/Application")),
+        ("LOCALAPPDATA", Path("Microsoft/Edge/Application")),
+    ):
+        base = str(os.getenv(env_name, "")).strip()
+        if base:
+            install_roots.append(Path(base) / suffix)
+
+    versions: list[str] = []
+    seen: set[Path] = set()
+    for install_root in install_roots:
+        resolved_root = install_root.resolve(strict=False)
+        if resolved_root in seen or not install_root.is_dir():
+            continue
+        seen.add(resolved_root)
+        for candidate in install_root.iterdir():
+            version = parse_version(candidate.name)
+            if version and candidate.is_dir() and (candidate / "msedge.exe").is_file():
+                versions.append(version)
+
+    return max(versions, key=version_key, default="")
+
+
+def find_compatible_cached_edge_driver(
+    version: str,
+    *,
+    cache_roots: Iterable[Path] | None = None,
+) -> str:
+    normalized_version = parse_version(version)
+    if not normalized_version:
+        return ""
+
+    if cache_roots is None:
+        cache_roots = (
+            Path.home() / ".cache" / "furniture-uploader" / "drivers" / "edge",
+            Path.home() / ".cache" / "selenium" / "msedgedriver" / "win64",
+        )
+
+    compatibility_key = edge_driver_compatibility_key(normalized_version)
+    candidates: list[tuple[bool, tuple[int, ...], Path]] = []
+    for cache_root in cache_roots:
+        if not cache_root.is_dir():
+            continue
+        for version_dir in cache_root.iterdir():
+            candidate_version = parse_version(version_dir.name)
+            driver_path = version_dir / "msedgedriver.exe"
+            if (
+                candidate_version
+                and driver_path.is_file()
+                and edge_driver_compatibility_key(candidate_version) == compatibility_key
+            ):
+                candidates.append(
+                    (
+                        candidate_version == normalized_version,
+                        version_key(candidate_version),
+                        driver_path,
+                    )
+                )
+
+    if not candidates:
+        return ""
+    candidates.sort(reverse=True)
+    return str(candidates[0][2])
+
+
+def parse_version(raw_value: str) -> str:
+    value = str(raw_value).strip()
+    parts = value.split(".")
+    if len(parts) < 3 or any(not part.isdigit() for part in parts):
+        return ""
+    return ".".join(parts)
+
+
+def version_key(version: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in version.split("."))
+
+
+def edge_driver_compatibility_key(version: str) -> tuple[int, ...]:
+    return version_key(version)[:3]
 
 
 def detect_edge_version_from_debugger(debugger_address: str) -> str:
