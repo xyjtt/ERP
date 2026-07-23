@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from dingtalk import validate_dingtalk_credentials
+
 
 DEFAULT_APP_SERVER = "218.93.9.21"
 DEFAULT_APP_PORT = 1433
@@ -20,6 +22,7 @@ DEFAULT_APP_DRIVER = "ODBC Driver 18 for SQL Server"
 DEFAULT_CREDENTIAL_REF = "YYDD/1688/database/app-writer"
 DINGTALK_WEBHOOK_CREDENTIAL_REF = "YYDD/1688/notification/dingtalk/webhook"
 DINGTALK_SECRET_CREDENTIAL_REF = "YYDD/1688/notification/dingtalk/secret"
+SOURCE_DATABASE_CREDENTIAL_REF = "YYDD/1688/database/stop-sale-source"
 
 
 @dataclass(frozen=True)
@@ -93,23 +96,90 @@ def _load_runtime_secret(shared_runtime_root: str | Path, credential_ref: str) -
     return value
 
 
+def _load_runtime_credential(
+    shared_runtime_root: str | Path,
+    credential_ref: str,
+) -> tuple[str, str]:
+    provider_module = _load_secret_provider_module(Path(shared_runtime_root).resolve())
+    record = provider_module.get_secret_provider().get(credential_ref)
+    username = str(record.username or "").strip()
+    secret = str(record.secret or "")
+    if not username:
+        raise RuntimeError(f"Credential has no username: {credential_ref}")
+    if not secret:
+        raise RuntimeError(f"Credential has no secret: {credential_ref}")
+    return username, secret
+
+
 def hydrate_dingtalk_credentials(shared_runtime_root: str | Path) -> dict[str, bool]:
-    references = {
-        "DINGTALK_WEBHOOK": DINGTALK_WEBHOOK_CREDENTIAL_REF,
-        "DINGTALK_SECRET": DINGTALK_SECRET_CREDENTIAL_REF,
+    webhook = str(os.getenv("DINGTALK_WEBHOOK", "")).strip()
+    secret = str(os.getenv("DINGTALK_SECRET", "")).strip()
+    if validate_dingtalk_credentials(webhook, secret):
+        return {"DINGTALK_WEBHOOK": True, "DINGTALK_SECRET": True}
+
+    try:
+        webhook = _load_runtime_secret(
+            shared_runtime_root,
+            DINGTALK_WEBHOOK_CREDENTIAL_REF,
+        ).strip()
+        secret = _load_runtime_secret(
+            shared_runtime_root,
+            DINGTALK_SECRET_CREDENTIAL_REF,
+        ).strip()
+    except Exception:
+        webhook = ""
+        secret = ""
+
+    configured = validate_dingtalk_credentials(webhook, secret)
+    if configured:
+        os.environ["DINGTALK_WEBHOOK"] = webhook
+        os.environ["DINGTALK_SECRET"] = secret
+    else:
+        os.environ.pop("DINGTALK_WEBHOOK", None)
+        os.environ.pop("DINGTALK_SECRET", None)
+    return {
+        "DINGTALK_WEBHOOK": configured,
+        "DINGTALK_SECRET": configured,
     }
-    result: dict[str, bool] = {}
-    for env_name, credential_ref in references.items():
-        configured = bool(str(os.getenv(env_name, "")).strip())
-        if not configured:
-            try:
-                os.environ[env_name] = _load_runtime_secret(shared_runtime_root, credential_ref)
-            except Exception:
-                result[env_name] = False
-                continue
-            configured = True
-        result[env_name] = configured
-    return result
+
+
+def hydrate_source_database_credentials(
+    shared_runtime_root: str | Path,
+) -> dict[str, bool]:
+    user = str(
+        os.getenv("STOP_SALE_SOURCE_SQLSERVER_USER", "")
+        or os.getenv("STOP_SALE_SQLSERVER_USER", "")
+    ).strip()
+    password = str(
+        os.getenv("STOP_SALE_SOURCE_SQLSERVER_PASSWORD", "")
+        or os.getenv("STOP_SALE_SQLSERVER_PASSWORD", "")
+    )
+    if user and password:
+        return {
+            "STOP_SALE_SOURCE_SQLSERVER_USER": True,
+            "STOP_SALE_SOURCE_SQLSERVER_PASSWORD": True,
+        }
+
+    try:
+        user, password = _load_runtime_credential(
+            shared_runtime_root,
+            SOURCE_DATABASE_CREDENTIAL_REF,
+        )
+    except Exception:
+        user = ""
+        password = ""
+
+    configured = bool(user and password)
+    if configured:
+        os.environ["STOP_SALE_SOURCE_SQLSERVER_USER"] = user
+        os.environ["STOP_SALE_SOURCE_SQLSERVER_PASSWORD"] = password
+    else:
+        os.environ.pop("STOP_SALE_SOURCE_SQLSERVER_USER", None)
+        os.environ.pop("STOP_SALE_SOURCE_SQLSERVER_PASSWORD", None)
+    return {
+        "STOP_SALE_SOURCE_SQLSERVER_USER": configured,
+        "STOP_SALE_SOURCE_SQLSERVER_PASSWORD": configured,
+    }
 
 
 def _load_app_config_from_1688_runtime(shared_runtime_root: Path) -> StopSaleAppConfig:

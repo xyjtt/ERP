@@ -5,11 +5,20 @@ import csv
 import json
 import os
 import re
+import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Iterable, Sequence
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+RPA_ROOT = PROJECT_ROOT / "rpa"
+if str(RPA_ROOT) not in sys.path:
+    sys.path.insert(0, str(RPA_ROOT))
+
+from stop_sale_audit import hydrate_source_database_credentials
 
 
 STORE_NAME = "店铺名称"
@@ -173,6 +182,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--port-env", default="STOP_SALE_SOURCE_SQLSERVER_PORT")
     parser.add_argument("--user-env", default="STOP_SALE_SOURCE_SQLSERVER_USER")
     parser.add_argument("--password-env", default="STOP_SALE_SOURCE_SQLSERVER_PASSWORD")
+    parser.add_argument(
+        "--shared-runtime-root",
+        default=os.getenv("SCRIPT_1688_ROOT", "D:/script_1688"),
+        help="1688 runtime root used to load the source credential from Credential Manager.",
+    )
     parser.add_argument("--timeout", type=int, default=60, help="ODBC query timeout seconds.")
     return parser.parse_args(argv)
 
@@ -461,6 +475,7 @@ def write_report(path: Path, report: dict[str, Any]) -> None:
 def run(args: argparse.Namespace) -> dict[str, Any]:
     metric_date = date.fromisoformat(str(args.date))
     stores = [str(item).strip() for item in (args.stores or DEFAULT_TARGET_STORES) if str(item).strip()]
+    hydrate_source_database_credentials(args.shared_runtime_root)
     config = config_from_env(args)
     output_dir = Path(args.output_dir)
 

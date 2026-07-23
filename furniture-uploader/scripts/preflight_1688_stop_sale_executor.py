@@ -19,20 +19,11 @@ from config_loader import load_json_with_local_override
 from stop_sale_audit import (
     StopSaleAuditRepository,
     hydrate_dingtalk_credentials,
+    hydrate_source_database_credentials,
     resolve_stop_sale_app_config,
 )
 
 
-SOURCE_ENV_NAMES = (
-    "STOP_SALE_SOURCE_SQLSERVER_HOST",
-    "STOP_SALE_SOURCE_SQLSERVER_USER",
-    "STOP_SALE_SOURCE_SQLSERVER_PASSWORD",
-)
-SOURCE_ENV_FALLBACKS = {
-    "STOP_SALE_SOURCE_SQLSERVER_HOST": "STOP_SALE_SQLSERVER_HOST",
-    "STOP_SALE_SOURCE_SQLSERVER_USER": "STOP_SALE_SQLSERVER_USER",
-    "STOP_SALE_SOURCE_SQLSERVER_PASSWORD": "STOP_SALE_SQLSERVER_PASSWORD",
-}
 EXECUTION_SECRET_ENV_NAMES = (
     "JST_USERNAME",
     "JST_PASSWORD",
@@ -112,12 +103,18 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
 
     lock_module = script_1688_root / "src" / "runtime" / "global_lock.py"
     lock_path = script_1688_root / "artifacts" / "locks" / "ali1688_full_cycle.lock"
+    source_credentials = hydrate_source_database_credentials(script_1688_root)
     source_env = {
-        name: bool(
-            str(os.getenv(name, "")).strip()
-            or str(os.getenv(SOURCE_ENV_FALLBACKS[name], "")).strip()
-        )
-        for name in SOURCE_ENV_NAMES
+        "STOP_SALE_SOURCE_SQLSERVER_HOST": bool(
+            str(os.getenv("STOP_SALE_SOURCE_SQLSERVER_HOST", "")).strip()
+            or str(os.getenv("STOP_SALE_SQLSERVER_HOST", "")).strip()
+        ),
+        "STOP_SALE_SOURCE_SQLSERVER_USER": source_credentials[
+            "STOP_SALE_SOURCE_SQLSERVER_USER"
+        ],
+        "STOP_SALE_SOURCE_SQLSERVER_PASSWORD": source_credentials[
+            "STOP_SALE_SOURCE_SQLSERVER_PASSWORD"
+        ],
     }
     dingtalk_credentials = hydrate_dingtalk_credentials(script_1688_root)
     execution_secret_env = {

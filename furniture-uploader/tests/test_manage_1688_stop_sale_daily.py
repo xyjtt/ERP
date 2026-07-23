@@ -21,6 +21,7 @@ from manage_1688_stop_sale_daily import (
     _load_pipeline_result,
     build_argument_parser,
     build_pipeline_command,
+    build_preview_command,
     paused_worker,
     run_daily,
     split_store_input,
@@ -71,6 +72,16 @@ class Manage1688StopSaleDailyTests(unittest.TestCase):
         self.assertEqual(command[command.index("--run-id") + 1], "daily_run_s01")
         self.assertEqual(command[command.index("--1688-timeout-seconds") + 1], "3600")
         self.assertEqual(command[command.index("--jushuitan-timeout-seconds") + 1], "1800")
+
+    def test_preview_command_supplies_shared_runtime_for_source_credentials(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            args = self.build_args(Path(temp_dir), mode="preview")
+            command = build_preview_command(args, Path(temp_dir) / "preview")
+
+        self.assertEqual(
+            command[command.index("--shared-runtime-root") + 1],
+            str(Path("E:/1688/1688-script-new").resolve()),
+        )
 
     def test_scheduler_defaults_to_current_business_date_and_small_recoverable_batches(self) -> None:
         args = build_argument_parser().parse_args(["run"])

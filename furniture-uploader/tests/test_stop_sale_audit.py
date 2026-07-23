@@ -20,6 +20,7 @@ if str(RPA_ROOT) not in sys.path:
 from stop_sale_audit import (
     StopSaleAuditRepository,
     hydrate_dingtalk_credentials,
+    hydrate_source_database_credentials,
     load_jsonl_records,
     resolve_stop_sale_app_config,
     stop_sale_offline_key,
@@ -69,8 +70,10 @@ class StopSaleAuditTests(unittest.TestCase):
 
     def test_dingtalk_credentials_can_be_hydrated_without_returning_values(self) -> None:
         values = {
-            "YYDD/1688/notification/dingtalk/webhook": "https://example.invalid/webhook",
-            "YYDD/1688/notification/dingtalk/secret": "signing-secret",
+            "YYDD/1688/notification/dingtalk/webhook": (
+                "https://oapi.dingtalk.com/robot/send?access_token=" + "a" * 64
+            ),
+            "YYDD/1688/notification/dingtalk/secret": "SEC" + "b" * 64,
         }
         with patch.dict(os.environ, {}, clear=True):
             with patch(
@@ -80,8 +83,60 @@ class StopSaleAuditTests(unittest.TestCase):
                 result = hydrate_dingtalk_credentials("D:/runtime")
 
             self.assertEqual(result, {"DINGTALK_WEBHOOK": True, "DINGTALK_SECRET": True})
-            self.assertNotIn("example.invalid", repr(result))
-            self.assertNotIn("signing-secret", repr(result))
+            self.assertNotIn("access_token", repr(result))
+            self.assertNotIn(values["YYDD/1688/notification/dingtalk/secret"], repr(result))
+
+    def test_invalid_environment_pair_falls_back_to_valid_runtime_credentials(self) -> None:
+        values = {
+            "YYDD/1688/notification/dingtalk/webhook": (
+                "https://oapi.dingtalk.com/robot/send?access_token=" + "c" * 64
+            ),
+            "YYDD/1688/notification/dingtalk/secret": "SEC" + "d" * 64,
+        }
+        with patch.dict(
+            os.environ,
+            {
+                "DINGTALK_WEBHOOK": "https://example.invalid/placeholder",
+                "DINGTALK_SECRET": "placeholder-secret",
+            },
+            clear=True,
+        ):
+            with patch(
+                "stop_sale_audit._load_runtime_secret",
+                side_effect=lambda _root, ref: values[ref],
+            ):
+                result = hydrate_dingtalk_credentials("D:/runtime")
+
+            self.assertEqual(result, {"DINGTALK_WEBHOOK": True, "DINGTALK_SECRET": True})
+            self.assertEqual(os.environ["DINGTALK_WEBHOOK"], values[
+                "YYDD/1688/notification/dingtalk/webhook"
+            ])
+            self.assertEqual(os.environ["DINGTALK_SECRET"], values[
+                "YYDD/1688/notification/dingtalk/secret"
+            ])
+
+    def test_source_credentials_hydrate_without_returning_values(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            with patch(
+                "stop_sale_audit._load_runtime_credential",
+                return_value=("source-reader", "source-password"),
+            ):
+                result = hydrate_source_database_credentials("D:/runtime")
+
+            self.assertEqual(
+                result,
+                {
+                    "STOP_SALE_SOURCE_SQLSERVER_USER": True,
+                    "STOP_SALE_SOURCE_SQLSERVER_PASSWORD": True,
+                },
+            )
+            self.assertNotIn("source-reader", repr(result))
+            self.assertNotIn("source-password", repr(result))
+            self.assertEqual(os.environ["STOP_SALE_SOURCE_SQLSERVER_USER"], "source-reader")
+            self.assertEqual(
+                os.environ["STOP_SALE_SOURCE_SQLSERVER_PASSWORD"],
+                "source-password",
+            )
 
     def test_heartbeat_updates_only_an_active_run(self) -> None:
         active_result = SimpleNamespace(fetchone=lambda: ("running", None))

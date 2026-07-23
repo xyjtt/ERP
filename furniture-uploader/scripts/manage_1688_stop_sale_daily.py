@@ -257,6 +257,8 @@ def build_preview_command(args: argparse.Namespace, output_dir: Path) -> list[st
         str(output_dir.resolve()),
         "--limit",
         "0",
+        "--shared-runtime-root",
+        str(Path(args.shared_runtime_root).resolve()),
     ]
     for store in args.stores or []:
         command.extend(["--store", str(store)])
