@@ -4,6 +4,7 @@ import json
 import sys
 import unittest
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.keys import Keys
@@ -187,6 +188,88 @@ class SkuOfflineBrowserTests(unittest.TestCase):
             config["workflow"]["pre_submit_backfill"]["mode"],
             "delivery_service_only",
         )
+        management_query = parse_qs(
+            urlparse(config["management_url"]).query,
+            keep_blank_values=True,
+        )
+        self.assertEqual(management_query["tab"], ["all"])
+        self.assertEqual(management_query["q"], [""])
+        self.assertEqual(management_query["filterOfferId"], [""])
+
+    def test_management_url_normalizes_to_unfiltered_all_tab(self) -> None:
+        normalized = SkuOfflineBrowser._normalize_management_all_tab_url(
+            "https://work.1688.com/?_path_=sellerPro/offer&tab=onsale&q=123&filterOfferId=123"
+        )
+        query = parse_qs(urlparse(normalized).query, keep_blank_values=True)
+
+        self.assertEqual(query["tab"], ["all"])
+        self.assertEqual(query["q"], [""])
+        self.assertEqual(query["filterOfferId"], [""])
+
+    def test_open_management_page_reuses_unfiltered_all_tab(self) -> None:
+        browser = SkuOfflineBrowser({}, PROJECT_ROOT)
+        management_url = (
+            "https://work.1688.com/?_path_=sellerPro/offer&tab=all&q=&filterOfferId="
+        )
+        driver = FakeSuccessDriver(current_url=management_url)
+        browser.driver = driver
+
+        browser.open_management_page({"management_url": management_url})
+
+        self.assertEqual(driver.visited_urls, [])
+
+    def test_open_management_page_activates_all_tab_after_navigation(self) -> None:
+        class TabElement:
+            def get_attribute(self, name: str) -> str:
+                return "tabs-tab inactive" if name == "class" else "false"
+
+        class TabDriver(FakeSuccessDriver):
+            def __init__(self) -> None:
+                super().__init__()
+                self.clicked = False
+
+            def find_elements(self, by: str, value: str) -> list[TabElement]:
+                return [TabElement()]
+
+            def execute_script(self, script: str, *args: object) -> None:
+                if "arguments[0].click" in script:
+                    self.clicked = True
+
+        browser = SkuOfflineBrowser({}, PROJECT_ROOT)
+        browser._pause = lambda seconds: None  # type: ignore[method-assign]
+        driver = TabDriver()
+        browser.driver = driver
+
+        browser.open_management_page(
+            {"management_url": "https://work.1688.com/?_path_=sellerPro/offer"}
+        )
+
+        query = parse_qs(urlparse(driver.visited_urls[0]).query, keep_blank_values=True)
+        self.assertEqual(query["tab"], ["all"])
+        self.assertTrue(driver.clicked)
+
+    def test_active_all_tab_is_not_clicked_again(self) -> None:
+        class TabElement:
+            def get_attribute(self, name: str) -> str:
+                return "tabs-tab tabs-tab-active" if name == "class" else "true"
+
+        class TabDriver(FakeSuccessDriver):
+            def __init__(self) -> None:
+                super().__init__()
+                self.clicked = False
+
+            def find_elements(self, by: str, value: str) -> list[TabElement]:
+                return [TabElement()]
+
+            def execute_script(self, script: str, *args: object) -> None:
+                self.clicked = True
+
+        browser = SkuOfflineBrowser({}, PROJECT_ROOT)
+        driver = TabDriver()
+        browser.driver = driver
+
+        self.assertFalse(browser._activate_all_products_tab())
+        self.assertFalse(driver.clicked)
 
     def test_navigation_timeout_stops_loading_and_continues_validation(self) -> None:
         class TimeoutDriver(FakeSuccessDriver):
@@ -467,6 +550,79 @@ class SkuOfflineBrowserTests(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(calls[1]["by"], "xpath")
         self.assertIn("1001", calls[1]["value"])
+
+    def test_submit_click_falls_back_to_webdriver_after_cdp_oserror(self) -> None:
+        class SubmitDriver(FakeSuccessDriver):
+            def execute_script(self, script: str, *args: object) -> dict[str, float]:
+                return {"x": 100.0, "y": 200.0, "width": 20.0, "height": 10.0}
+
+            def execute_cdp_cmd(self, method: str, params: dict[str, object]) -> None:
+                raise OSError(22, "Invalid argument")
+
+        browser = SkuOfflineBrowser({}, PROJECT_ROOT)
+        browser.driver = SubmitDriver()
+        submit_element = FakeClickableElement()
+        context: dict[str, str] = {}
+
+        browser._click_submit_element(submit_element, context)
+
+        self.assertTrue(submit_element.clicked)
+        self.assertEqual(context["submit_click_mode"], "webdriver_click")
+        self.assertIn("CDP click failed", context["submit_cdp_click_error"])
+
+    def test_submit_click_uses_cdp_when_coordinates_are_valid(self) -> None:
+        class SubmitDriver(FakeSuccessDriver):
+            def __init__(self) -> None:
+                super().__init__()
+                self.cdp_events: list[str] = []
+
+            def execute_script(self, script: str, *args: object) -> dict[str, float]:
+                return {"x": 100.0, "y": 200.0, "width": 20.0, "height": 10.0}
+
+            def execute_cdp_cmd(self, method: str, params: dict[str, object]) -> None:
+                self.cdp_events.append(str(params["type"]))
+
+        browser = SkuOfflineBrowser({}, PROJECT_ROOT)
+        driver = SubmitDriver()
+        browser.driver = driver
+        submit_element = FakeClickableElement()
+        context: dict[str, str] = {}
+
+        browser._click_submit_element(submit_element, context)
+
+        self.assertFalse(submit_element.clicked)
+        self.assertEqual(context["submit_click_mode"], "cdp_mouse")
+        self.assertEqual(driver.cdp_events, ["mouseMoved", "mousePressed", "mouseReleased"])
+
+    def test_restore_management_window_closes_all_extra_tabs(self) -> None:
+        class SwitchTarget:
+            def __init__(self, driver: "MultiTabDriver") -> None:
+                self.driver = driver
+
+            def window(self, handle: str) -> None:
+                self.driver.current_window_handle = handle
+
+            def default_content(self) -> None:
+                return None
+
+        class MultiTabDriver(FakeSuccessDriver):
+            def __init__(self) -> None:
+                super().__init__()
+                self.window_handles = ["main", "edit-1", "edit-2"]
+                self.current_window_handle = "edit-2"
+                self.switch_to = SwitchTarget(self)
+
+            def close(self) -> None:
+                self.window_handles.remove(self.current_window_handle)
+
+        browser = SkuOfflineBrowser({}, PROJECT_ROOT)
+        driver = MultiTabDriver()
+        browser.driver = driver
+
+        browser._restore_management_window("main")
+
+        self.assertEqual(driver.window_handles, ["main"])
+        self.assertEqual(driver.current_window_handle, "main")
 
     def test_sales_info_activation_recovers_with_cdp_reload(self) -> None:
         browser = SkuOfflineBrowser({}, PROJECT_ROOT)

@@ -1,17 +1,17 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 import re
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse, urlunparse
 from datetime import datetime
 
 from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 
 from browser_rpa import BY_MAPPING, BrowserRPA
 from exceptions import (
@@ -42,23 +42,83 @@ class SkuOfflineBrowser(BrowserRPA):
     def open_management_page(self, system_config: dict[str, Any]) -> None:
         if not self.driver:
             raise RuntimeError("Browser has not been opened.")
-        management_url = str(system_config.get("management_url", "")).strip()
+        management_url = self._normalize_management_all_tab_url(
+            str(system_config.get("management_url", "")).strip()
+        )
         if not management_url:
             raise ValueError("1688 sku offline management_url is not configured.")
-        self._navigate_with_timeout_recovery(management_url)
-        self._pause(self.browser_config.get("page_load_wait_seconds", 2))
-        # Click "全部" tab (NOT default "销售中" tab) to search across all products
-        try:
-            all_tab = self.driver.find_element(
-                By.XPATH,
-                '//*[contains(@class, "tabs-tab") and normalize-space(text())="全部" and not(contains(@class, "active"))]'
-            )
-            if all_tab:
-                self.driver.execute_script("arguments[0].click();", all_tab)
-                self._pause(1.5)
-                context_msg = "clicked all tab via JS"
-        except Exception as exc:
-            pass
+        current_url = str(self.driver.current_url or "").strip()
+        if not self._is_management_all_tab_url(current_url, management_url):
+            self._navigate_with_timeout_recovery(management_url)
+            self._pause(self.browser_config.get("page_load_wait_seconds", 2))
+        self._activate_all_products_tab()
+
+    @staticmethod
+    def _normalize_management_all_tab_url(raw_url: str) -> str:
+        value = str(raw_url or "").strip()
+        if not value:
+            return ""
+        parsed = urlparse(value)
+        query_items = parse_qsl(parsed.query, keep_blank_values=True)
+        normalized_items = [
+            (key, item_value)
+            for key, item_value in query_items
+            if key not in {"tab", "q", "filterOfferId"}
+        ]
+        normalized_items.extend(
+            [
+                ("tab", "all"),
+                ("q", ""),
+                ("filterOfferId", ""),
+            ]
+        )
+        return urlunparse(
+            parsed._replace(query=urlencode(normalized_items, doseq=True, safe="/"))
+        )
+
+    @classmethod
+    def _is_management_all_tab_url(cls, current_url: str, management_url: str) -> bool:
+        current = str(current_url or "").strip()
+        target = str(management_url or "").strip()
+        if not current or not target:
+            return False
+        if cls._normalize_management_all_tab_url(current) != cls._normalize_management_all_tab_url(target):
+            return False
+        query = parse_qs(urlparse(current).query, keep_blank_values=True)
+        return (
+            str((query.get("tab") or [""])[0]).strip().lower() == "all"
+            and str((query.get("q") or [""])[0]).strip() == ""
+            and str((query.get("filterOfferId") or [""])[0]).strip() == ""
+        )
+
+    def _activate_all_products_tab(self) -> bool:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        xpaths = (
+            '//*[@role="tab" and normalize-space(.)="全部"]',
+            '//*[contains(@class, "tabs-tab") and normalize-space(.)="全部"]',
+        )
+        for xpath in xpaths:
+            try:
+                elements = list(self.driver.find_elements(By.XPATH, xpath))
+            except Exception:
+                continue
+            for element in elements:
+                try:
+                    class_name = str(element.get_attribute("class") or "").lower()
+                    class_tokens = set(class_name.split())
+                    aria_selected = str(element.get_attribute("aria-selected") or "").lower()
+                    if (
+                        any(token == "active" or token.endswith("-active") for token in class_tokens)
+                        or aria_selected == "true"
+                    ):
+                        return False
+                    self.driver.execute_script("arguments[0].click();", element)
+                    self._pause(1.5)
+                    return True
+                except Exception:
+                    continue
+        return False
 
     def _navigate_with_timeout_recovery(self, url: str) -> bool:
         if not self.driver:
@@ -495,17 +555,6 @@ class SkuOfflineBrowser(BrowserRPA):
         context: dict[str, Any],
     ) -> None:
         self._wait_for_management_search_ready(context)
-        # Click "全部" tab first (NOT default "销售中" tab)
-        try:
-            all_tab = self.driver.find_element(
-                By.XPATH,
-                '//div[contains(@class, "tabs-tab") and normalize-space(text())="全部" and not(contains(@class, "active"))]'
-            )
-            if all_tab:
-                all_tab.click()
-                self._pause(1.0)
-        except Exception as exc:
-            context["all_tab_click_error"] = str(exc)[:200]
         product_id_input = self._resolve_selector(selectors.get("product_id_input", {}), context)
         if not self._selector_is_configured(product_id_input):
             raise ValueError("product_id_input selector is not configured.")
@@ -541,7 +590,6 @@ class SkuOfflineBrowser(BrowserRPA):
                     self._assert_no_risk_control_block(context)
                     body_text = self._extract_page_body_text()
                     if self._management_search_shows_no_data(body_text):
-                        # Try fallback: navigate to "全部商品" tab and search by product_id
                         message = (
                             f"Product {context.get('product_id', '')} is unavailable after "
                             "management search returned an explicit no-data state."
@@ -552,11 +600,6 @@ class SkuOfflineBrowser(BrowserRPA):
                             error_text=message,
                             error_category="product_unavailable",
                         )
-                        # Attempt fallback search in "全部商品" tab
-                        if self._try_fallback_all_products_search(context):
-                            context["edit_entry_stage"] = "management_product_matched"
-                            context["management_search_retry"] = "all_products_fallback"
-                            return
                         raise OfflineTaskStateError(message) from exc
                     message = (
                         f"Timed out locating product {context.get('product_id', '')} "
@@ -568,11 +611,6 @@ class SkuOfflineBrowser(BrowserRPA):
                         error_text=message,
                         error_category="management_search_timeout",
                     )
-                    # Try fallback search before raising
-                    if self._try_fallback_all_products_search(context):
-                        context["edit_entry_stage"] = "management_product_matched"
-                        context["management_search_retry"] = "all_products_fallback"
-                        return
                     raise OfflineTaskStateError(message) from exc
             context["edit_entry_stage"] = "management_product_matched"
         else:
@@ -655,47 +693,6 @@ class SkuOfflineBrowser(BrowserRPA):
             product_id,
         )
         context["management_filter_query_url"] = str(target_url or "")
-
-    def _try_fallback_all_products_search(self, context: dict[str, Any]) -> bool:
-        """Fallback: navigate to 全部商品 tab and search by product_id directly."""
-        if not self.driver:
-            return False
-        product_id = str(context.get("product_id", "")).strip()
-        if not product_id:
-            return False
-        try:
-            # Navigate to 全部商品 tab
-            self.driver.get("https://work.1688.com/?_path_=sellerPro/2017sellerbase_offer/shasngpinguanlinew")
-            time.sleep(2)
-            # Wait for page load
-            WebDriverWait(self.driver, 10).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, 'input[placeholder*="商品ID"]'))
-            )
-            # Click "全部" tab (not default "销售中" tab)
-            try:
-                all_tab = WebDriverWait(self.driver, 5).until(
-                    EC.element_to_be_clickable((By.XPATH, '//*[contains(@class, "tabs-tab") and normalize-space()="全部"]'))
-                )
-                all_tab.click()
-                time.sleep(2)
-            except Exception:
-                pass
-            # Find product_id input and fill
-            product_input = self.driver.find_element(By.CSS_SELECTOR, 'input[placeholder*="商品ID"]')
-            product_input.clear()
-            product_input.send_keys(product_id)
-            # Click search button
-            search_btn = self.driver.find_element(By.CSS_SELECTOR, 'button:has-text("搜索")')
-            search_btn.click()
-            time.sleep(3)
-            # Check if product found
-            body_text = self.driver.find_element(By.TAG_NAME, "body").text
-            if product_id in body_text and "暂无数据" not in body_text and "没有找到商品" not in body_text:
-                return True
-            return False
-        except Exception as exc:
-            context["fallback_search_error"] = str(exc)[:200]
-            return False
 
     def _fill_management_search_field(self, element: Any, value: Any) -> None:
         if not self.driver:
@@ -1896,8 +1893,7 @@ class SkuOfflineBrowser(BrowserRPA):
                 try:
                     x = float(rect.get("x", 0) or 0)
                     y = float(rect.get("y", 0) or 0)
-                    # Validate coordinates to prevent OSError [Errno 22] Invalid argument
-                    if not (0 <= x <= 100000) or not (0 <= y <= 100000):
+                    if not math.isfinite(x) or not math.isfinite(y) or x < 0 or y < 0:
                         raise ValueError(f"Invalid coordinates: x={x}, y={y}")
                     self.driver.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y})
                     self.driver.execute_cdp_cmd(
@@ -1910,9 +1906,9 @@ class SkuOfflineBrowser(BrowserRPA):
                     )
                 except (OSError, ValueError) as exc:
                     context["submit_cdp_click_error"] = f"CDP click failed: {str(exc)[:200]}"
-                    # Fall through to webdriver click below
-                context["submit_click_mode"] = "cdp_mouse"
-                return
+                else:
+                    context["submit_click_mode"] = "cdp_mouse"
+                    return
         except Exception as exc:
             context["submit_cdp_click_error"] = str(exc)[:240]
 
@@ -4021,23 +4017,27 @@ class SkuOfflineBrowser(BrowserRPA):
         if not self.driver:
             return
         try:
-            current_handle = self.driver.current_window_handle
+            handles = list(self.driver.window_handles)
         except Exception:
             return
-        if current_handle != main_window:
+        for handle in handles:
+            if handle == main_window:
+                continue
             try:
+                self.driver.switch_to.window(handle)
                 self.driver.close()
             except Exception:
-                pass
-            try:
-                handles = list(self.driver.window_handles)
-            except Exception:
-                return
-            if main_window in handles:
-                try:
-                    self.driver.switch_to.window(main_window)
-                except Exception:
-                    return
+                continue
+        try:
+            remaining_handles = list(self.driver.window_handles)
+        except Exception:
+            return
+        if main_window not in remaining_handles:
+            return
+        try:
+            self.driver.switch_to.window(main_window)
+        except Exception:
+            return
         try:
             self.driver.switch_to.default_content()
         except Exception:
