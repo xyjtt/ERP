@@ -2,7 +2,7 @@
   "system": "1688_sku_offline",
   "display_name": "1688 SKU 下架",
   "login_url": "https://login.1688.com/",
-  "management_url": "https://work.1688.com/?_path_=sellerPro/2017sellerbase_offer/shasngpinguanlinew",
+  "management_url": "https://work.1688.com/?_path_=sellerPro/2017sellerbase_offer/shasngpinguanlinew&tab=all&q=&filterOfferId=",
   "login": {
     "mode": "manual",
     "completion_prompt": "请先登录目标 1688 店铺并进入商品管理页，确认当前店铺无误后按回车继续..."

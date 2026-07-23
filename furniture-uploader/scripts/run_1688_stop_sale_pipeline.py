@@ -622,7 +622,8 @@ def main() -> int:
         dingtalk_credentials = hydrate_dingtalk_credentials(args.shared_runtime_root)
         if not all(dingtalk_credentials.values()):
             raise RuntimeError(
-                "DingTalk credentials are missing from both the process environment and the 1688 Credential Manager."
+                "DingTalk credentials are missing from both the process environment and the 1688 Credential Manager. "
+                "Use --no-notify to skip notification."
             )
 
     jushuitan_root = Path(args.jushuitan_root).resolve()

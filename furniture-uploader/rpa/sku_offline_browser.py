@@ -11,6 +11,7 @@ from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 
 from browser_rpa import BY_MAPPING, BrowserRPA
 from exceptions import (
@@ -46,6 +47,18 @@ class SkuOfflineBrowser(BrowserRPA):
             raise ValueError("1688 sku offline management_url is not configured.")
         self._navigate_with_timeout_recovery(management_url)
         self._pause(self.browser_config.get("page_load_wait_seconds", 2))
+        # Click "全部" tab (NOT default "销售中" tab) to search across all products
+        try:
+            all_tab = self.driver.find_element(
+                By.XPATH,
+                '//*[contains(@class, "tabs-tab") and normalize-space(text())="全部" and not(contains(@class, "active"))]'
+            )
+            if all_tab:
+                self.driver.execute_script("arguments[0].click();", all_tab)
+                self._pause(1.5)
+                context_msg = "clicked all tab via JS"
+        except Exception as exc:
+            pass
 
     def _navigate_with_timeout_recovery(self, url: str) -> bool:
         if not self.driver:
@@ -482,6 +495,17 @@ class SkuOfflineBrowser(BrowserRPA):
         context: dict[str, Any],
     ) -> None:
         self._wait_for_management_search_ready(context)
+        # Click "全部" tab first (NOT default "销售中" tab)
+        try:
+            all_tab = self.driver.find_element(
+                By.XPATH,
+                '//div[contains(@class, "tabs-tab") and normalize-space(text())="全部" and not(contains(@class, "active"))]'
+            )
+            if all_tab:
+                all_tab.click()
+                self._pause(1.0)
+        except Exception as exc:
+            context["all_tab_click_error"] = str(exc)[:200]
         product_id_input = self._resolve_selector(selectors.get("product_id_input", {}), context)
         if not self._selector_is_configured(product_id_input):
             raise ValueError("product_id_input selector is not configured.")
@@ -517,6 +541,7 @@ class SkuOfflineBrowser(BrowserRPA):
                     self._assert_no_risk_control_block(context)
                     body_text = self._extract_page_body_text()
                     if self._management_search_shows_no_data(body_text):
+                        # Try fallback: navigate to "全部商品" tab and search by product_id
                         message = (
                             f"Product {context.get('product_id', '')} is unavailable after "
                             "management search returned an explicit no-data state."
@@ -527,6 +552,11 @@ class SkuOfflineBrowser(BrowserRPA):
                             error_text=message,
                             error_category="product_unavailable",
                         )
+                        # Attempt fallback search in "全部商品" tab
+                        if self._try_fallback_all_products_search(context):
+                            context["edit_entry_stage"] = "management_product_matched"
+                            context["management_search_retry"] = "all_products_fallback"
+                            return
                         raise OfflineTaskStateError(message) from exc
                     message = (
                         f"Timed out locating product {context.get('product_id', '')} "
@@ -538,6 +568,11 @@ class SkuOfflineBrowser(BrowserRPA):
                         error_text=message,
                         error_category="management_search_timeout",
                     )
+                    # Try fallback search before raising
+                    if self._try_fallback_all_products_search(context):
+                        context["edit_entry_stage"] = "management_product_matched"
+                        context["management_search_retry"] = "all_products_fallback"
+                        return
                     raise OfflineTaskStateError(message) from exc
             context["edit_entry_stage"] = "management_product_matched"
         else:
@@ -620,6 +655,47 @@ class SkuOfflineBrowser(BrowserRPA):
             product_id,
         )
         context["management_filter_query_url"] = str(target_url or "")
+
+    def _try_fallback_all_products_search(self, context: dict[str, Any]) -> bool:
+        """Fallback: navigate to 全部商品 tab and search by product_id directly."""
+        if not self.driver:
+            return False
+        product_id = str(context.get("product_id", "")).strip()
+        if not product_id:
+            return False
+        try:
+            # Navigate to 全部商品 tab
+            self.driver.get("https://work.1688.com/?_path_=sellerPro/2017sellerbase_offer/shasngpinguanlinew")
+            time.sleep(2)
+            # Wait for page load
+            WebDriverWait(self.driver, 10).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, 'input[placeholder*="商品ID"]'))
+            )
+            # Click "全部" tab (not default "销售中" tab)
+            try:
+                all_tab = WebDriverWait(self.driver, 5).until(
+                    EC.element_to_be_clickable((By.XPATH, '//*[contains(@class, "tabs-tab") and normalize-space()="全部"]'))
+                )
+                all_tab.click()
+                time.sleep(2)
+            except Exception:
+                pass
+            # Find product_id input and fill
+            product_input = self.driver.find_element(By.CSS_SELECTOR, 'input[placeholder*="商品ID"]')
+            product_input.clear()
+            product_input.send_keys(product_id)
+            # Click search button
+            search_btn = self.driver.find_element(By.CSS_SELECTOR, 'button:has-text("搜索")')
+            search_btn.click()
+            time.sleep(3)
+            # Check if product found
+            body_text = self.driver.find_element(By.TAG_NAME, "body").text
+            if product_id in body_text and "暂无数据" not in body_text and "没有找到商品" not in body_text:
+                return True
+            return False
+        except Exception as exc:
+            context["fallback_search_error"] = str(exc)[:200]
+            return False
 
     def _fill_management_search_field(self, element: Any, value: Any) -> None:
         if not self.driver:
@@ -1817,17 +1893,24 @@ class SkuOfflineBrowser(BrowserRPA):
                 submit_element,
             )
             if isinstance(rect, dict) and float(rect.get("width", 0) or 0) > 0 and float(rect.get("height", 0) or 0) > 0:
-                x = float(rect.get("x", 0) or 0)
-                y = float(rect.get("y", 0) or 0)
-                self.driver.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y})
-                self.driver.execute_cdp_cmd(
-                    "Input.dispatchMouseEvent",
-                    {"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1},
-                )
-                self.driver.execute_cdp_cmd(
-                    "Input.dispatchMouseEvent",
-                    {"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1},
-                )
+                try:
+                    x = float(rect.get("x", 0) or 0)
+                    y = float(rect.get("y", 0) or 0)
+                    # Validate coordinates to prevent OSError [Errno 22] Invalid argument
+                    if not (0 <= x <= 100000) or not (0 <= y <= 100000):
+                        raise ValueError(f"Invalid coordinates: x={x}, y={y}")
+                    self.driver.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y})
+                    self.driver.execute_cdp_cmd(
+                        "Input.dispatchMouseEvent",
+                        {"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1},
+                    )
+                    self.driver.execute_cdp_cmd(
+                        "Input.dispatchMouseEvent",
+                        {"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1},
+                    )
+                except (OSError, ValueError) as exc:
+                    context["submit_cdp_click_error"] = f"CDP click failed: {str(exc)[:200]}"
+                    # Fall through to webdriver click below
                 context["submit_click_mode"] = "cdp_mouse"
                 return
         except Exception as exc:
