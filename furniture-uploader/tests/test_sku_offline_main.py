@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,6 +16,7 @@ if str(RPA_ROOT) not in sys.path:
 from exceptions import PublishSubmitError, PublishValidationError
 from sku_offline_main import (
     build_jushuitan_handoff_records,
+    build_jushuitan_sync_records,
     build_store_operator_config,
     build_failure_notification_content,
     build_run_report_payload,
@@ -44,6 +46,85 @@ class FakeRunReport:
 
 
 class SkuOfflineMainTests(unittest.TestCase):
+    def test_replacement_builds_sync_by_link_handoff(self) -> None:
+        task = OfflineTask(
+            source_file="replace.csv",
+            source_sheet="CSV",
+            source_row_number=2,
+            store_name="阿里巴巴-常州工莱家具",
+            platform="Alibaba",
+            product_id="732745838005",
+            online_sku="OLD",
+            handling="全渠道替换",
+            replacement_sku="NEW",
+            change_image="",
+            platform_store_item_code="CODE",
+            raw={},
+        )
+        records = build_jushuitan_sync_records(
+            {"selected_tasks": [task]},
+            successful_task_statuses={task.dedupe_key: "success"},
+        )
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["action"], "sync_by_link")
+        self.assertEqual(records[0]["replacement_sku"], "NEW")
+        self.assertEqual(records[0]["source_status"], "success")
+
+    def test_execute_preview_dispatches_replacement_and_writes_sync_handoff(self) -> None:
+        task = OfflineTask(
+            source_file="replace.csv", source_sheet="CSV", source_row_number=2,
+            store_name="STORE-A", platform="Alibaba", product_id="1001",
+            online_sku="OLD", handling="全渠道替换", replacement_sku="NEW",
+            change_image="", platform_store_item_code="CODE", raw={},
+        )
+
+        class FakeBrowser:
+            def __init__(self, *_args, **_kwargs) -> None:
+                self.last_result_context = {}
+                self.last_screenshot_path = ""
+                self.last_html_snapshot_path = ""
+
+            def open(self): return None
+            def prepare_session(self, *_args, **_kwargs): return None
+            def reset_runtime_artifacts(self): return None
+            def close(self): return None
+            def execute_offline_group(self, *_args, **_kwargs):
+                raise AssertionError("offline execution must not run for replacement")
+            def execute_replace_group(self, _config, tasks, **_kwargs):
+                return [{"task": tasks[0], "status": "already_replaced", "context": {}}]
+
+        config = {
+            "execution": {
+                "operation": "replace",
+                "require_store_account_mapping": True,
+                "store_accounts": [{"store_name": "STORE-A", "account_key": "store_a"}],
+            },
+            "notifications": {"dingtalk": {"enabled": False}},
+        }
+        with (
+            tempfile.TemporaryDirectory() as temp_dir,
+            patch("sku_offline_main.SkuOfflineBrowser", FakeBrowser),
+            patch("sku_offline_main.send_summary_notification"),
+        ):
+            handoff = Path(temp_dir) / "sync.jsonl"
+            summary = execute_preview(
+                project_root=PROJECT_ROOT,
+                operator_config={"browser": {}},
+                system_config=config,
+                preview={"selected_tasks": [task], "duplicate_count": 0, "filtered_out_count": 0},
+                skip_login=True,
+                no_notify=True,
+                run_report=FakeRunReport(),  # type: ignore[arg-type]
+                jushuitan_handoff_path=handoff,
+            )
+
+            payload = handoff.read_text(encoding="utf-8")
+
+        self.assertEqual(summary["already_replaced"], 1)
+        self.assertEqual(summary["jushuitan_action"], "sync_by_link")
+        self.assertIn('"source_status": "already_replaced"', payload)
+
     def build_task(self) -> SimpleNamespace:
         return SimpleNamespace(
             store_name="阿里巴巴-常州速班达家居有限公司",

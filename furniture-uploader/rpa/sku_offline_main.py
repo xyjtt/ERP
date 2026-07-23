@@ -29,6 +29,7 @@ from sku_offline_tasks import (
     group_tasks_by_store,
     load_offline_tasks,
     store_name_matches,
+    validate_tasks_for_operation,
 )
 
 
@@ -41,7 +42,7 @@ def safe_console_print(message: str) -> None:
 
 
 def build_argument_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="1688 SKU offline automation entrypoint.")
+    parser = argparse.ArgumentParser(description="1688 SKU offline/replacement automation entrypoint.")
     parser.add_argument(
         "--system",
         default="1688_sku_offline",
@@ -110,6 +111,7 @@ def main() -> None:
     config_dir = Path(args.config_dir)
     system_key = args.system.strip().lower()
     system_config = load_json_with_local_override(config_dir / "systems" / f"{system_key}.json")
+    operation = resolve_operation(system_config)
     operator_config = load_json_with_local_override(config_dir / "operator_config.json")
     run_report_options = {
         "project_root": project_root,
@@ -133,7 +135,11 @@ def main() -> None:
             if args.jushuitan_handoff_out:
                 write_jushuitan_handoff(
                     Path(args.jushuitan_handoff_out),
-                    build_jushuitan_handoff_records(preview),
+                    (
+                        build_jushuitan_sync_records(preview)
+                        if operation == "replace"
+                        else build_jushuitan_handoff_records(preview)
+                    ),
                 )
             return
 
@@ -146,10 +152,11 @@ def main() -> None:
             preview_path = write_preview_report(project_root, preview)
             print_preview(preview, preview_path)
             if not preview["selected_tasks"]:
-                safe_console_print("[INFO] No executable offline tasks were found.")
+                safe_console_print("[INFO] No executable 1688 SKU tasks were found.")
                 return
             if not args.yes:
-                confirmation = input("输入 YES 继续执行 1688 下架任务：").strip()
+                action_label = "替换" if operation == "replace" else "下架"
+                confirmation = input(f"输入 YES 继续执行 1688 SKU{action_label}任务：").strip()
                 if confirmation != "YES":
                     safe_console_print("[INFO] Cancelled by user.")
                     return
@@ -166,8 +173,8 @@ def main() -> None:
                     if args.jushuitan_handoff_out
                     else project_root
                     / "logs"
-                    / "sku_offline"
-                    / "jushuitan_handoffs"
+                    / ("sku_replace" if operation == "replace" else "sku_offline")
+                    / ("jushuitan_sync_handoffs" if operation == "replace" else "jushuitan_handoffs")
                     / f"{run_report.session_id}.jsonl"
                 ),
             )
@@ -200,22 +207,20 @@ def load_preview_for_files(
 ) -> dict[str, Any]:
     input_config = dict(system_config.get("input", {}))
     filters = dict(input_config.get("filters", {}))
-    loaded_tasks = []
-    filtered_out_tasks = []
-    selected_tasks = []
-    duplicate_tasks = []
+    operation = resolve_operation(system_config)
+    loaded_tasks: list[OfflineTask] = []
+    filtered_out_tasks: list[OfflineTask] = []
+    selected_candidates: list[OfflineTask] = []
 
     for file_path in files:
         tasks = load_offline_tasks(file_path, input_config)
         loaded_tasks.extend(tasks)
         filtered, skipped = filter_offline_tasks(tasks, input_config.get("filters", {}))
-        deduped, duplicates = dedupe_offline_tasks(filtered)
-        selected_tasks.extend(deduped)
+        selected_candidates.extend(filtered)
         filtered_out_tasks.extend(skipped)
-        duplicate_tasks.extend(duplicates)
 
-    deduped_selected, cross_file_duplicates = dedupe_offline_tasks(selected_tasks)
-    duplicate_tasks.extend(cross_file_duplicates)
+    validate_tasks_for_operation(selected_candidates, operation)
+    deduped_selected, duplicate_tasks = dedupe_offline_tasks(selected_candidates)
     if limit > 0:
         deduped_selected = deduped_selected[:limit]
 
@@ -248,7 +253,15 @@ def load_preview_for_files(
     preview_payload["selected_tasks"] = deduped_selected
     preview_payload["filtered_out_tasks"] = filtered_out_tasks
     preview_payload["duplicate_tasks"] = duplicate_tasks
+    preview_payload["operation"] = operation
     return preview_payload
+
+
+def resolve_operation(system_config: dict[str, Any]) -> str:
+    operation = str(system_config.get("execution", {}).get("operation", "offline")).strip().lower()
+    if operation not in {"offline", "replace"}:
+        raise ValueError(f"Unsupported 1688 SKU operation: {operation!r}.")
+    return operation
 
 
 def resolve_input_files(*, file_path: str, dir_path: str) -> list[Path]:
@@ -284,6 +297,8 @@ def execute_preview(
     selected_tasks = list(preview.get("selected_tasks", []))
     store_groups = group_tasks_by_store(selected_tasks)
     execution_config = dict(system_config.get("execution", {}))
+    operation = resolve_operation(system_config)
+    action_label = "replace" if operation == "replace" else "offline"
     if len(store_groups) > 1 and not bool(execution_config.get("allow_multi_store_batch", False)):
         raise ValueError(
             "Current phase only supports one store per execution batch. "
@@ -291,9 +306,11 @@ def execute_preview(
         )
 
     summary = {
+        "operation": operation,
         "success": 0,
         "failed": 0,
         "already_offline": 0,
+        "already_replaced": 0,
         "stopped_stores": 0,
         "stopped_store_names": [],
     }
@@ -347,7 +364,12 @@ def execute_preview(
                     attempts += 1
                     browser.reset_runtime_artifacts()
                     try:
-                        outcomes = browser.execute_offline_group(
+                        execute_group = (
+                            browser.execute_replace_group
+                            if operation == "replace"
+                            else browser.execute_offline_group
+                        )
+                        outcomes = execute_group(
                             system_config,
                             pending_tasks,
                             account_binding=account_binding,
@@ -362,10 +384,12 @@ def execute_preview(
                             task = outcome["task"]
                             result_context = dict(outcome.get("context") or {})
                             outcome_status = str(outcome.get("status") or "failed")
-                            if outcome_status in {"success", "already_offline"}:
+                            if outcome_status in {"success", "already_offline", "already_replaced"}:
                                 status = outcome_status
                                 if status == "already_offline":
                                     summary["already_offline"] += 1
+                                elif status == "already_replaced":
+                                    summary["already_replaced"] += 1
                                 else:
                                     summary["success"] += 1
                                 successful_task_statuses[task.dedupe_key] = status
@@ -405,7 +429,7 @@ def execute_preview(
                             run_report.append(payload)
                             finished_task_keys.add(task.dedupe_key)
                             safe_console_print(
-                                f"[ERROR] Offline task failed: {task.store_name} "
+                                f"[ERROR] 1688 SKU {action_label} task failed: {task.store_name} "
                                 f"{task.product_id} {task.online_sku} -> {error}"
                             )
                             send_failure_notification(system_config, payload, disabled=no_notify)
@@ -503,23 +527,40 @@ def execute_preview(
     summary["filtered_out_count"] = int(preview.get("filtered_out_count", 0))
     summary["report_path"] = run_report.info()["report_path"]
     summary["summary_path"] = run_report.info()["summary_path"]
-    handoff_path = jushuitan_handoff_path or (
-        project_root
-        / "logs"
-        / "sku_offline"
-        / "jushuitan_handoffs"
-        / (
-            f"{getattr(run_report, 'session_id', 'session')}"
-            f"_{datetime.now().strftime('%H%M%S_%f')}.jsonl"
+    if operation == "offline":
+        handoff_path = jushuitan_handoff_path or (
+            project_root
+            / "logs"
+            / "sku_offline"
+            / "jushuitan_handoffs"
+            / (
+                f"{getattr(run_report, 'session_id', 'session')}"
+                f"_{datetime.now().strftime('%H%M%S_%f')}.jsonl"
+            )
         )
-    )
-    handoff_records = build_jushuitan_handoff_records(
-        preview,
-        successful_task_statuses=successful_task_statuses,
-    )
-    write_jushuitan_handoff(handoff_path, handoff_records)
-    summary["jushuitan_handoff_path"] = str(handoff_path)
-    summary["jushuitan_handoff_count"] = len(handoff_records)
+        handoff_records = build_jushuitan_handoff_records(
+            preview,
+            successful_task_statuses=successful_task_statuses,
+        )
+        write_jushuitan_handoff(handoff_path, handoff_records)
+        summary["jushuitan_handoff_path"] = str(handoff_path)
+        summary["jushuitan_handoff_count"] = len(handoff_records)
+    else:
+        sync_path = jushuitan_handoff_path or (
+            project_root
+            / "logs"
+            / "sku_replace"
+            / "jushuitan_sync_handoffs"
+            / f"{getattr(run_report, 'session_id', 'session')}_{datetime.now().strftime('%H%M%S_%f')}.jsonl"
+        )
+        sync_records = build_jushuitan_sync_records(
+            preview,
+            successful_task_statuses=successful_task_statuses,
+        )
+        write_jushuitan_handoff(sync_path, sync_records)
+        summary["jushuitan_handoff_path"] = str(sync_path)
+        summary["jushuitan_handoff_count"] = len(sync_records)
+        summary["jushuitan_action"] = "sync_by_link"
     send_summary_notification(system_config, summary, disabled=no_notify)
     safe_console_print(json.dumps(summary, ensure_ascii=False, indent=2))
     return summary
@@ -573,6 +614,46 @@ def build_jushuitan_handoff_records(
             "source_row_number": task.source_row_number,
         }
 
+    return list(records.values())
+
+
+def build_jushuitan_sync_records(
+    preview: dict[str, Any],
+    *,
+    successful_task_statuses: dict[tuple[str, str, str], str] | None = None,
+) -> list[dict[str, Any]]:
+    records: dict[str, dict[str, Any]] = {}
+    for task in list(preview.get("selected_tasks", [])):
+        source_status = "pending_1688"
+        if successful_task_statuses is not None:
+            source_status = str(successful_task_statuses.get(task.dedupe_key, "")).strip()
+            if source_status not in {"success", "already_replaced"}:
+                continue
+        identity_parts = (
+            task.store_name,
+            task.product_id,
+            task.online_sku,
+            task.replacement_sku,
+        )
+        normalized_identity = "|".join(
+            "".join(str(part).split()).lower() for part in identity_parts
+        )
+        task_id = hashlib.sha256(normalized_identity.encode("utf-8")).hexdigest()
+        records[task_id] = {
+            "task_id": task_id,
+            "source": "1688_sku_replace",
+            "source_status": source_status,
+            "store_name": task.store_name,
+            "platform": task.platform,
+            "product_id": task.product_id,
+            "online_sku": task.online_sku,
+            "replacement_sku": task.replacement_sku,
+            "platform_store_item_code": task.platform_store_item_code,
+            "handling": task.handling,
+            "action": "sync_by_link",
+            "source_file": task.source_file,
+            "source_row_number": task.source_row_number,
+        }
     return list(records.values())
 
 
@@ -751,12 +832,16 @@ def build_run_report_payload(
     html_snapshot_path: str = "",
 ) -> dict[str, Any]:
     result_context = result_context or {}
+    replacement_sku = str(getattr(task, "replacement_sku", "") or "").strip()
+    operation = "replace" if str(getattr(task, "handling", "")).strip() == "全渠道替换" else "offline"
     payload = {
+        "operation": operation,
         "status": status,
         "store_name": task.store_name,
         "platform": task.platform,
         "product_id": task.product_id,
         "online_sku": task.online_sku,
+        "replacement_sku": replacement_sku,
         "platform_store_item_code": task.platform_store_item_code,
         "handling": task.handling,
         "source_file": task.source_file,
@@ -859,6 +944,8 @@ def localize_error_category(error_category: str) -> str:
         "delivery_service_backfill_failed": "配送服务自动补全失败",
         "management_search_timeout": "商品管理搜索超时",
         "submit_blocked_before_request": "提交前页面校验阻断",
+        "replacement_sku_conflict": "替换货号冲突",
+        "replacement_verification_failed": "替换结果复核失败",
         "automation_error": "脚本异常",
     }
     normalized = str(error_category or "").strip()
@@ -867,11 +954,19 @@ def localize_error_category(error_category: str) -> str:
 
 def build_failure_notification_content(payload: dict[str, Any]) -> str:
     error_category = localize_error_category(str(payload.get("error_category", "")).strip())
+    operation = str(payload.get("operation", "offline")).strip()
+    action_label = "替换" if operation == "replace" else "下架"
+    replacement_line = (
+        f"替换后货号：{payload.get('replacement_sku', '')}\n"
+        if operation == "replace"
+        else ""
+    )
     return (
-        "1688 SKU下架执行失败\n"
+        f"1688 SKU{action_label}执行失败\n"
         f"店铺名称：{payload.get('store_name', '')}\n"
         f"商品ID：{payload.get('product_id', '')}\n"
         f"单品货号：{payload.get('online_sku', '')}\n"
+        f"{replacement_line}"
         f"尝试次数：{payload.get('attempts', '')}\n"
         f"错误分类：{error_category}\n"
         f"页面阶段：{payload.get('page_error_stage', '')}\n"
@@ -888,11 +983,18 @@ def build_summary_notification_content(summary: dict[str, Any]) -> str:
         stopped_store_text = "、".join(str(item) for item in stopped_store_names if str(item).strip())
     else:
         stopped_store_text = str(stopped_store_names or "")
+    operation = str(summary.get("operation", "offline")).strip()
+    action_label = "替换" if operation == "replace" else "下架"
+    idempotent_line = (
+        f"已完成替换：{summary.get('already_replaced', 0)}\n"
+        if operation == "replace"
+        else f"已是下架：{summary.get('already_offline', 0)}\n"
+    )
     return (
-        "1688 SKU下架批次完成\n"
+        f"1688 SKU{action_label}批次完成\n"
         f"任务总数：{summary.get('total', 0)}\n"
         f"执行成功：{summary.get('success', 0)}\n"
-        f"已是下架：{summary.get('already_offline', 0)}\n"
+        f"{idempotent_line}"
         f"执行失败：{summary.get('failed', 0)}\n"
         f"安全停止店铺：{summary.get('stopped_stores', 0)} {stopped_store_text}\n"
         f"重复数量：{summary.get('duplicate_count', 0)}\n"
@@ -903,7 +1005,8 @@ def build_summary_notification_content(summary: dict[str, Any]) -> str:
 
 
 def write_preview_report(project_root: Path, preview: dict[str, Any]) -> Path:
-    preview_dir = project_root / "logs" / "sku_offline" / "previews"
+    operation = str(preview.get("operation", "offline")).strip().lower()
+    preview_dir = project_root / "logs" / ("sku_replace" if operation == "replace" else "sku_offline") / "previews"
     preview_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     target_path = preview_dir / f"{timestamp}.json"
@@ -913,6 +1016,7 @@ def write_preview_report(project_root: Path, preview: dict[str, Any]) -> Path:
             "store_name": task.store_name,
             "product_id": task.product_id,
             "online_sku": task.online_sku,
+            "replacement_sku": task.replacement_sku,
             "source_row_number": task.source_row_number,
         }
         for task in preview.get("selected_tasks", [])
@@ -922,6 +1026,7 @@ def write_preview_report(project_root: Path, preview: dict[str, Any]) -> Path:
             "store_name": task.store_name,
             "product_id": task.product_id,
             "online_sku": task.online_sku,
+            "replacement_sku": task.replacement_sku,
             "source_row_number": task.source_row_number,
         }
         for task in preview.get("filtered_out_tasks", [])
@@ -931,6 +1036,7 @@ def write_preview_report(project_root: Path, preview: dict[str, Any]) -> Path:
             "store_name": task.store_name,
             "product_id": task.product_id,
             "online_sku": task.online_sku,
+            "replacement_sku": task.replacement_sku,
             "source_row_number": task.source_row_number,
         }
         for task in preview.get("duplicate_tasks", [])

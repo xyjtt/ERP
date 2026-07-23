@@ -1,5 +1,13 @@
 # Platform Experience Knowledge Base
 
+## 2026-07-23 SKU Replacement Findings
+
+- 商品管理入口对下架和替换都必须归一化为 `tab=all`，并在页面加载后显式确认“全部”Tab；“销售中”会漏掉已下架、审核中或其他状态商品。
+- SKU 单品货号位于发布页运行时 `SellPublishSdk.engine.getJsonState().components.skuTable` 的 `sku_cargoNumber`；受控写入使用 `core.changeElementValue('skuTable', nextValues, {isDepth:false})`。
+- 同商品多 SKU 应先做整组冲突校验，再一次性修改 `skuTable`、一次提交，最后重新打开商品编辑页逐项复核新货号。
+- 幂等判断：旧货号不存在且新货号已存在时记为 `already_replaced`；新货号属于未参与映射的其他行时记为 `replacement_sku_conflict`，禁止提交。
+- 聚水潭替换后不是“清除链接”，而是“手动同步商品 -> 按链接同步”；按店铺填写去重商品 ID，每批限制 50 个，并为每个原始 SKU 保留独立结果。
+
 ## 2026-03-26 Managed Update
 
 - New live-page finding:

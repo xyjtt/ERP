@@ -1,5 +1,15 @@
 # DIRECT 1688 Progress
 
+## 2026-07-23 Managed Update (SKU Replacement Code Complete, Live Canary Pending)
+
+- `1688_sku_replace` 已完成代码闭环：BI preview、分店/商品分组、旧货号改新货号、一次提交、提交后复核、日志和钉钉异常字段。
+- 商品搜索边界统一：SKU 下架与 SKU 替换均使用商品管理“全部”Tab，不再依赖“销售中”。
+- 聚水潭新增 `sync:1688`：替换后按店铺执行“手动同步商品 -> 按链接同步 -> 立即下载”，同商品多 SKU 只提交一个商品 ID，每批最多 50 个商品 ID。
+- 新增完整 preview 流水线 `scripts/run_1688_sku_replace_pipeline.py` 和样本 `templates/1688_sku_replace_sample.csv`。
+- 正式源 preview 已支持逐行拒绝：`2026-07-23` 加载 568 条，500 条可执行，42 条非 SKU 占位值拒绝，26 条重复；拒绝项写 CSV/JSON 并尝试钉钉通知。
+- 正式验收库 `JSReportReplica.app.ali1688_sku_replace_run/item` 已创建并通过契约检查。
+- 本地回归全部通过；下一节点是业务提供一条可真实替换的受控映射后，执行 1688 + 聚水潭单条 live canary。
+
 ## 2026-03-31 Managed Update (T-005 Draft System-Error Isolation Round-2)
 
 - 继续只执行 `T-005`（仅 `draft`），`T-001` 冻结。

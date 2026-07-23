@@ -336,6 +336,206 @@ class SkuOfflineBrowser(BrowserRPA):
         finally:
             self._restore_management_window(main_window)
 
+    def execute_replace_group(
+        self,
+        system_config: dict[str, Any],
+        tasks: list[OfflineTask],
+        *,
+        account_binding: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        if not tasks:
+            return []
+
+        group_keys = {
+            (str(task.store_name).strip(), str(task.product_id).strip())
+            for task in tasks
+        }
+        if len(group_keys) != 1:
+            raise ValueError("A grouped 1688 replacement must contain one store and one product ID.")
+        for task in tasks:
+            old_sku = str(task.online_sku).strip()
+            new_sku = str(task.replacement_sku).strip()
+            if not old_sku or not new_sku:
+                raise ValueError("Every 1688 replacement task requires old and new SKU codes.")
+            if old_sku.casefold() == new_sku.casefold():
+                raise ValueError(f"Replacement SKU must differ from source SKU: {old_sku}")
+
+        workflow = dict(system_config.get("workflow", {}))
+        selectors = dict(workflow.get("selectors", {}))
+        success_detection = dict(workflow.get("success_detection", {}))
+        error_detection = dict(workflow.get("error_detection", {}))
+        pre_submit_backfill = dict(workflow.get("pre_submit_backfill", {}))
+        post_submit_verification = dict(workflow.get("post_submit_verification", {}))
+        safety_config = dict(system_config.get("execution", {}).get("safety", {}))
+        contexts = [task.to_context() for task in tasks]
+        for context in contexts:
+            self._apply_account_binding_context(context, account_binding or {})
+            context["operation"] = "replace"
+            context["group_sku_count"] = str(len(tasks))
+            context["group_target_skus"] = [str(item.online_sku).strip() for item in tasks]
+            context["group_replacement_skus"] = [str(item.replacement_sku).strip() for item in tasks]
+
+        first_context = contexts[0]
+        self.last_result_context = first_context
+        main_window = self.driver.current_window_handle
+        outcomes: list[dict[str, Any]] = []
+        try:
+            self._emit_stage("open_replace_edit_page:start", first_context)
+            self._open_task_edit_page(system_config, selectors, first_context, safety_config)
+            self._emit_stage("open_replace_edit_page:done", first_context)
+            self._assert_not_redirected_to_login(first_context)
+            self._assert_no_risk_control_block(first_context)
+            self._assert_edit_page_identity(first_context, safety_config)
+
+            replacement_results = self._replace_sku_codes_in_runtime_state(contexts)
+            if not bool(replacement_results.get("supported")):
+                replacement_results = self._replace_sku_codes_in_dom(contexts)
+            result_items = list(replacement_results.get("results") or [])
+            if len(result_items) != len(tasks):
+                raise OfflineTaskStateError(
+                    "1688 replacement runtime returned an incomplete SKU result set."
+                )
+
+            shared_context_keys = (
+                "edit_entry_mode",
+                "edit_entry_fallback",
+                "edit_page_product_id",
+                "edit_page_error_code",
+            )
+            for task, context, result in zip(tasks, contexts, result_items):
+                self.last_result_context = context
+                for key in shared_context_keys:
+                    if key in first_context:
+                        context[key] = first_context[key]
+                context["replacement_runtime_result"] = result
+                status = str(result.get("status", "")).strip()
+                if status == "changed":
+                    outcomes.append({
+                        "task": task,
+                        "status": "pending_submit",
+                        "context": context,
+                        "error": None,
+                        "screenshot_path": "",
+                        "html_snapshot_path": "",
+                    })
+                    continue
+                if status == "already_replaced":
+                    context["execution_result"] = "already_replaced"
+                    context["success_detected"] = "true"
+                    outcomes.append({
+                        "task": task,
+                        "status": "already_replaced",
+                        "context": context,
+                        "error": None,
+                        "screenshot_path": "",
+                        "html_snapshot_path": "",
+                    })
+                    continue
+
+                reason = str(result.get("reason", status or "replacement_failed"))
+                if status == "conflict":
+                    category = "replacement_sku_conflict"
+                    error: Exception = OfflineTaskStateError(
+                        f"Replacement SKU '{task.replacement_sku}' already belongs to another SKU row."
+                    )
+                elif status == "failed":
+                    category = "replacement_verification_failed"
+                    error = OfflineTaskStateError(
+                        f"Replacement state was not accepted for '{task.online_sku}' -> "
+                        f"'{task.replacement_sku}'. reason={reason}"
+                    )
+                else:
+                    category = "sku_not_found"
+                    error = OfflineTaskNotFoundError(
+                        f"Source SKU '{task.online_sku}' was not found and replacement SKU "
+                        f"'{task.replacement_sku}' is not present. reason={reason}"
+                    )
+                self._annotate_page_error_context(
+                    context,
+                    stage_name="replace_sku_code",
+                    error_text=str(error),
+                    error_category=category,
+                )
+                outcomes.append({
+                    "task": task,
+                    "status": "failed",
+                    "context": context,
+                    "error": error,
+                    "screenshot_path": "",
+                    "html_snapshot_path": "",
+                })
+
+            changed_outcomes = [item for item in outcomes if item["status"] == "pending_submit"]
+            if changed_outcomes:
+                changed_contexts = [item["context"] for item in changed_outcomes]
+                submit_context = dict(changed_contexts[0])
+                submit_context["group_replacements"] = [
+                    {
+                        "online_sku": str(item["task"].online_sku).strip(),
+                        "replacement_sku": str(item["task"].replacement_sku).strip(),
+                    }
+                    for item in changed_outcomes
+                ]
+                try:
+                    self._assert_replacement_group_ready(changed_contexts)
+                    self._emit_stage("submit_replace_group:start", submit_context)
+                    self._submit_changes(
+                        selectors,
+                        success_detection,
+                        error_detection,
+                        pre_submit_backfill,
+                        submit_context,
+                        operation="replace",
+                        replacement_contexts=changed_contexts,
+                    )
+                    self._emit_stage("submit_replace_group:done", submit_context)
+                    self._verify_group_persisted_replacement(
+                        selectors,
+                        post_submit_verification,
+                        changed_contexts,
+                    )
+                    self._emit_stage("verify_replacement_persisted:done", submit_context)
+                except Exception as exc:
+                    self.last_result_context = submit_context
+                    self._record_page_metadata(submit_context)
+                    self._capture_screenshot(f"{tasks[0].product_id}_replace_group_submit")
+                    submit_metadata = {
+                        key: value
+                        for key, value in submit_context.items()
+                        if key.startswith(("submit_", "success_", "page_error_", "pre_submit_"))
+                    }
+                    for item in changed_outcomes:
+                        item["context"].update(submit_metadata)
+                        item["context"]["group_submit_failed"] = "true"
+                        item["status"] = "failed"
+                        item["error"] = exc
+                        item["screenshot_path"] = self.last_screenshot_path
+                        item["html_snapshot_path"] = self.last_html_snapshot_path
+                else:
+                    submit_metadata = {
+                        key: value
+                        for key, value in submit_context.items()
+                        if key.startswith(("submit_", "success_", "pre_submit_"))
+                    }
+                    for item in changed_outcomes:
+                        item["context"].update(submit_metadata)
+                        item["context"]["execution_result"] = "replaced"
+                        item["status"] = "success"
+
+            for item in outcomes:
+                self._record_page_metadata(item["context"])
+            if outcomes:
+                self.last_result_context = outcomes[-1]["context"]
+            return outcomes
+        except Exception:
+            self._record_page_metadata(self.last_result_context)
+            self._capture_screenshot(f"{tasks[0].product_id}_replace_group")
+            raise
+        finally:
+            self._restore_management_window(main_window)
+
     def _open_task_edit_page(
         self,
         system_config: dict[str, Any],
@@ -1088,23 +1288,35 @@ class SkuOfflineBrowser(BrowserRPA):
         error_detection: dict[str, Any],
         pre_submit_backfill: dict[str, Any],
         context: dict[str, Any],
+        *,
+        operation: str = "offline",
+        replacement_contexts: list[dict[str, Any]] | None = None,
     ) -> None:
+        normalized_operation = str(operation or "offline").strip().lower()
+        if normalized_operation not in {"offline", "replace"}:
+            raise ValueError(f"Unsupported submit operation: {operation!r}.")
+        pre_submit_stage = f"pre_{normalized_operation}_submit"
+        post_submit_stage = f"post_{normalized_operation}_submit"
         submit_button = self._resolve_selector(selectors.get("submit_button", {}), context)
         if not self._selector_is_configured(submit_button):
             raise ValueError("submit_button selector is not configured.")
         self._check_publish_error_state(
             error_detection,
             context=context,
-            stage_name="pre_offline_submit",
+            stage_name=pre_submit_stage,
             exception_cls=PublishSubmitError,
         )
         try:
             self._prepare_pre_submit_backfill(pre_submit_backfill, context)
-            self._raise_if_inline_validation_present(context, stage_name="pre_offline_submit")
+            self._raise_if_inline_validation_present(context, stage_name=pre_submit_stage)
         except PublishValidationError:
-            self._revert_unsaved_sku_toggle(selectors, context)
+            if normalized_operation == "offline":
+                self._revert_unsaved_sku_toggle(selectors, context)
             raise
-        self._ensure_target_sku_still_offline(selectors, context)
+        if normalized_operation == "offline":
+            self._ensure_target_sku_still_offline(selectors, context)
+        else:
+            self._assert_replacement_group_ready(replacement_contexts or [context])
         self._install_offline_submit_trace()
         submit_element = self._wait_for_element(submit_button, clickable=True)
         context["submit_button_disabled_before_click"] = str(submit_element.get_attribute("disabled") or "")
@@ -1125,10 +1337,10 @@ class SkuOfflineBrowser(BrowserRPA):
         self._check_publish_error_state(
             error_detection,
             context=context,
-            stage_name="post_offline_submit",
+            stage_name=post_submit_stage,
             exception_cls=PublishSubmitError,
         )
-        self._raise_if_inline_validation_present(context, stage_name="post_offline_submit")
+        self._raise_if_inline_validation_present(context, stage_name=post_submit_stage)
         trace_detected = self._assert_offline_submit_trace(context)
         if not trace_detected:
             context["submit_retry_mode"] = "dispatch_event_click"
@@ -1144,10 +1356,10 @@ class SkuOfflineBrowser(BrowserRPA):
             self._check_publish_error_state(
                 error_detection,
                 context=context,
-                stage_name="post_offline_submit_retry",
+                stage_name=f"{post_submit_stage}_retry",
                 exception_cls=PublishSubmitError,
             )
-            self._raise_if_inline_validation_present(context, stage_name="post_offline_submit_retry")
+            self._raise_if_inline_validation_present(context, stage_name=f"{post_submit_stage}_retry")
             trace_detected = self._assert_offline_submit_trace(context)
         if not trace_detected:
             direct_submit_result = self._retry_submit_via_trace(context)
@@ -1162,7 +1374,15 @@ class SkuOfflineBrowser(BrowserRPA):
                 return
             diagnostics = self._collect_submit_block_diagnostics(submit_button)
             context["submit_block_diagnostics"] = diagnostics
-            if self._probe_persisted_offline_after_trace_miss(selectors, context):
+            persisted_after_trace_miss = (
+                self._probe_persisted_offline_after_trace_miss(selectors, context)
+                if normalized_operation == "offline"
+                else self._probe_persisted_replacement_after_trace_miss(
+                    selectors,
+                    replacement_contexts or [context],
+                )
+            )
+            if persisted_after_trace_miss:
                 context["success_detected"] = "true"
                 context["submit_success_phase"] = "persisted_state_after_trace_miss"
                 context["execution_result"] = "submitted_untraced_verified"
@@ -1181,7 +1401,7 @@ class SkuOfflineBrowser(BrowserRPA):
             error_text = "提交按钮未产生平台请求" + (f"：{summary}" if summary else "")
             error_category = (
                 "sole_sku_requires_product_offline"
-                if self._contains_sole_online_sku_validation(summary)
+                if normalized_operation == "offline" and self._contains_sole_online_sku_validation(summary)
                 else "submit_blocked_before_request"
             )
             self._annotate_page_error_context(
@@ -1356,6 +1576,40 @@ class SkuOfflineBrowser(BrowserRPA):
             context["trace_miss_persistence_probe_error"] = str(exc)[:500]
             return False
 
+    def _probe_persisted_replacement_after_trace_miss(
+        self,
+        selectors: dict[str, Any],
+        contexts: list[dict[str, Any]],
+    ) -> bool:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        if not contexts:
+            return False
+        try:
+            self.driver.switch_to.default_content()
+            self.driver.refresh()
+            self._pause(5.0)
+            self._assert_not_redirected_to_login(contexts[0])
+            self._assert_no_risk_control_block(contexts[0])
+            self._activate_sales_info_section(selectors, contexts[0])
+            expected_product_id = str(contexts[0].get("product_id", "")).strip()
+            actual_product_id = self._extract_product_id_from_current_url()
+            contexts[0]["trace_miss_probe_product_id"] = actual_product_id
+            if expected_product_id and actual_product_id != expected_product_id:
+                contexts[0]["trace_miss_persistence_probe"] = "identity_mismatch"
+                return False
+            state = self._read_sku_code_state()
+            failures = self._replacement_state_failures(contexts, state)
+            for context in contexts:
+                context["trace_miss_replacement_state"] = state
+                context["trace_miss_persistence_probe"] = "replaced" if not failures else "not_replaced"
+            return not failures
+        except Exception as exc:
+            for context in contexts:
+                context["trace_miss_persistence_probe"] = "error"
+                context["trace_miss_persistence_probe_error"] = str(exc)[:500]
+            return False
+
     def _record_submit_success_if_detected(
         self,
         success_detection: dict[str, Any],
@@ -1436,7 +1690,7 @@ class SkuOfflineBrowser(BrowserRPA):
         normalized_messages = [str(item).strip() for item in messages if str(item).strip()]
         if not normalized_messages:
             return
-        if stage_name.startswith("pre_offline_submit"):
+        if stage_name.startswith(("pre_offline_submit", "pre_replace_submit")):
             max_rounds = 4
             for round_index in range(1, max_rounds + 1):
                 recovered = self._try_recover_inline_required_category_props(normalized_messages, context)
@@ -1870,6 +2124,254 @@ class SkuOfflineBrowser(BrowserRPA):
         if not isinstance(result, dict):
             return {"supported": False, "reason": "invalid_runtime_result"}
         return {str(key): value for key, value in result.items()}
+
+    def _replace_sku_codes_in_runtime_state(
+        self,
+        contexts: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        mappings = [
+            {
+                "old": str(context.get("online_sku", "")).strip(),
+                "new": str(context.get("replacement_sku", "")).strip(),
+            }
+            for context in contexts
+        ]
+        result = self.driver.execute_script(
+            """
+            const mappings = Array.isArray(arguments[0]) ? arguments[0] : [];
+            const normalize = (value) => String(value || '').trim().toUpperCase();
+            const sdk = window.SellPublishSdk;
+            const engine = sdk && sdk.engine;
+            const core = engine && engine._engine && engine._engine._core;
+            if (!engine || !engine.getJsonState || !core || typeof core.changeElementValue !== 'function') {
+              return { supported: false, reason: 'runtime_unavailable', results: [] };
+            }
+            const getValues = () => {
+              const state = engine.getJsonState() || {};
+              const component = ((state.components || {}).skuTable || {});
+              const props = component.props || {};
+              const fields = component.fields || {};
+              return Array.isArray(props.value) ? props.value : (Array.isArray(fields.value) ? fields.value : []);
+            };
+            const values = getValues();
+            if (!Array.isArray(values) || values.length === 0) {
+              return { supported: true, reason: 'sku_table_empty', results: mappings.map(() => ({status: 'not_found', reason: 'sku_table_empty'})) };
+            }
+            const codes = values.map((item) => String((item && item.sku_cargoNumber) || '').trim());
+            const findUnique = (target) => {
+              const exact = [];
+              const normalized = [];
+              codes.forEach((code, index) => {
+                if (code === target) exact.push(index);
+                else if (normalize(target) && normalize(code) === normalize(target)) normalized.push(index);
+              });
+              if (exact.length === 1) return exact[0];
+              if (exact.length === 0 && normalized.length === 1) return normalized[0];
+              return -1;
+            };
+            const prepared = mappings.map((mapping) => ({
+              old: String(mapping.old || '').trim(),
+              new: String(mapping.new || '').trim(),
+              sourceIndex: findUnique(String(mapping.old || '').trim()),
+              targetIndex: findUnique(String(mapping.new || '').trim()),
+            }));
+            const results = prepared.map((item) => {
+              if (item.sourceIndex < 0) {
+                if (item.targetIndex >= 0) {
+                  return {status: 'already_replaced', source_index: -1, target_index: item.targetIndex};
+                }
+                return {status: 'not_found', reason: 'source_and_replacement_absent'};
+              }
+              if (item.targetIndex >= 0 && item.targetIndex !== item.sourceIndex) {
+                return {status: 'conflict', reason: 'replacement_belongs_to_another_row', source_index: item.sourceIndex, target_index: item.targetIndex};
+              }
+              return {status: 'changed', source_index: item.sourceIndex, before: codes[item.sourceIndex], after: item.new};
+            });
+            const replacementsByIndex = new Map();
+            results.forEach((item, index) => {
+              if (item.status === 'changed') replacementsByIndex.set(item.source_index, prepared[index].new);
+            });
+            if (replacementsByIndex.size > 0) {
+              const nextValues = values.map((item, index) => {
+                if (!replacementsByIndex.has(index)) return item;
+                return {...(item || {}), sku_cargoNumber: replacementsByIndex.get(index)};
+              });
+              core.changeElementValue('skuTable', nextValues, {isDepth: false});
+            }
+            const refreshed = getValues();
+            results.forEach((item, index) => {
+              if (item.status !== 'changed') return;
+              const refreshedCode = String(((refreshed[item.source_index] || {}).sku_cargoNumber) || '').trim();
+              item.runtime_after = refreshedCode;
+              item.verified = refreshedCode === prepared[index].new;
+              if (!item.verified) {
+                item.status = 'failed';
+                item.reason = 'runtime_state_not_updated';
+              }
+            });
+            return {supported: true, changed_count: replacementsByIndex.size, results};
+            """,
+            mappings,
+        )
+        if not isinstance(result, dict):
+            return {"supported": False, "reason": "invalid_runtime_result", "results": []}
+        return {str(key): value for key, value in result.items()}
+
+    def _replace_sku_codes_in_dom(
+        self,
+        contexts: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        mappings = [
+            {
+                "old": str(context.get("online_sku", "")).strip(),
+                "new": str(context.get("replacement_sku", "")).strip(),
+            }
+            for context in contexts
+        ]
+        result = self.driver.execute_script(
+            """
+            const mappings = Array.isArray(arguments[0]) ? arguments[0] : [];
+            const normalize = (value) => String(value || '').trim().toUpperCase();
+            const rows = Array.from(document.querySelectorAll('#guid-skuTable tbody tr'));
+            const cargoInputs = rows.map((row) => {
+              const inputs = Array.from(row.querySelectorAll('input'));
+              return inputs.length ? inputs[inputs.length - 1] : null;
+            });
+            const codes = cargoInputs.map((input) => input ? String(input.value || '').trim() : '');
+            const findUnique = (target) => {
+              const exact = [];
+              const normalized = [];
+              codes.forEach((code, index) => {
+                if (code === target) exact.push(index);
+                else if (normalize(target) && normalize(code) === normalize(target)) normalized.push(index);
+              });
+              if (exact.length === 1) return exact[0];
+              if (exact.length === 0 && normalized.length === 1) return normalized[0];
+              return -1;
+            };
+            const prepared = mappings.map((mapping) => ({
+              old: String(mapping.old || '').trim(),
+              new: String(mapping.new || '').trim(),
+              sourceIndex: findUnique(String(mapping.old || '').trim()),
+              targetIndex: findUnique(String(mapping.new || '').trim()),
+            }));
+            const results = prepared.map((item) => {
+              if (item.sourceIndex < 0) {
+                return item.targetIndex >= 0
+                  ? {status: 'already_replaced', target_index: item.targetIndex}
+                  : {status: 'not_found', reason: 'source_and_replacement_absent'};
+              }
+              if (item.targetIndex >= 0 && item.targetIndex !== item.sourceIndex) {
+                return {status: 'conflict', reason: 'replacement_belongs_to_another_row'};
+              }
+              return {status: 'changed', source_index: item.sourceIndex, before: codes[item.sourceIndex], after: item.new};
+            });
+            const descriptor = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+            results.forEach((item, index) => {
+              if (item.status !== 'changed') return;
+              const input = cargoInputs[item.source_index];
+              if (!input) {
+                item.status = 'failed';
+                item.reason = 'cargo_input_missing';
+                return;
+              }
+              if (descriptor && descriptor.set) descriptor.set.call(input, prepared[index].new);
+              else input.value = prepared[index].new;
+              input.dispatchEvent(new Event('input', {bubbles: true}));
+              input.dispatchEvent(new Event('change', {bubbles: true}));
+              item.dom_after = String(input.value || '').trim();
+              item.verified = item.dom_after === prepared[index].new;
+              if (!item.verified) {
+                item.status = 'failed';
+                item.reason = 'dom_value_not_updated';
+              }
+            });
+            return {supported: rows.length > 0, changed_count: results.filter((item) => item.status === 'changed').length, results};
+            """,
+            mappings,
+        )
+        if not isinstance(result, dict):
+            return {"supported": False, "reason": "invalid_dom_result", "results": []}
+        return {str(key): value for key, value in result.items()}
+
+    def _read_sku_code_state(self) -> dict[str, Any]:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        result = self.driver.execute_script(
+            """
+            const sdk = window.SellPublishSdk;
+            const engine = sdk && sdk.engine;
+            let runtimeCodes = [];
+            if (engine && engine.getJsonState) {
+              const state = engine.getJsonState() || {};
+              const component = ((state.components || {}).skuTable || {});
+              const props = component.props || {};
+              const fields = component.fields || {};
+              const values = Array.isArray(props.value) ? props.value : (Array.isArray(fields.value) ? fields.value : []);
+              runtimeCodes = values.map((item) => String((item && item.sku_cargoNumber) || '').trim()).filter(Boolean);
+            }
+            const domCodes = Array.from(document.querySelectorAll('#guid-skuTable tbody tr')).map((row) => {
+              const inputs = Array.from(row.querySelectorAll('input'));
+              return inputs.length ? String(inputs[inputs.length - 1].value || '').trim() : '';
+            }).filter(Boolean);
+            return {runtime_codes: runtimeCodes, dom_codes: domCodes};
+            """
+        )
+        return result if isinstance(result, dict) else {"runtime_codes": [], "dom_codes": []}
+
+    def _assert_replacement_group_ready(self, contexts: list[dict[str, Any]]) -> None:
+        deadline = time.time() + max(
+            1.0,
+            float(self.browser_config.get("replacement_state_wait_seconds", 5) or 5),
+        )
+        state: dict[str, Any] = {}
+        failures: list[str] = []
+        while True:
+            state = self._read_sku_code_state()
+            failures = self._replacement_state_failures(contexts, state)
+            if not failures or time.time() >= deadline:
+                break
+            time.sleep(0.2)
+        for context in contexts:
+            context["replacement_state_before_submit"] = state
+        if failures:
+            message = "Replacement state is not ready before submit: " + "; ".join(failures)
+            for context in contexts:
+                self._annotate_page_error_context(
+                    context,
+                    stage_name="pre_replace_submit",
+                    error_text=message,
+                    error_category="replacement_verification_failed",
+                )
+            raise OfflineTaskStateError(message)
+
+    @staticmethod
+    def _replacement_state_failures(
+        contexts: list[dict[str, Any]],
+        state: dict[str, Any],
+    ) -> list[str]:
+        codes = {
+            str(item).strip().casefold()
+            for item in [*(state.get("runtime_codes") or []), *(state.get("dom_codes") or [])]
+            if str(item).strip()
+        }
+        replacement_targets = {
+            str(context.get("replacement_sku", "")).strip().casefold()
+            for context in contexts
+        }
+        failures: list[str] = []
+        for context in contexts:
+            old_sku = str(context.get("online_sku", "")).strip()
+            new_sku = str(context.get("replacement_sku", "")).strip()
+            if new_sku.casefold() not in codes:
+                failures.append(f"replacement missing: {new_sku}")
+            if old_sku.casefold() not in replacement_targets and old_sku.casefold() in codes:
+                failures.append(f"source still present: {old_sku}")
+        return failures
 
     def _click_submit_element(self, submit_element: Any, context: dict[str, Any]) -> None:
         if not self.driver:
@@ -3873,6 +4375,74 @@ class SkuOfflineBrowser(BrowserRPA):
                 raise PublishSubmitError(
                     "Grouped SKU submit did not persist offline state for: " + ", ".join(unresolved)
                 )
+            self._pause(refresh_interval_seconds)
+
+    def _verify_group_persisted_replacement(
+        self,
+        selectors: dict[str, Any],
+        verification_config: dict[str, Any],
+        contexts: list[dict[str, Any]],
+    ) -> None:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        if not contexts:
+            return
+        if not verification_config or not verification_config.get("enabled", True):
+            for context in contexts:
+                context["post_submit_verified"] = "skipped"
+            return
+        if self._is_review_submission_success(verification_config, contexts[0]):
+            for context in contexts:
+                context["post_submit_verified"] = "review_submitted"
+                context["execution_result"] = "review_submitted"
+            return
+
+        product_ids = {str(context.get("product_id", "")).strip() for context in contexts}
+        product_ids.discard("")
+        if len(product_ids) != 1:
+            raise PublishSubmitError("Grouped replacement verification requires one product_id.")
+        product_id = next(iter(product_ids))
+        verify_url = f"https://offer-new.1688.com/popular/publish.htm?id={product_id}&operator=edit"
+        initial_wait_seconds = float(verification_config.get("initial_wait_seconds", 8))
+        timeout_seconds = float(verification_config.get("timeout_seconds", 150))
+        refresh_interval_seconds = max(1.0, float(verification_config.get("refresh_interval_seconds", 15)))
+        deadline = time.time() + max(timeout_seconds, 0)
+        attempts: list[dict[str, Any]] = []
+
+        self._pause(initial_wait_seconds)
+        while True:
+            navigation_timed_out = self._navigate_with_timeout_recovery(verify_url)
+            if navigation_timed_out:
+                contexts[0]["verification_navigation_recovered_from_timeout"] = "true"
+            self._pause(5.0)
+            self._assert_not_redirected_to_login(contexts[0])
+            self._assert_no_risk_control_block(contexts[0])
+            self._activate_sales_info_section(selectors, contexts[0])
+            state = self._read_sku_code_state()
+            failures = self._replacement_state_failures(contexts, state)
+            attempts.append(
+                {
+                    "checked_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "state": state,
+                    "failures": failures,
+                }
+            )
+            if not failures:
+                for context in contexts:
+                    context["post_submit_verified"] = "true"
+                    context["post_submit_replacement_checks"] = attempts
+                return
+            if time.time() >= deadline:
+                message = "Replacement did not persist after submit: " + "; ".join(failures)
+                for context in contexts:
+                    context["post_submit_replacement_checks"] = attempts
+                    self._annotate_page_error_context(
+                        context,
+                        stage_name="post_replace_verification",
+                        error_text=message,
+                        error_category="replacement_verification_failed",
+                    )
+                raise PublishSubmitError(message)
             self._pause(refresh_interval_seconds)
 
     def _read_current_sku_switch_state(

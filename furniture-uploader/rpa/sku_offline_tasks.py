@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -9,6 +10,7 @@ from typing import Any
 
 DEFAULT_SHEET_NAME = "停产下架通知-链接维度"
 WATCH_FILE_SUFFIXES = {".csv", ".xlsx", ".xls"}
+SKU_CODE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+/#:-]*$")
 
 
 @dataclass(frozen=True)
@@ -162,7 +164,17 @@ def load_offline_tasks(
     else:
         raise ValueError(f"Unsupported offline template format: {suffix}")
 
-    column_map = dict(input_config.get("columns", {}))
+    configured_columns = dict(input_config.get("columns", {}))
+    column_aliases = dict(input_config.get("column_aliases", {}))
+    available_columns = {str(column).strip() for column in dataframe.columns}
+    column_map = {
+        alias: resolve_input_column(
+            configured_columns.get(alias, ""),
+            column_aliases.get(alias, []),
+            available_columns,
+        )
+        for alias in configured_columns
+    }
     required_aliases = [
         "store_name",
         "platform",
@@ -171,9 +183,9 @@ def load_offline_tasks(
         "handling",
     ]
     missing_columns = [
-        column_map[alias]
+        str(configured_columns.get(alias, "")).strip()
         for alias in required_aliases
-        if str(column_map.get(alias, "")).strip() not in {str(column).strip() for column in dataframe.columns}
+        if not str(column_map.get(alias, "")).strip()
     ]
     if missing_columns:
         raise ValueError(f"Missing mandatory offline columns: {', '.join(sorted(missing_columns))}")
@@ -200,6 +212,97 @@ def load_offline_tasks(
             )
         )
     return tasks
+
+
+def resolve_input_column(
+    primary: Any,
+    aliases: Any,
+    available_columns: set[str],
+) -> str:
+    candidates = [str(primary or "").strip()]
+    if isinstance(aliases, str):
+        candidates.extend(item.strip() for item in aliases.split("|") if item.strip())
+    elif isinstance(aliases, list):
+        candidates.extend(str(item).strip() for item in aliases if str(item).strip())
+    for candidate in candidates:
+        if candidate and candidate in available_columns:
+            return candidate
+    return ""
+
+
+def validate_tasks_for_operation(tasks: list[OfflineTask], operation: str) -> None:
+    normalized_operation = normalize_cell(operation).lower() or "offline"
+    if normalized_operation == "offline":
+        return
+    if normalized_operation != "replace":
+        raise ValueError(f"Unsupported 1688 SKU operation: {operation!r}.")
+
+    errors: list[str] = []
+    source_mappings: dict[tuple[str, str, str], str] = {}
+    target_mappings: dict[tuple[str, str, str], str] = {}
+    product_sources: dict[tuple[str, str], set[str]] = {}
+    valid_mappings: list[tuple[str, str, str, str, int]] = []
+    for task in tasks:
+        store = normalize_cell(task.store_name)
+        product_id = normalize_cell(task.product_id)
+        old_sku = normalize_cell(task.online_sku)
+        new_sku = normalize_cell(task.replacement_sku)
+        row_label = f"row {task.source_row_number}"
+
+        missing = [
+            label
+            for label, value in (
+                ("店铺名称", store),
+                ("商品ID", product_id),
+                ("线上商品编码", old_sku),
+                ("可替换商品编码（新）", new_sku),
+            )
+            if not value
+        ]
+        if missing:
+            errors.append(f"{row_label}: missing {', '.join(missing)}")
+            continue
+        if not SKU_CODE_PATTERN.fullmatch(old_sku):
+            errors.append(f"{row_label}: invalid source SKU format ({old_sku})")
+            continue
+        if not SKU_CODE_PATTERN.fullmatch(new_sku):
+            errors.append(f"{row_label}: invalid replacement SKU format ({new_sku})")
+            continue
+        if old_sku.casefold() == new_sku.casefold():
+            errors.append(f"{row_label}: old and new SKU are identical ({old_sku})")
+            continue
+
+        source_key = (store.casefold(), product_id.casefold(), old_sku.casefold())
+        product_key = (store.casefold(), product_id.casefold())
+        product_sources.setdefault(product_key, set()).add(old_sku.casefold())
+        valid_mappings.append((store, product_id, old_sku, new_sku, task.source_row_number))
+        previous_target = source_mappings.get(source_key)
+        if previous_target and previous_target.casefold() != new_sku.casefold():
+            errors.append(
+                f"{row_label}: source SKU {old_sku} maps to both {previous_target} and {new_sku}"
+            )
+        else:
+            source_mappings[source_key] = new_sku
+
+        target_key = (store.casefold(), product_id.casefold(), new_sku.casefold())
+        previous_source = target_mappings.get(target_key)
+        if previous_source and previous_source.casefold() != old_sku.casefold():
+            errors.append(
+                f"{row_label}: replacement SKU {new_sku} is targeted by both {previous_source} and {old_sku}"
+            )
+        else:
+            target_mappings[target_key] = old_sku
+
+    for store, product_id, old_sku, new_sku, row_number in valid_mappings:
+        product_key = (store.casefold(), product_id.casefold())
+        if new_sku.casefold() in product_sources.get(product_key, set()):
+            errors.append(
+                f"row {row_number}: replacement SKU {new_sku} is also a source SKU in the same product; "
+                "chained or swap mappings are not idempotent"
+            )
+
+    if errors:
+        raise ValueError("Invalid 1688 SKU replacement tasks: " + "; ".join(errors[:20]))
 
 
 def filter_offline_tasks(
@@ -284,6 +387,7 @@ def build_preview_payload(
                 "store_name": task.store_name,
                 "product_id": task.product_id,
                 "online_sku": task.online_sku,
+                "replacement_sku": task.replacement_sku,
                 "handling": task.handling,
                 "source_file": task.source_file,
                 "source_row_number": task.source_row_number,
@@ -295,6 +399,7 @@ def build_preview_payload(
                 "store_name": task.store_name,
                 "product_id": task.product_id,
                 "online_sku": task.online_sku,
+                "replacement_sku": task.replacement_sku,
                 "source_file": task.source_file,
                 "source_row_number": task.source_row_number,
             }

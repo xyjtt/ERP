@@ -78,6 +78,14 @@
 - 文件：[rpa/sku_offline_main.py](D:/script_files/ERP/furniture-uploader/rpa/sku_offline_main.py)
 - 作用：处理 1688 下架任务的预览、执行、扫描、重试和通知
 
+### SKU 替换与聚水潭同步
+
+- 配置：[config/systems/1688_sku_replace.json](D:/script_files/ERP/furniture-uploader/config/systems/1688_sku_replace.json)
+- 流水线：[scripts/run_1688_sku_replace_pipeline.py](D:/script_files/ERP/furniture-uploader/scripts/run_1688_sku_replace_pipeline.py)
+- 样本：[templates/1688_sku_replace_sample.csv](D:/script_files/ERP/furniture-uploader/templates/1688_sku_replace_sample.csv)
+- 作用：按 `线上商品编码 -> 可替换商品编码（新）` 修改 1688 SKU 单品货号，并在成功后触发聚水潭“按链接同步”。
+- 边界：默认 preview；没有业务批准的真实旧新 SKU 映射时，不执行线上发布或聚水潭立即下载。
+
 ## 4. 项目经验
 
 ### 经验 1：不要把“选择器能填”当成“流程可上线”

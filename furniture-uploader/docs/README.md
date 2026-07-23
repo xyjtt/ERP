@@ -53,6 +53,15 @@
 - [D:\script_files\ERP\furniture-uploader\rpa\sku_offline_main.py](D:/script_files/ERP/furniture-uploader/rpa/sku_offline_main.py)
   - 1688 SKU 下架执行入口
 
+### 6. 1688 SKU 替换相关入口
+
+- [1688_SKU_REPLACE_RUNBOOK.md](D:/script_files/ERP/furniture-uploader/docs/1688_SKU_REPLACE_RUNBOOK.md)
+  - `全渠道替换` 的取数、1688 改码、聚水潭按链接同步和受控验收说明
+- [config/systems/1688_sku_replace.json](D:/script_files/ERP/furniture-uploader/config/systems/1688_sku_replace.json)
+  - 替换执行配置；继承下架系统的店铺/Profile/安全规则
+- [scripts/run_1688_sku_replace_pipeline.py](D:/script_files/ERP/furniture-uploader/scripts/run_1688_sku_replace_pipeline.py)
+  - 1688 SKU 替换 + 聚水潭手动同步商品完整流水线
+
 ## 建议阅读顺序
 
 1. `PROJECT_MEMORY.md`

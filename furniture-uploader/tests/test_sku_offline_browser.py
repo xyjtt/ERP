@@ -26,6 +26,7 @@ from exceptions import (
 )
 from sku_offline_browser import SkuOfflineBrowser
 from sku_offline_tasks import OfflineTask
+from config_loader import load_json_with_local_override
 
 
 class FakePreSubmitBrowser(SkuOfflineBrowser):
@@ -205,6 +206,84 @@ class SkuOfflineBrowserTests(unittest.TestCase):
         self.assertEqual(query["tab"], ["all"])
         self.assertEqual(query["q"], [""])
         self.assertEqual(query["filterOfferId"], [""])
+
+    def test_replace_config_inherits_unfiltered_all_tab(self) -> None:
+        config = load_json_with_local_override(
+            PROJECT_ROOT / "config" / "systems" / "1688_sku_replace.json"
+        )
+        query = parse_qs(urlparse(config["management_url"]).query, keep_blank_values=True)
+
+        self.assertEqual(config["execution"]["operation"], "replace")
+        self.assertEqual(config["input"]["filters"]["handling"], "全渠道替换")
+        self.assertEqual(query["tab"], ["all"])
+
+    def test_grouped_replacement_submits_product_once(self) -> None:
+        tasks = [
+            OfflineTask(
+                source_file="replace.csv",
+                source_sheet="CSV",
+                source_row_number=index + 2,
+                store_name="STORE-A",
+                platform="Alibaba",
+                product_id="1001",
+                online_sku=f"OLD-{index}",
+                handling="全渠道替换",
+                replacement_sku=f"NEW-{index}",
+                change_image="",
+                platform_store_item_code=f"CODE-{index}",
+                raw={},
+            )
+            for index in range(2)
+        ]
+        browser = SkuOfflineBrowser({}, PROJECT_ROOT)
+        browser.driver = FakeSuccessDriver()
+        browser.driver.current_window_handle = "main"  # type: ignore[attr-defined]
+        calls: list[str] = []
+        browser._open_task_edit_page = lambda *args: calls.append("open")  # type: ignore[method-assign]
+        browser._assert_not_redirected_to_login = lambda *args: None  # type: ignore[method-assign]
+        browser._assert_no_risk_control_block = lambda *args: None  # type: ignore[method-assign]
+        browser._assert_edit_page_identity = lambda *args: None  # type: ignore[method-assign]
+        browser._replace_sku_codes_in_runtime_state = lambda contexts: {  # type: ignore[method-assign]
+            "supported": True,
+            "results": [
+                {"status": "changed", "verified": True},
+                {"status": "changed", "verified": True},
+            ],
+        }
+        browser._assert_replacement_group_ready = lambda contexts: calls.append(f"ready:{len(contexts)}")  # type: ignore[method-assign]
+        browser._submit_changes = lambda *args, **kwargs: calls.append("submit")  # type: ignore[method-assign]
+        browser._verify_group_persisted_replacement = lambda selectors, config, contexts: calls.append(f"verify:{len(contexts)}")  # type: ignore[method-assign]
+        browser._record_page_metadata = lambda context: None  # type: ignore[method-assign]
+        browser._restore_management_window = lambda handle: None  # type: ignore[method-assign]
+
+        outcomes = browser.execute_replace_group({}, tasks)
+
+        self.assertEqual([item["status"] for item in outcomes], ["success", "success"])
+        self.assertEqual(calls, ["open", "ready:2", "submit", "verify:2"])
+
+    def test_replacement_idempotency_reports_already_replaced(self) -> None:
+        task = OfflineTask(
+            source_file="replace.csv", source_sheet="CSV", source_row_number=2,
+            store_name="STORE-A", platform="Alibaba", product_id="1001",
+            online_sku="OLD", handling="全渠道替换", replacement_sku="NEW",
+            change_image="", platform_store_item_code="CODE", raw={},
+        )
+        browser = SkuOfflineBrowser({}, PROJECT_ROOT)
+        browser.driver = FakeSuccessDriver()
+        browser.driver.current_window_handle = "main"  # type: ignore[attr-defined]
+        browser._open_task_edit_page = lambda *args: None  # type: ignore[method-assign]
+        browser._assert_not_redirected_to_login = lambda *args: None  # type: ignore[method-assign]
+        browser._assert_no_risk_control_block = lambda *args: None  # type: ignore[method-assign]
+        browser._assert_edit_page_identity = lambda *args: None  # type: ignore[method-assign]
+        browser._replace_sku_codes_in_runtime_state = lambda contexts: {  # type: ignore[method-assign]
+            "supported": True, "results": [{"status": "already_replaced"}],
+        }
+        browser._record_page_metadata = lambda context: None  # type: ignore[method-assign]
+        browser._restore_management_window = lambda handle: None  # type: ignore[method-assign]
+
+        outcome = browser.execute_replace_group({}, [task])[0]
+
+        self.assertEqual(outcome["status"], "already_replaced")
 
     def test_open_management_page_reuses_unfiltered_all_tab(self) -> None:
         browser = SkuOfflineBrowser({}, PROJECT_ROOT)

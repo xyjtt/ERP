@@ -20,11 +20,17 @@
       "platform_store_item_code": "平台店铺商品编码",
       "online_sku": "线上商品编码",
       "handling": "处理说明",
-      "replacement_sku": "可替换商品编码",
+      "replacement_sku": "可替换商品编码（新）",
       "change_image": "是否换图"
+    },
+    "column_aliases": {
+      "replacement_sku": [
+        "可替换商品编码"
+      ]
     }
   },
   "execution": {
+    "operation": "offline",
     "max_retry": 1,
     "allow_multi_store_batch": false,
     "require_store_account_mapping": true,

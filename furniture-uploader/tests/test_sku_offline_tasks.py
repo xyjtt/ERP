@@ -21,6 +21,7 @@ from sku_offline_tasks import (
     group_tasks_by_product,
     group_tasks_by_store,
     load_offline_tasks,
+    validate_tasks_for_operation,
 )
 
 
@@ -39,10 +40,70 @@ class OfflineTaskTests(unittest.TestCase):
                 "platform_store_item_code": "平台店铺商品编码",
                 "online_sku": "线上商品编码",
                 "handling": "处理说明",
-                "replacement_sku": "可替换商品编码",
+                "replacement_sku": "可替换商品编码（新）",
                 "change_image": "是否换图"
-            }
+            },
+            "column_aliases": {"replacement_sku": ["可替换商品编码"]},
         }
+
+    def test_legacy_replacement_header_is_accepted_as_alias(self) -> None:
+        dataframe = pd.DataFrame([{
+            "店铺名称": "阿里巴巴-常州工莱家具",
+            "平台": "Alibaba",
+            "商品ID": "1001",
+            "线上商品编码": "OLD",
+            "处理说明": "全渠道替换",
+            "可替换商品编码": "NEW",
+        }])
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "replace.csv"
+            dataframe.to_csv(path, index=False)
+            task = load_offline_tasks(path, self.build_input_config())[0]
+
+        self.assertEqual(task.replacement_sku, "NEW")
+
+    def test_replacement_validation_rejects_duplicate_target_sku(self) -> None:
+        dataframe = pd.DataFrame([
+            {"店铺名称": "S", "平台": "Alibaba", "商品ID": "P", "线上商品编码": "OLD-1", "处理说明": "全渠道替换", "可替换商品编码（新）": "NEW"},
+            {"店铺名称": "S", "平台": "Alibaba", "商品ID": "P", "线上商品编码": "OLD-2", "处理说明": "全渠道替换", "可替换商品编码（新）": "NEW"},
+        ])
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "replace.csv"
+            dataframe.to_csv(path, index=False)
+            tasks = load_offline_tasks(path, self.build_input_config())
+
+        with self.assertRaisesRegex(ValueError, "targeted by both"):
+            validate_tasks_for_operation(tasks, "replace")
+
+    def test_replacement_validation_rejects_chained_mapping(self) -> None:
+        dataframe = pd.DataFrame([
+            {"店铺名称": "S", "平台": "Alibaba", "商品ID": "P", "线上商品编码": "A", "处理说明": "全渠道替换", "可替换商品编码（新）": "B"},
+            {"店铺名称": "S", "平台": "Alibaba", "商品ID": "P", "线上商品编码": "B", "处理说明": "全渠道替换", "可替换商品编码（新）": "C"},
+        ])
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "replace.csv"
+            dataframe.to_csv(path, index=False)
+            tasks = load_offline_tasks(path, self.build_input_config())
+
+        with self.assertRaisesRegex(ValueError, "not idempotent"):
+            validate_tasks_for_operation(tasks, "replace")
+
+    def test_replacement_validation_rejects_non_sku_placeholder(self) -> None:
+        dataframe = pd.DataFrame([{
+            "店铺名称": "S",
+            "平台": "Alibaba",
+            "商品ID": "P",
+            "线上商品编码": "OLD-1",
+            "处理说明": "全渠道替换",
+            "可替换商品编码（新）": "运营自行组合替换",
+        }])
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "replace.csv"
+            dataframe.to_csv(path, index=False)
+            tasks = load_offline_tasks(path, self.build_input_config())
+
+        with self.assertRaisesRegex(ValueError, "invalid replacement SKU format"):
+            validate_tasks_for_operation(tasks, "replace")
 
     def test_load_offline_tasks_from_excel_sheet(self) -> None:
         dataframe = pd.DataFrame(

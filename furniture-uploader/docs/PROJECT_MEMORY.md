@@ -1,5 +1,18 @@
 # Project Memory
 
+## 2026-07-23 Managed Update (1688 SKU Replacement + Jushuitan Link Sync)
+
+- 新增 `1688_sku_replace` 执行系统，筛选 `平台=Alibaba / 处理说明=全渠道替换`。
+- 数据字段采用 `线上商品编码 -> 可替换商品编码（新）`，兼容旧表头 `可替换商品编码`；空值、非 SKU 值、旧新相同、映射冲突和目标货号碰撞会进入 rejected 报告，合法行继续生成 preview。
+- 下架和替换均强制从商品管理 `全部` Tab 搜索，URL 固定归一化为 `tab=all&q=&filterOfferId=`。
+- 同一店铺、同一商品 ID 的多个 SKU 在一个编辑页内完成，替换只提交一次，并重新打开编辑页复核新货号。
+- 替换成功/已替换后生成聚水潭 `sync_by_link` 任务：进入“手动同步商品 -> 按链接同步”，按店铺分批填写去重商品 ID 并点击“立即下载”。
+- 新入口：`scripts/run_1688_sku_replace_pipeline.py`；默认 preview，真实执行必须显式 `--mode execute --yes`，并受共享锁和 Worker 静止检查保护。
+- 正式审计使用独立表 `JSReportReplica.app.ali1688_sku_replace_run/item`，不与下架审计混用；2026-07-23 DDL 已提交，契约检查 `missing_tables=[] / ready=true`。
+- 本地验证：Python `286 passed, 5 subtests`；聚水潭 TypeScript `check`、`18/18`、`build` 通过；两条样本端到端 preview 通过。
+- `2026-07-23` 正式源只读 preview：568 条加载，526 条格式合法，26 条重复，500 条可执行，42 条因 `运营自行组合替换` 被拒绝；尚未执行真实 1688 替换或聚水潭立即下载。
+- 尚未完成 live 验收：未获得业务批准的真实旧 SKU -> 新 SKU canary 映射，因此没有点击 1688 发布或聚水潭“立即下载”。
+
 ## 2026-03-31 Managed Update (T-005 Draft System-Error Isolation Round-2)
 
 - 主线仍为 `T-005`（仅 `draft`），`T-001` 冻结未动。

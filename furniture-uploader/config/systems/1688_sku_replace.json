@@ -1,0 +1,33 @@
+{
+  "extends": "1688_sku_offline.json",
+  "system": "1688_sku_replace",
+  "display_name": "1688 SKU 替换",
+  "input": {
+    "filters": {
+      "platform": "Alibaba",
+      "handling": "全渠道替换"
+    }
+  },
+  "execution": {
+    "operation": "replace",
+    "non_retryable_error_categories": [
+      "task_not_found",
+      "sku_not_found",
+      "product_unavailable",
+      "replacement_sku_conflict",
+      "replacement_verification_failed",
+      "campaign_restriction",
+      "delivery_service_backfill_failed",
+      "submit_blocked_before_request"
+    ]
+  },
+  "reporting": {
+    "run_report_dir": "logs/sku_replace/run_reports"
+  },
+  "scan": {
+    "watch_dir": "D:/script_files/1688/shared/sku-replace",
+    "processed_dir": "D:/script_files/1688/archive/sku-replace/processed",
+    "failed_dir": "D:/script_files/1688/archive/sku-replace/failed",
+    "registry_path": "D:/script_files/1688/archive/sku-replace/processed/registry.jsonl"
+  }
+}

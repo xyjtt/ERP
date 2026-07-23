@@ -6,8 +6,30 @@ from typing import Any
 
 
 def load_json_with_local_override(path: str | Path) -> dict[str, Any]:
-    base_path = Path(path)
+    return _load_json_with_local_override(Path(path), stack=())
+
+
+def _load_json_with_local_override(
+    base_path: Path,
+    *,
+    stack: tuple[Path, ...],
+) -> dict[str, Any]:
+    resolved_path = base_path.resolve()
+    if resolved_path in stack:
+        chain = " -> ".join(str(item) for item in (*stack, resolved_path))
+        raise ValueError(f"Circular JSON config inheritance detected: {chain}")
+
     payload = load_json_file(base_path)
+    extends = str(payload.pop("extends", "") or "").strip()
+    if extends:
+        parent_path = Path(extends)
+        if not parent_path.is_absolute():
+            parent_path = base_path.parent / parent_path
+        parent = _load_json_with_local_override(
+            parent_path,
+            stack=(*stack, resolved_path),
+        )
+        payload = deep_merge(parent, payload)
 
     local_path = base_path.with_suffix(f".local{base_path.suffix}")
     if local_path.exists():

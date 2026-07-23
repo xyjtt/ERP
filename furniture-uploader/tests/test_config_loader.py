@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sys
+import json
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -10,10 +12,26 @@ RPA_ROOT = PROJECT_ROOT / "rpa"
 if str(RPA_ROOT) not in sys.path:
     sys.path.insert(0, str(RPA_ROOT))
 
-from config_loader import deep_merge
+from config_loader import deep_merge, load_json_with_local_override
 
 
 class ConfigLoaderTests(unittest.TestCase):
+    def test_config_inheritance_keeps_parent_local_override(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "base.json").write_text(json.dumps({"value": 1, "nested": {"base": True}}), encoding="utf-8")
+            (root / "base.local.json").write_text(json.dumps({"profile": "local"}), encoding="utf-8")
+            (root / "child.json").write_text(
+                json.dumps({"extends": "base.json", "value": 2, "nested": {"child": True}}),
+                encoding="utf-8",
+            )
+
+            loaded = load_json_with_local_override(root / "child.json")
+
+        self.assertEqual(loaded["value"], 2)
+        self.assertEqual(loaded["profile"], "local")
+        self.assertEqual(loaded["nested"], {"base": True, "child": True})
+
     def test_named_step_lists_merge_by_name(self) -> None:
         base = {
             "publish": {
