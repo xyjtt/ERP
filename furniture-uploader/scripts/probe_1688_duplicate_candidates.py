@@ -34,6 +34,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--shared-runtime-root", required=True)
     parser.add_argument("--crawler-worker-task-name", default="YYDD-1688-Crawler-Worker")
     parser.add_argument("--max-products", type=int, default=10)
+    parser.add_argument("--skip-products", type=int, default=0)
     parser.add_argument("--lock-wait-seconds", type=float, default=0)
     return parser
 
@@ -65,6 +66,20 @@ def _find_target_duplicate_sku_codes(
     }
 
 
+def _emit_probe_event(event: str, **details: Any) -> None:
+    print(
+        json.dumps(
+            {
+                "probe_event": event,
+                "emitted_at": datetime.now().isoformat(timespec="seconds"),
+                **details,
+            },
+            ensure_ascii=False,
+        ),
+        flush=True,
+    )
+
+
 def probe_candidates(args: argparse.Namespace) -> dict[str, Any]:
     runtime_root = Path(args.shared_runtime_root).resolve()
     if str(runtime_root) not in sys.path:
@@ -94,9 +109,12 @@ def probe_candidates(args: argparse.Namespace) -> dict[str, Any]:
         selected_tasks, _ = filter_offline_tasks(
             loaded_tasks, dict(input_config.get("filters", {}))
         )
-        candidate_groups = _select_candidate_groups(
-            selected_tasks, str(args.store), int(args.max_products)
+        ordered_groups = _select_candidate_groups(
+            selected_tasks, str(args.store), len(selected_tasks)
         )
+        candidate_groups = ordered_groups[
+            int(args.skip_products) : int(args.skip_products) + int(args.max_products)
+        ]
         if not candidate_groups:
             raise ValueError(f"No candidate products found for store {args.store!r}.")
 
@@ -120,10 +138,17 @@ def probe_candidates(args: argparse.Namespace) -> dict[str, Any]:
         results: list[dict[str, Any]] = []
         matched_candidate: dict[str, Any] | None = None
         try:
-            for group in candidate_groups:
+            for product_index, group in enumerate(candidate_groups, start=1):
                 task = group[0]
                 context = task.to_context()
                 source_skus = sorted({item.online_sku.strip() for item in group if item.online_sku.strip()})
+                _emit_probe_event(
+                    "product_started",
+                    product_index=product_index,
+                    product_count=len(candidate_groups),
+                    product_id=task.product_id,
+                    source_sku_count=len(source_skus),
+                )
                 main_window = browser.driver.current_window_handle if browser.driver else ""
                 result: dict[str, Any] = {
                     "product_id": task.product_id,
@@ -173,6 +198,15 @@ def probe_candidates(args: argparse.Namespace) -> dict[str, Any]:
                     if main_window:
                         browser._restore_management_window(main_window)
                 results.append(result)
+                _emit_probe_event(
+                    "product_finished",
+                    product_index=product_index,
+                    product_count=len(candidate_groups),
+                    product_id=task.product_id,
+                    status=result.get("status", "error"),
+                    target_duplicate_sku_codes=result.get("target_duplicate_sku_codes", {}),
+                    error_type=result.get("error_type", ""),
+                )
                 if matched_candidate:
                     break
         finally:
@@ -184,6 +218,7 @@ def probe_candidates(args: argparse.Namespace) -> dict[str, Any]:
             "store_name": str(args.store),
             "input_file": str(Path(args.file).resolve()),
             "candidate_product_count": len(candidate_groups),
+            "skip_products": int(args.skip_products),
             "scanned_product_count": len(results),
             "matched_candidate": matched_candidate,
             "products": results,
@@ -197,6 +232,8 @@ def main() -> int:
     args = build_argument_parser().parse_args()
     if args.max_products <= 0:
         raise ValueError("--max-products must be positive")
+    if args.skip_products < 0:
+        raise ValueError("--skip-products must be non-negative")
     if args.lock_wait_seconds < 0:
         raise ValueError("--lock-wait-seconds must be non-negative")
     print(json.dumps(probe_candidates(args), ensure_ascii=False, indent=2))

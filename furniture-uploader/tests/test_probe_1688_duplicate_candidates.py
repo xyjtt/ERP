@@ -70,6 +70,7 @@ class Probe1688DuplicateCandidatesTests(unittest.TestCase):
         )
 
         self.assertEqual(args.max_products, 10)
+        self.assertEqual(args.skip_products, 0)
         self.assertEqual(args.lock_wait_seconds, 0)
 
 
