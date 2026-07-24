@@ -3,7 +3,12 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
+from io import BytesIO
 from pathlib import Path
+from urllib.error import HTTPError
+from unittest.mock import MagicMock, patch
+
+from PIL import Image
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -13,7 +18,13 @@ if str(RPA_ROOT) not in sys.path:
 
 from image_asset_api import AIImageAssetClient, ImageAssetApiError, ImageAssetBundle
 from main import load_runtime_products, resolve_input_mode
-from variant_pipeline import build_products_from_variants, load_release_variants
+from variant_pipeline import (
+    _download_public_urls,
+    _prepare_1688_square_main_images,
+    _prepare_download_url,
+    build_products_from_variants,
+    load_release_variants,
+)
 
 
 class FakeImageClient:
@@ -36,7 +47,7 @@ class FakeImageClient:
         saved: list[str] = []
         for index, _url in enumerate(urls, start=1):
             target = target_dir / f"{prefix}_{index:02d}.jpg"
-            target.write_bytes(b"fake-image")
+            Image.new("RGB", (4, 6), (200, 20, 20)).save(target, format="JPEG")
             saved.append(str(target))
         return saved
 
@@ -50,6 +61,73 @@ class FailingImageClient:
 
 
 class VariantPipelineTests(unittest.TestCase):
+    def test_prepare_download_url_encodes_unicode_path_without_double_encoding(self) -> None:
+        raw_url = "https://s3.example.com/由壹点AI/public-display/图片 01.webp?名称=新品%20图"
+
+        prepared = _prepare_download_url(raw_url)
+
+        self.assertIn("%E7%94%B1%E5%A3%B9%E7%82%B9AI", prepared)
+        self.assertIn("%E5%9B%BE", prepared)
+        self.assertIn("%20", prepared)
+        self.assertNotIn("由壹点", prepared)
+        self.assertNotIn("%2520", prepared)
+
+    @patch("variant_pipeline.time.sleep")
+    @patch("variant_pipeline.urlopen")
+    def test_public_image_download_retries_transient_502(self, urlopen_mock, sleep_mock) -> None:
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = b"image-bytes"
+        urlopen_mock.side_effect = [
+            HTTPError("https://example.invalid/a.jpg", 502, "bad gateway", None, None),
+            response,
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = _download_public_urls(
+                ["https://example.invalid/a.jpg"],
+                target_dir=Path(temp_dir),
+                prefix="main",
+            )
+            self.assertEqual(Path(paths[0]).read_bytes(), b"image-bytes")
+            self.assertTrue(Path(paths[0] + ".url").is_file())
+        self.assertEqual(urlopen_mock.call_count, 2)
+        sleep_mock.assert_called_once_with(1)
+
+    @patch("variant_pipeline.urlopen")
+    def test_public_image_download_reuses_matching_cached_file(self, urlopen_mock) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir) / "detail_01.jpg"
+            target.write_bytes(b"cached")
+            Path(str(target) + ".url").write_text(
+                "https://example.invalid/a.jpg\n", encoding="utf-8"
+            )
+            paths = _download_public_urls(
+                ["https://example.invalid/a.jpg"],
+                target_dir=Path(temp_dir),
+                prefix="detail",
+            )
+        self.assertEqual(paths, [str(target)])
+        urlopen_mock.assert_not_called()
+
+    @patch("variant_pipeline.urlopen")
+    def test_public_webp_image_is_transcoded_to_jpeg(self, urlopen_mock) -> None:
+        source = BytesIO()
+        Image.new("RGBA", (2, 2), (255, 0, 0, 128)).save(source, format="WEBP")
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = source.getvalue()
+        urlopen_mock.return_value = response
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = _download_public_urls(
+                ["https://example.invalid/a.webp"],
+                target_dir=Path(temp_dir),
+                prefix="main",
+            )
+            target = Path(paths[0])
+            self.assertEqual(target.suffix, ".jpg")
+            with Image.open(target) as image:
+                self.assertEqual(image.format, "JPEG")
+                self.assertEqual(image.mode, "RGB")
+
     def test_load_release_variants_from_json(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "variants.json"
@@ -189,13 +267,32 @@ class VariantPipelineTests(unittest.TestCase):
             )
 
         self.assertEqual(len(products), 1)
-        self.assertTrue(products[0].raw["main_image"].endswith("main_01.jpg"))
+        self.assertTrue(products[0].raw["main_image"].endswith("main_01_square.jpg"))
         self.assertIn("detail_01.jpg", products[0].raw["detail_images"])
         self.assertEqual(products[0].raw["main_image_remote"], "https://example.com/main-1.jpg")
         self.assertEqual(
             products[0].raw["detail_images_remote"],
             "https://example.com/detail-1.jpg|https://example.com/detail-2.jpg",
         )
+
+    def test_prepare_1688_main_image_adds_white_square_canvas_without_cropping(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_path = root / "source.png"
+            Image.new("RGB", (20, 40), (220, 20, 20)).save(source_path, format="PNG")
+
+            prepared = _prepare_1688_square_main_images(
+                [str(source_path)],
+                target_dir=root / "prepared",
+            )
+
+            with Image.open(source_path) as source_image:
+                self.assertEqual(source_image.size, (20, 40))
+            with Image.open(prepared[0]) as prepared_image:
+                self.assertEqual(prepared_image.size, (40, 40))
+                self.assertEqual(prepared_image.mode, "RGB")
+                self.assertGreater(sum(prepared_image.getpixel((0, 20))), 680)
+                self.assertGreater(prepared_image.getpixel((20, 20))[0], 180)
 
     def test_image_client_uses_runtime_config(self) -> None:
         client = AIImageAssetClient.from_runtime_config(

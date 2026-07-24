@@ -38,6 +38,10 @@ class PublishSubmitError(UploaderError):
     pass
 
 
+class ImageAlbumFullError(UploaderError):
+    pass
+
+
 class OfflineTaskError(UploaderError):
     pass
 

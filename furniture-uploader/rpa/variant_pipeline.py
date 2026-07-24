@@ -2,10 +2,16 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import dataclass, field
+from io import BytesIO
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
+
+from PIL import Image, ImageOps
 
 from image_asset_api import AIImageAssetClient, ImageAssetApiError
 from parser import ProductRecord
@@ -275,6 +281,11 @@ def _resolve_variant_images(
         prefix="main",
         image_client=image_client,
     )
+    if variant.platform.strip().lower() == "1688":
+        local_main_images = _prepare_1688_square_main_images(
+            local_main_images,
+            target_dir=asset_dir / "main_square",
+        )
     local_detail_images = _materialize_image_values(
         detail_images,
         asset_dir=asset_dir / "detail",
@@ -282,6 +293,33 @@ def _resolve_variant_images(
         image_client=image_client,
     )
     return local_main_images, local_detail_images, remote_main_images, remote_detail_images
+
+
+def _prepare_1688_square_main_images(
+    image_paths: list[str],
+    *,
+    target_dir: Path,
+) -> list[str]:
+    prepared_paths: list[str] = []
+    target_dir.mkdir(parents=True, exist_ok=True)
+    for index, raw_path in enumerate(image_paths, start=1):
+        source_path = Path(raw_path)
+        if not source_path.is_file():
+            prepared_paths.append(str(source_path))
+            continue
+
+        target_path = target_dir / f"main_{index:02d}_square.jpg"
+        with Image.open(source_path) as source_image:
+            normalized = ImageOps.exif_transpose(source_image).convert("RGBA")
+            side = max(normalized.width, normalized.height)
+            if side <= 0:
+                raise ValueError(f"1688 main image has invalid dimensions: {source_path}")
+            canvas = Image.new("RGBA", (side, side), (255, 255, 255, 255))
+            offset = ((side - normalized.width) // 2, (side - normalized.height) // 2)
+            canvas.alpha_composite(normalized, dest=offset)
+            canvas.convert("RGB").save(target_path, format="JPEG", quality=92, optimize=True)
+        prepared_paths.append(str(target_path))
+    return prepared_paths
 
 
 def _materialize_image_values(
@@ -376,12 +414,64 @@ def _download_public_urls(
         clean_url = str(url).strip()
         if not clean_url:
             continue
-        target_path = target_dir / f"{prefix}_{index:02d}{_guess_extension(clean_url)}"
-        request = Request(clean_url, method="GET")
-        with urlopen(request, timeout=30) as response:
-            target_path.write_bytes(response.read())
+        source_extension = _guess_extension(clean_url)
+        target_extension = ".jpg" if source_extension == ".webp" else source_extension
+        target_path = target_dir / f"{prefix}_{index:02d}{target_extension}"
+        source_path = target_path.with_suffix(target_path.suffix + ".url")
+        if (
+            target_path.is_file()
+            and target_path.stat().st_size > 0
+            and source_path.is_file()
+            and source_path.read_text(encoding="utf-8").strip() == clean_url
+        ):
+            saved_paths.append(str(target_path))
+            continue
+
+        legacy_webp_path = target_dir / f"{prefix}_{index:02d}.webp"
+        legacy_source_path = legacy_webp_path.with_suffix(legacy_webp_path.suffix + ".url")
+        if (
+            source_extension == ".webp"
+            and legacy_webp_path.is_file()
+            and legacy_webp_path.stat().st_size > 0
+            and legacy_source_path.is_file()
+            and legacy_source_path.read_text(encoding="utf-8").strip() == clean_url
+        ):
+            target_path.write_bytes(_webp_to_jpeg(legacy_webp_path.read_bytes()))
+            source_path.write_text(clean_url + "\n", encoding="utf-8")
+            saved_paths.append(str(target_path))
+            continue
+
+        request = Request(_prepare_download_url(clean_url), method="GET")
+        max_attempts = 4
+        for attempt in range(1, max_attempts + 1):
+            try:
+                with urlopen(request, timeout=30) as response:
+                    content = response.read()
+                if not content:
+                    raise URLError("empty image response")
+                if source_extension == ".webp":
+                    content = _webp_to_jpeg(content)
+                target_path.write_bytes(content)
+                source_path.write_text(clean_url + "\n", encoding="utf-8")
+                break
+            except HTTPError as exc:
+                retryable = exc.code in {408, 429, 500, 502, 503, 504}
+                if not retryable or attempt >= max_attempts:
+                    raise
+            except URLError:
+                if attempt >= max_attempts:
+                    raise
+            time.sleep(2 ** (attempt - 1))
         saved_paths.append(str(target_path))
     return saved_paths
+
+
+def _webp_to_jpeg(content: bytes) -> bytes:
+    with Image.open(BytesIO(content)) as image:
+        rgb_image = image.convert("RGB")
+        output = BytesIO()
+        rgb_image.save(output, format="JPEG", quality=92, optimize=True)
+        return output.getvalue()
 
 
 def _guess_extension(url: str) -> str:
@@ -390,3 +480,14 @@ def _guess_extension(url: str) -> str:
         if extension in lowered:
             return extension
     return ".jpg"
+
+
+def _prepare_download_url(url: str) -> str:
+    """Encode Unicode URL components without double-encoding existing escapes."""
+    parts = urlsplit(str(url).strip())
+    if not parts.scheme or not parts.netloc:
+        return str(url).strip()
+    encoded_path = quote(parts.path, safe="/%:@-._~!$&'()*+,;=")
+    encoded_query = quote(parts.query, safe="=&/?%:@-._~!$'()*+,;=")
+    encoded_fragment = quote(parts.fragment, safe="/%?&=%:@-._~!$'()*+,;=")
+    return urlunsplit((parts.scheme, parts.netloc, encoded_path, encoded_query, encoded_fragment))

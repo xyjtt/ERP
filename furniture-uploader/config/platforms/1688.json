@@ -131,6 +131,16 @@
       "full",
       "capture_only"
     ],
+    "draft_buyer_protection_allow_fallback": false,
+    "submit_reapply_nonpersistent_fields": [
+      "send_address",
+      "buyer_protection"
+    ],
+    "submit_blocking_assist_keywords": [
+      "必填",
+      "请填写",
+      "请完善"
+    ],
     "draft_verification": {
       "enabled": true,
       "refresh_after_save": true,
@@ -138,18 +148,23 @@
       "refresh_wait_seconds": 4,
       "require_main_image": true,
       "require_description": true,
+      "main_image_wait_seconds": 30,
+      "main_image_poll_seconds": 0.8,
+      "require_square_main_image": true,
+      "description_image_wait_seconds": 30,
+      "description_image_poll_seconds": 0.8,
+      "require_send_address": true,
+      "strict_send_address_persist": true,
       "require_buyer_protection": true,
+      "strict_buyer_protection_persist": true,
       "buyer_protection_source": "buyer_protection_ship_time",
-      "buyer_protection_default_value": "30天发货",
+      "buyer_protection_default_value": "15天发货",
+      "buyer_protection_expected_code": "swtfh",
       "buyer_protection_step_template": [
         {
           "from": 1,
-          "end": 2,
-          "service_name": "30天发货"
-        },
-        {
-          "from": 3,
-          "service_name": "45天发货"
+          "service_name": "15天发货",
+          "service_code": "swtfh"
         }
       ],
       "require_specs": true,
@@ -161,6 +176,9 @@
         "请填写图文详情",
         "第一个区间的购买数量必须",
         "第1行的发货时间为必填项"
+      ],
+      "stale_assist_keywords_when_description_images_ready": [
+        "请填写图文详情"
       ]
     },
     "draft_request_patch": {
@@ -169,18 +187,17 @@
       "capture_body_chars": 4000,
       "buyer_protection_include_sps_code": false,
       "buyer_protection_source": "buyer_protection_ship_time",
-      "buyer_protection_default_value": "30天发货",
+      "buyer_protection_default_value": "15天发货",
       "buyer_protection_step_template": [
         {
           "from": 1,
-          "end": 2,
-          "service_name": "30天发货"
-        },
-        {
-          "from": 3,
-          "service_name": "45天发货"
+          "service_name": "15天发货",
+          "service_code": "swtfh"
         }
       ],
+      "quotation_type_text": "按产品规格报价",
+      "unit_text": "件",
+      "min_begin_amount": "1",
       "delivery_service_default_ids": [
         3385307
       ],
@@ -197,16 +214,12 @@
       "enabled": true,
       "buyer_protection_include_sps_code": false,
       "buyer_protection_source": "buyer_protection_ship_time",
-      "buyer_protection_default_value": "30天发货",
+      "buyer_protection_default_value": "15天发货",
       "buyer_protection_step_template": [
         {
           "from": 1,
-          "end": 2,
-          "service_name": "30天发货"
-        },
-        {
-          "from": 3,
-          "service_name": "45天发货"
+          "service_name": "15天发货",
+          "service_code": "swtfh"
         }
       ],
       "delivery_service_default_ids": [
@@ -444,7 +457,14 @@
             "rules": [
               {
                 "label": "颜色",
-                "source": "color"
+                "source": "color",
+                "source_candidates": [
+                  "company_sku_names",
+                  "color",
+                  "outer_sku"
+                ],
+                "multi_value": true,
+                "split_pattern": "\\s*(?:\\||,|，|;|；|\\n)+\\s*"
               },
               {
                 "label": "尺寸",
@@ -456,7 +476,14 @@
             "rules": [
               {
                 "label": "颜色",
-                "source": "color"
+                "source": "color",
+                "source_candidates": [
+                  "company_sku_names",
+                  "color",
+                  "outer_sku"
+                ],
+                "multi_value": true,
+                "split_pattern": "\\s*(?:\\||,|，|;|；|\\n)+\\s*"
               },
               {
                 "label": "尺寸",
@@ -470,10 +497,18 @@
         "name": "main_image",
         "action": "picker_upload",
         "source": "main_image",
+        "upload_via_react_bridge": true,
+        "bridge_selector": {
+          "by": "css",
+          "value": "#guid-primaryPicture"
+        },
+        "bridge_slot_index": 0,
+        "ensure_square_first_image": true,
+        "replace_existing_non_square": true,
         "required": true,
         "selector": {
           "by": "xpath",
-          "value": "(//div[@id='guid-primaryPicture']//div[contains(@class,'picture-sort-item')]//div[contains(@class,'module-picture-cover-wrapper')])[1]"
+          "value": "(//div[@id='guid-primaryPicture']//div[contains(@class,'picture-sort-list')]//div[contains(@class,'module-picture-cover-wrapper') and contains(@class,'cover-empty')])[1]"
         },
         "dialog_selector": {
           "by": "css",
@@ -509,10 +544,32 @@
         "action": "tinymce_images",
         "source": "detail_images",
         "multiple": true,
+        "auto_create_album_when_full": true,
+        "require_album_ready": true,
+        "auto_album_name_prefix": "AUTO_DETAIL",
+        "auto_album_access": "private",
+        "auto_album_access_label": "不公开",
+        "auto_album_capacity": 500,
+        "create_album_link_selector": {
+          "by": "css",
+          "value": ".album-create"
+        },
+        "create_album_name_input_selector": {
+          "by": "css",
+          "value": "input.create-field[name='name']"
+        },
+        "create_album_private_selector": {
+          "by": "xpath",
+          "value": "//*[@id='album-manager-pri'] | //label[@for='album-manager-pri'] | //*[self::label or self::span or self::a][contains(normalize-space(.),'不公开')]"
+        },
+        "create_album_submit_selector": {
+          "by": "css",
+          "value": "a.button.insert"
+        },
         "required": false,
         "fallback_picker_selector": {
           "by": "xpath",
-          "value": "(//div[@id='guid-primaryPicture']//div[contains(@class,'picture-sort-item')]//div[contains(@class,'module-picture-cover-wrapper')])[1]"
+          "value": "(//div[@id='guid-primaryPicture']//div[contains(@class,'picture-sort-list')]//div[contains(@class,'module-picture-cover-wrapper') and contains(@class,'cover-empty')])[1]"
         },
         "dialog_selector": {
           "by": "css",
@@ -584,7 +641,7 @@
         "name": "buyer_protection_ship_time",
         "action": "ant_select",
         "source": "buyer_protection_ship_time",
-        "default_value": "30天发货",
+        "default_value": "15天发货",
         "required": false,
         "select_first_option_if_unmatched": true,
         "selector": {
