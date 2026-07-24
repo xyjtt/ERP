@@ -43,6 +43,9 @@ def sample_product() -> dict:
         "w": "40",
         "h": "49",
         "weight": "12.5",
+        "enabled": 1,
+        "stock_disabled": 0,
+        "other_5": "销售",
     }
 
 
@@ -117,6 +120,36 @@ class AutoListingContractTests(unittest.TestCase):
         report = validate_listing_payload(payload, require_duplicate_clear=True)
         self.assertEqual(report["status"], "blocked")
         self.assertIn("live duplicate check must be clear", report["errors"])
+
+    def test_source_lifecycle_is_recorded_and_required(self) -> None:
+        payload = sample_payload()
+        self.assertEqual(payload["source"]["lifecycle_field"], "other_5")
+        self.assertEqual(payload["source"]["lifecycle_status"], "销售")
+
+        payload["source"]["lifecycle_status"] = "停产"
+        report = validate_listing_payload(payload, require_duplicate_clear=True)
+
+        self.assertEqual(report["status"], "blocked")
+        self.assertIn(
+            "source product must have enabled=1, stock_disabled=0 and other_5=销售",
+            report["errors"],
+        )
+
+    def test_payload_builder_rejects_stopped_source_product(self) -> None:
+        product = sample_product()
+        product["other_5"] = "停产"
+
+        with self.assertRaisesRegex(ListingContractError, "other_5 must be 销售"):
+            build_listing_payload(
+                product,
+                shop_name="trial-shop",
+                account_key="trial-account",
+                novelty_type="new_spu",
+                selected_title="selected cabinet title",
+                yidian_candidates=image_candidates(),
+                duplicate_status="clear",
+                require_duplicate_clear=True,
+            )
 
     def test_state_machine_requires_draft_then_approval_then_offer_writeback(self) -> None:
         payload = sample_payload()

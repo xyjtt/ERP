@@ -103,11 +103,11 @@ python scripts\apply_1688_listing_audit_ddl.py `
 
 ## Three-product canary
 
-Use three new cabinet SKUs that have not already been drafted or published. Complete every phase for one SKU before starting the next.
+Use three new cabinet SKUs that have not already been drafted or published. Complete every phase for one SKU before starting the next. Candidate selection must fail closed unless the current `JSDataMiddlePlatform.dbo.jst_sku` row has `enabled=1`, `stock_disabled=0`, and `other_5=销售`; a prior probe or payload cannot override a later lifecycle change.
 
 For each SKU:
 
-1. Produce a unique `listing_task_payload_v1` JSON with duplicate-check evidence, the selected scored title, price, inventory `999`, latest complete Yidian images, company SKU names, and logistics values.
+1. Produce a unique `listing_task_payload_v1` JSON with source eligibility evidence, duplicate-check evidence, the selected scored title, price, inventory `999`, latest complete Yidian images, company SKU names, and logistics values.
 2. Run preflight and require `status=passed`.
 3. Run the two-image capacity probe. If the payload is blocked from a previous capacity failure, record `resume` with fresh matching evidence.
 4. Run draft mode with `--skip-login` against the owner-established session.

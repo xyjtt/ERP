@@ -9,6 +9,11 @@
   "source": {
     "novelty_type": "new_spu",
     "novelty_note": "\u8d27\u53f7\uff1a\u65b0 SPU",
+    "source_table": "JSDataMiddlePlatform.dbo.jst_sku",
+    "enabled": 1,
+    "stock_disabled": 0,
+    "lifecycle_field": "other_5",
+    "lifecycle_status": "\u9500\u552e",
     "company_sku": "SAMPLE-SKU-1",
     "company_spu": "SAMPLE-SPU-1",
     "duplicate_check": {

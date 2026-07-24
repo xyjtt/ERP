@@ -18,6 +18,7 @@ DEFAULT_QUANTITY = 999
 PLATFORM = "1688"
 IMAGE_SOURCE = "yidian"
 IMAGE_CAPACITY_PROBE_MAX_AGE_SECONDS = 30 * 60
+SOURCE_LIFECYCLE_ACTIVE = "销售"
 
 STATE_DRAFT_PENDING = "draft_pending"
 STATE_DRAFT_PENDING_REVIEW = "draft_pending_review"
@@ -176,6 +177,15 @@ def _candidate_value(candidate: dict[str, Any], *keys: str) -> Any:
     return None
 
 
+def _source_flag_matches(value: Any, expected: bool) -> bool:
+    if isinstance(value, bool):
+        return value is expected
+    normalized = str(value if value is not None else "").strip().lower()
+    if expected:
+        return normalized in {"1", "true", "yes"}
+    return normalized in {"0", "false", "no"}
+
+
 def select_latest_complete_yidian_bundle(candidates: Iterable[dict[str, Any]]) -> dict[str, Any]:
     normalized: list[dict[str, Any]] = []
     for candidate in candidates:
@@ -223,6 +233,13 @@ def validate_listing_payload(payload: dict[str, Any], *, require_duplicate_clear
     logistics = payload.get("logistics") or {}
 
     checks.append(_preflight_check("shop", bool(shop.get("shop_name") and shop.get("account_key")), "shop mapping is required"))
+    checks.append(_preflight_check(
+        "source_eligibility",
+        _source_flag_matches(source.get("enabled"), True)
+        and _source_flag_matches(source.get("stock_disabled"), False)
+        and str(source.get("lifecycle_status") or "").strip() == SOURCE_LIFECYCLE_ACTIVE,
+        "source product must have enabled=1, stock_disabled=0 and other_5=销售",
+    ))
     checks.append(_preflight_check("selected_title", bool(str(product.get("selected_title") or "").strip()), "manual title selection is required"))
     checks.append(_preflight_check("category", bool(str(product.get("category") or "").strip()), "category is required"))
     checks.append(_preflight_check("price", bool(pricing.get("publish_price")), "publish price is required"))
@@ -268,6 +285,13 @@ def build_listing_payload(
     if not title:
         raise ListingContractError("selected_title is required")
     price = calculate_publish_price(product.get("sale_price"))
+    lifecycle_status = str(product.get("other_5") or product.get("lifecycle_status") or "").strip()
+    if not _source_flag_matches(product.get("enabled"), True):
+        raise ListingContractError("source product enabled must be 1")
+    if not _source_flag_matches(product.get("stock_disabled"), False):
+        raise ListingContractError("source product stock_disabled must be 0")
+    if lifecycle_status != SOURCE_LIFECYCLE_ACTIVE:
+        raise ListingContractError("source product other_5 must be 销售")
     bundle = select_latest_complete_yidian_bundle(yidian_candidates)
     novelty = str(novelty_type).strip().lower().replace("-", "_")
     sales_specs = parse_sales_specifications(product.get("properties_value"), product_name)
@@ -280,6 +304,10 @@ def build_listing_payload(
             "novelty_type": novelty,
             "novelty_note": novelty_note(novelty),
             "source_table": "JSDataMiddlePlatform.dbo.jst_sku",
+            "enabled": 1,
+            "stock_disabled": 0,
+            "lifecycle_field": "other_5",
+            "lifecycle_status": lifecycle_status,
             "company_sku": sku_code,
             "company_spu": spu_code,
             "duplicate_check": {"status": duplicate_status, **(duplicate_evidence or {})},
