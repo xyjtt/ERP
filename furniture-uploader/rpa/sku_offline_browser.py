@@ -660,7 +660,29 @@ class SkuOfflineBrowser(BrowserRPA):
 
         context["edit_entry_mode"] = "management"
         self._switch_into_management_frame(selectors, context)
-        self._search_product(selectors, context)
+        try:
+            self._search_product(selectors, context)
+        except OfflineTaskStateError:
+            if context.get("page_error_category") != "management_tab_mismatch":
+                raise
+            management_url = self._normalize_management_all_tab_url(
+                str(system_config.get("management_url", "")).strip()
+            )
+            if not management_url or not self.driver:
+                raise
+            context["management_all_tab_retry"] = "forced_reload"
+            for key in ("page_error_category", "page_error_stage", "page_error_text"):
+                context.pop(key, None)
+            self.driver.switch_to.default_content()
+            self._navigate_with_timeout_recovery(management_url)
+            self._pause(self.browser_config.get("page_load_wait_seconds", 2))
+            self._assert_store_context(
+                selectors,
+                context,
+                required=bool(safety_config.get("require_store_context_selector", True)),
+            )
+            self._switch_into_management_frame(selectors, context)
+            self._search_product(selectors, context)
         self._open_edit_page(selectors, context)
 
     def _assert_store_context(

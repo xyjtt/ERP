@@ -667,6 +667,57 @@ class SkuOfflineBrowserTests(unittest.TestCase):
         )
         self.assertEqual(context["edit_entry_mode"], "management")
 
+    def test_task_edit_reloads_all_tab_once_after_stale_management_page(self) -> None:
+        browser = SkuOfflineBrowser({}, PROJECT_ROOT)
+        browser.driver = FakeSuccessDriver()
+        calls: list[str] = []
+        browser.open_management_page = lambda config: calls.append("open_management")  # type: ignore[method-assign]
+        browser._assert_store_context = lambda *args, **kwargs: calls.append("assert_store")  # type: ignore[method-assign]
+        browser._switch_into_management_frame = lambda *args: calls.append("switch_frame")  # type: ignore[method-assign]
+        browser._navigate_with_timeout_recovery = (  # type: ignore[method-assign]
+            lambda url: calls.append("forced_reload") or False
+        )
+        browser._pause = lambda seconds: None  # type: ignore[method-assign]
+        browser._open_edit_page = lambda *args, **kwargs: calls.append("open_edit")  # type: ignore[method-assign]
+        search_attempts = 0
+
+        def fake_search(selectors: dict[str, str], context: dict[str, str]) -> None:
+            nonlocal search_attempts
+            search_attempts += 1
+            calls.append("search_product")
+            if search_attempts == 1:
+                context["page_error_category"] = "management_tab_mismatch"
+                context["page_error_stage"] = "management_tab_selection"
+                context["page_error_text"] = "stale management page"
+                raise OfflineTaskStateError("stale management page")
+
+        browser._search_product = fake_search  # type: ignore[method-assign]
+        context: dict[str, str] = {"product_id": "1022879495664"}
+
+        browser._open_task_edit_page(
+            {"management_url": "https://work.1688.com/?_path_=sellerPro/offer"},
+            {},
+            context,
+            {},
+        )
+
+        self.assertEqual(
+            calls,
+            [
+                "open_management",
+                "assert_store",
+                "switch_frame",
+                "search_product",
+                "forced_reload",
+                "assert_store",
+                "switch_frame",
+                "search_product",
+                "open_edit",
+            ],
+        )
+        self.assertEqual(context["management_all_tab_retry"], "forced_reload")
+        self.assertNotIn("page_error_category", context)
+
     def test_task_edit_falls_back_from_rejected_direct_route(self) -> None:
         browser = SkuOfflineBrowser({}, PROJECT_ROOT)
         calls: list[str] = []
