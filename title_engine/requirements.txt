@@ -1,0 +1,22 @@
+# Title Engine Dependencies
+
+# Core dependencies
+flask>=2.3.0
+pyodbc>=4.0.39
+jieba>=0.42.1
+openpyxl>=3.1.0
+
+# Optional dependencies for enhanced functionality
+requests>=2.31.0
+python-dotenv>=1.0.0
+pymysql>=1.1.1
+paramiko>=3.5.0
+
+# Testing dependencies
+pytest>=7.4.0
+pytest-cov>=4.1.0
+
+# Development dependencies
+black>=23.0.0
+flake8>=6.0.0
+mypy>=1.5.0
