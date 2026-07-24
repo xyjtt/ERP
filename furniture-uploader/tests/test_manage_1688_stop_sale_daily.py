@@ -15,6 +15,7 @@ if str(SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_ROOT))
 
 from manage_1688_stop_sale_daily import (
+    SAFETY_ERROR_CATEGORIES,
     build_batch_retry_input,
     _json_from_output,
     _load_preview_report,
@@ -92,6 +93,7 @@ class Manage1688StopSaleDailyTests(unittest.TestCase):
         self.assertEqual(args.batch_size, 10)
         self.assertEqual(args.batch_max_attempts, 2)
         self.assertEqual(args.batch_retry_backoff_seconds, 60)
+        self.assertIn("management_tab_mismatch", SAFETY_ERROR_CATEGORIES)
 
     def test_store_input_is_split_into_recoverable_batches(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

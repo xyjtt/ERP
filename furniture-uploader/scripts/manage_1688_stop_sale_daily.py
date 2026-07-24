@@ -47,6 +47,7 @@ SAFETY_ERROR_CATEGORIES = {
     "identity_mismatch",
     "account_mapping",
     "browser_window_closed",
+    "management_tab_mismatch",
 }
 
 if str(PROJECT_ROOT / "rpa") not in sys.path:
