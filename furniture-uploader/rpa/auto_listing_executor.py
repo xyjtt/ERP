@@ -217,7 +217,12 @@ def extract_offer_id(context: dict[str, Any]) -> str:
 
 
 def _configure_auto_listing_steps(publish: dict[str, Any]) -> None:
-    steps = list(publish.get("steps") or [])
+    steps = [
+        step
+        for step in list(publish.get("steps") or [])
+        if str(step.get("action") or "").strip() != "manual"
+    ]
+    publish["steps"] = steps
     for step in steps:
         if str(step.get("name") or "").strip() != "detail_images":
             continue

@@ -84,6 +84,7 @@ class AutoListingExecutorTests(unittest.TestCase):
     def test_auto_listing_uploads_detail_images_to_1688_image_bank(self) -> None:
         publish = {
             "steps": [
+                {"name": "open_publish_page", "action": "manual"},
                 {"name": "main_image", "action": "picker_upload", "source": "main_image"},
                 {"name": "detail_images", "action": "tinymce_images", "source": "detail_images"},
             ]
@@ -91,6 +92,10 @@ class AutoListingExecutorTests(unittest.TestCase):
 
         _configure_auto_listing_steps(publish)
 
+        self.assertEqual(
+            [step["name"] for step in publish["steps"]],
+            ["main_image", "detail_images"],
+        )
         detail_step = publish["steps"][1]
         self.assertEqual(detail_step["action"], "tinymce_images")
         self.assertEqual(detail_step["source"], "detail_images")
