@@ -1,14 +1,9 @@
-import pyodbc
 import json
 
-conn = pyodbc.connect(
-    'DRIVER={SQL Server Native Client 10.0};'
-    'SERVER=218.93.191.21;'
-    'DATABASE=JianSun;'
-    'UID=itread;'
-    'PWD=eZR3DJd2;'
-    'Connection Timeout=10'
-)
+from jst_readonly_db import connect_jst_readonly
+
+
+conn = connect_jst_readonly()
 cursor = conn.cursor()
 
 cursor.execute("SELECT TOP 5 shop_id, shop_i_id, shop_sku_id, sku_id, name, properties_value, pic, shop_price, channel FROM jst_skumap WHERE channel LIKE '%1688%'")
