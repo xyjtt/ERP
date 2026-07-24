@@ -27,11 +27,13 @@ class ListingDuplicateProbeTests(unittest.TestCase):
         found = summarize_search_result("XG0143", ["XG014317 商品"], "")
         clear = summarize_search_result("XG0143", [], "暂无数据")
         unknown = summarize_search_result("XG0143", [], "加载完成")
+        stale = summarize_search_result("XG0143", ["其他商品"], "")
 
         self.assertEqual(found["status"], "found")
         self.assertEqual(found["exact_text_match_count"], 1)
         self.assertEqual(clear["status"], "clear")
         self.assertEqual(unknown["status"], "inconclusive")
+        self.assertEqual(stale["status"], "inconclusive")
 
     def test_clear_spu_is_new_spu(self) -> None:
         result = evaluate_duplicate_gate(

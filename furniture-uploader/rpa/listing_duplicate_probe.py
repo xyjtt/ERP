@@ -9,6 +9,7 @@ from typing import Any, Iterable
 
 from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
 
 from browser_rpa import BY_MAPPING
 
@@ -53,7 +54,7 @@ def summarize_search_result(
         (marker for marker in NO_DATA_MARKERS if marker in str(body_text or "")),
         "",
     )
-    if visible_rows:
+    if matching_rows:
         status = "found"
     elif no_data_marker:
         status = "clear"
@@ -148,12 +149,24 @@ class LiveListingDuplicateProbe:
         top_level_url = str(driver.current_url or "")
         tab_all = "tab=all" in top_level_url.lower()
         identity = self._shop_identity()
+        top_level_body = self._body_text()
+        top_level_draft_hints = self._draft_hints()
         selectors = dict(((self.system_config.get("workflow") or {}).get("selectors") or {}))
         self._switch_management_frame(selectors)
         self.browser._wait_for_management_search_ready({})
 
         body_text = self._body_text()
-        draft_count = parse_draft_count(body_text)
+        frame_draft_hints = self._draft_hints()
+        draft_count = parse_draft_count(
+            "\n".join(
+                [
+                    top_level_body,
+                    body_text,
+                    *(item["text"] for item in top_level_draft_hints),
+                    *(item["text"] for item in frame_draft_hints),
+                ]
+            )
+        )
         results = []
         for candidate in candidates:
             sku_result = self._search(selectors, candidate.sku)
@@ -187,6 +200,10 @@ class LiveListingDuplicateProbe:
             "tab_count": len(driver.window_handles),
             "draft_count": draft_count,
             "draft_limit": self.draft_limit,
+            "draft_hints": {
+                "top_level": top_level_draft_hints,
+                "management_frame": frame_draft_hints,
+            },
             "candidates": results,
         }
 
@@ -244,15 +261,26 @@ class LiveListingDuplicateProbe:
             raise ValueError("1688 management duplicate-search selectors are incomplete")
         product_input = self.browser._wait_for_element(product_selector, clickable=True)
         title_input = self.browser._wait_for_element(title_selector, clickable=True)
-        search_button = self.browser._wait_for_element(search_selector, clickable=True)
+        self.browser._wait_for_element(search_selector, clickable=True)
+        before_rows = tuple(self._visible_result_rows())
         self.browser._fill_management_search_field(product_input, "")
         self.browser._fill_management_search_field(title_input, query)
-        search_button.click()
-        self._wait_for_search_settle(query)
+        input_value = str(title_input.get_attribute("value") or "").strip()
+        title_input.send_keys(Keys.ENTER)
+        self._wait_for_search_settle(query, before_rows=before_rows)
         row_texts = self._visible_result_rows()
-        return summarize_search_result(query, row_texts, self._body_text())
+        result = summarize_search_result(query, row_texts, self._body_text())
+        result["input_value_verified"] = input_value == query
+        result["rows_changed"] = tuple(row_texts) != before_rows
+        return result
 
-    def _wait_for_search_settle(self, query: str) -> None:
+    def _wait_for_search_settle(
+        self,
+        query: str,
+        *,
+        before_rows: tuple[str, ...],
+    ) -> None:
+        started_at = time.monotonic()
         deadline = time.monotonic() + float(
             self.browser.browser_config.get("explicit_wait_seconds", 20)
         )
@@ -261,8 +289,15 @@ class LiveListingDuplicateProbe:
         while time.monotonic() < deadline:
             rows = tuple(self._visible_result_rows())
             body = self._body_text()
-            explicit = bool(rows) or any(marker in body for marker in NO_DATA_MARKERS)
-            if explicit and rows == previous:
+            query_matched = any(
+                normalize_search_text(query) in normalize_search_text(row)
+                for row in rows
+            )
+            no_data = any(marker in body for marker in NO_DATA_MARKERS)
+            changed = rows != before_rows
+            explicit = query_matched or no_data or changed
+            minimum_wait_elapsed = time.monotonic() - started_at >= 2.0
+            if minimum_wait_elapsed and explicit and rows == previous:
                 stable_count += 1
                 if stable_count >= 2:
                     return
@@ -270,7 +305,6 @@ class LiveListingDuplicateProbe:
                 stable_count = 0
             previous = rows
             time.sleep(0.5)
-        raise TimeoutException(f"1688 duplicate search did not settle for query: {query}")
 
     def _visible_result_rows(self) -> list[str]:
         driver = self.browser.driver
@@ -291,3 +325,34 @@ class LiveListingDuplicateProbe:
         driver = self.browser.driver
         assert driver is not None
         return str(driver.find_element(By.TAG_NAME, "body").text or "")
+
+    def _draft_hints(self) -> list[dict[str, str]]:
+        driver = self.browser.driver
+        assert driver is not None
+        values = driver.execute_script(
+            """
+            const results = [];
+            const seen = new Set();
+            for (const node of document.querySelectorAll('a,button,[role="tab"],span,div')) {
+              const text = String(node.innerText || node.textContent || '').trim();
+              if (!text.includes('草稿') || text.length > 80 || seen.has(text)) continue;
+              seen.add(text);
+              results.push({
+                text,
+                href: node.href ? String(node.href) : '',
+                tag: String(node.tagName || '').toLowerCase(),
+              });
+              if (results.length >= 20) break;
+            }
+            return results;
+            """
+        )
+        return [
+            {
+                "text": str(item.get("text") or "").strip(),
+                "href": str(item.get("href") or "").strip(),
+                "tag": str(item.get("tag") or "").strip(),
+            }
+            for item in list(values or [])
+            if isinstance(item, dict) and str(item.get("text") or "").strip()
+        ]
