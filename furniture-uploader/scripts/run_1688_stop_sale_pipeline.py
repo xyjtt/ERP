@@ -206,6 +206,8 @@ def build_1688_command(args: argparse.Namespace, handoff_path: Path) -> list[str
         str(Path(args.file).resolve()),
         "--jushuitan-handoff-out",
         str(handoff_path),
+        "--shared-runtime-root",
+        str(Path(args.shared_runtime_root).resolve()),
     ]
     run_id = str(getattr(args, "run_id", "") or "").strip()
     if run_id:

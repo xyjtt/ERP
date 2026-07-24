@@ -134,6 +134,8 @@ class SkuOfflineBrowser(BrowserRPA):
         if not skip_login:
             self.run_system_workflow(system_config, {})
         self.open_management_page(system_config)
+        self._assert_not_redirected_to_login(self.last_result_context)
+        self._assert_no_risk_control_block(self.last_result_context)
 
     def execute_offline_task(
         self,

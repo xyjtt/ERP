@@ -13,7 +13,12 @@ RPA_ROOT = PROJECT_ROOT / "rpa"
 if str(RPA_ROOT) not in sys.path:
     sys.path.insert(0, str(RPA_ROOT))
 
-from exceptions import PublishSubmitError, PublishValidationError
+from exceptions import (
+    OfflineLoginRequiredError,
+    OfflineRiskControlError,
+    PublishSubmitError,
+    PublishValidationError,
+)
 from sku_offline_main import (
     build_jushuitan_handoff_records,
     build_jushuitan_sync_records,
@@ -233,6 +238,9 @@ class SkuOfflineMainTests(unittest.TestCase):
                 "success": 3,
                 "already_offline": 4,
                 "failed": 3,
+                "auto_login_attempts": 1,
+                "auto_login_success": 1,
+                "auto_login_failed": 0,
                 "duplicate_count": 2,
                 "filtered_out_count": 8,
                 "stopped_stores": 1,
@@ -245,6 +253,7 @@ class SkuOfflineMainTests(unittest.TestCase):
         self.assertIn("1688 SKU下架批次完成", content)
         self.assertIn("任务总数：10", content)
         self.assertIn("执行成功：3", content)
+        self.assertIn("自动登录：尝试 1，成功 1，失败 0", content)
         self.assertIn("安全停止店铺：1 阿里巴巴-常州工莱家具", content)
         self.assertIn("汇总路径：logs/sku_offline/run_reports/demo.summary.json", content)
 
@@ -540,9 +549,6 @@ class SkuOfflineMainTests(unittest.TestCase):
             for index in range(2)
         ]
 
-        class OfflineLoginRequiredError(Exception):
-            pass
-
         class FakeBrowser:
             def __init__(self, *_args, **_kwargs) -> None:
                 self.last_result_context: dict[str, str] = {}
@@ -564,6 +570,7 @@ class SkuOfflineMainTests(unittest.TestCase):
                 "require_store_account_mapping": True,
                 "store_accounts": [{"store_name": "STORE-A", "account_key": "store_a"}],
                 "stop_store_on_error_categories": ["login_required"],
+                "auto_login_fallback": {"enabled": False},
             },
             "notifications": {"dingtalk": {"enabled": True}},
         }
@@ -592,6 +599,172 @@ class SkuOfflineMainTests(unittest.TestCase):
         self.assertEqual(len(run_report.rows), 2)
         self.assertEqual({row["error_category"] for row in run_report.rows}, {"login_required"})
         self.assertEqual(run_report.rows[0]["page_error_stage"], "pre_execution_session")
+        notify_failure.assert_called_once()
+
+    def test_expired_profile_auto_login_reopens_browser_and_continues(self) -> None:
+        task = OfflineTask(
+            source_file="demo.csv",
+            source_sheet="CSV",
+            source_row_number=2,
+            store_name="STORE-A",
+            platform="Alibaba",
+            product_id="1001",
+            online_sku="SKU-A",
+            handling="all-channel-offline",
+            replacement_sku="",
+            change_image="",
+            platform_store_item_code="CODE-A",
+            raw={},
+        )
+
+        class FakeBrowser:
+            instances: list["FakeBrowser"] = []
+
+            def __init__(self, *_args, **_kwargs) -> None:
+                self.index = len(self.instances)
+                self.instances.append(self)
+                self.last_result_context: dict[str, str] = {}
+                self.last_screenshot_path = ""
+                self.last_html_snapshot_path = ""
+                self.closed = False
+
+            def open(self) -> None:
+                return None
+
+            def prepare_session(self, *_args, **_kwargs) -> None:
+                if self.index == 0:
+                    raise OfflineLoginRequiredError("login expired")
+
+            def reset_runtime_artifacts(self) -> None:
+                self.last_result_context = {}
+
+            def execute_offline_group(self, _config, tasks, **_kwargs):
+                return [{"task": tasks[0], "status": "success", "context": {}}]
+
+            def close(self) -> None:
+                self.closed = True
+
+        system_config = {
+            "execution": {
+                "require_store_account_mapping": True,
+                "store_accounts": [{"store_name": "STORE-A", "account_key": "store_a"}],
+                "stop_store_on_error_categories": ["login_required", "risk_control"],
+                "auto_login_fallback": {
+                    "enabled": True,
+                    "timeout_seconds": 123,
+                    "max_attempts_per_store": 1,
+                },
+            },
+            "notifications": {"dingtalk": {"enabled": False}},
+        }
+
+        with (
+            patch("sku_offline_main.SkuOfflineBrowser", FakeBrowser),
+            patch("sku_offline_main.ensure_1688_authenticated_session") as auto_login,
+            patch("sku_offline_main.send_summary_notification"),
+        ):
+            summary = execute_preview(
+                project_root=PROJECT_ROOT,
+                operator_config={"browser": {}},
+                system_config=system_config,
+                preview={"selected_tasks": [task]},
+                skip_login=True,
+                shared_runtime_root="D:/runtime",
+                no_notify=True,
+                run_report=FakeRunReport(),  # type: ignore[arg-type]
+            )
+
+        auto_login.assert_called_once_with(
+            "D:/runtime",
+            "store_a",
+            "STORE-A",
+            timeout_seconds=123,
+        )
+        self.assertEqual(len(FakeBrowser.instances), 2)
+        self.assertTrue(FakeBrowser.instances[0].closed)
+        self.assertTrue(FakeBrowser.instances[1].closed)
+        self.assertEqual(summary["success"], 1)
+        self.assertEqual(summary["auto_login_attempts"], 1)
+        self.assertEqual(summary["auto_login_success"], 1)
+        self.assertEqual(summary["auto_login_failed"], 0)
+
+    def test_auto_login_captcha_stops_store_and_reports_risk_control(self) -> None:
+        tasks = [
+            OfflineTask(
+                source_file="demo.csv",
+                source_sheet="CSV",
+                source_row_number=index + 2,
+                store_name="STORE-A",
+                platform="Alibaba",
+                product_id=str(1000 + index),
+                online_sku=f"SKU-{index}",
+                handling="all-channel-offline",
+                replacement_sku="",
+                change_image="",
+                platform_store_item_code=f"CODE-{index}",
+                raw={},
+            )
+            for index in range(2)
+        ]
+
+        class FakeBrowser:
+            instances = 0
+
+            def __init__(self, *_args, **_kwargs) -> None:
+                type(self).instances += 1
+                self.last_result_context: dict[str, str] = {}
+                self.last_screenshot_path = ""
+                self.last_html_snapshot_path = ""
+
+            def open(self) -> None:
+                return None
+
+            def prepare_session(self, *_args, **_kwargs) -> None:
+                raise OfflineLoginRequiredError("login expired")
+
+            def close(self) -> None:
+                return None
+
+        run_report = FakeRunReport()
+        system_config = {
+            "execution": {
+                "require_store_account_mapping": True,
+                "store_accounts": [{"store_name": "STORE-A", "account_key": "store_a"}],
+                "stop_store_on_error_categories": ["login_required", "risk_control"],
+                "auto_login_fallback": {"enabled": True, "max_attempts_per_store": 1},
+            },
+            "notifications": {"dingtalk": {"enabled": True}},
+        }
+
+        with (
+            patch("sku_offline_main.SkuOfflineBrowser", FakeBrowser),
+            patch(
+                "sku_offline_main.ensure_1688_authenticated_session",
+                side_effect=OfflineRiskControlError("slider required"),
+            ) as auto_login,
+            patch("sku_offline_main.send_failure_notification") as notify_failure,
+            patch("sku_offline_main.send_summary_notification"),
+        ):
+            summary = execute_preview(
+                project_root=PROJECT_ROOT,
+                operator_config={"browser": {}},
+                system_config=system_config,
+                preview={"selected_tasks": tasks},
+                skip_login=True,
+                shared_runtime_root="D:/runtime",
+                no_notify=False,
+                run_report=run_report,  # type: ignore[arg-type]
+            )
+
+        auto_login.assert_called_once()
+        self.assertEqual(FakeBrowser.instances, 1)
+        self.assertEqual(summary["failed"], 2)
+        self.assertEqual(summary["stopped_stores"], 1)
+        self.assertEqual(summary["auto_login_attempts"], 1)
+        self.assertEqual(summary["auto_login_success"], 0)
+        self.assertEqual(summary["auto_login_failed"], 1)
+        self.assertEqual({row["error_category"] for row in run_report.rows}, {"risk_control"})
+        self.assertEqual(run_report.rows[0]["page_error_stage"], "auto_login_fallback")
         notify_failure.assert_called_once()
 
     def test_jushuitan_handoff_preserves_distinct_platform_store_codes(self) -> None:

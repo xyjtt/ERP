@@ -47,7 +47,9 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--run-id", default="")
     parser.add_argument("--yes", action="store_true")
-    parser.add_argument("--skip-login", action="store_true", default=True)
+    login_mode = parser.add_mutually_exclusive_group()
+    login_mode.add_argument("--skip-login", dest="skip_login", action="store_true", default=True)
+    login_mode.add_argument("--require-manual-login", dest="skip_login", action="store_false")
     parser.add_argument("--no-notify", action="store_true")
     parser.add_argument("--jushuitan-root", default=str(DEFAULT_JUSHUITAN_ROOT))
     parser.add_argument("--shared-runtime-root", default=str(DEFAULT_SHARED_RUNTIME_ROOT))
@@ -80,6 +82,8 @@ def build_1688_command(args: argparse.Namespace, handoff_path: Path) -> list[str
         str(Path(args.file).resolve()),
         "--jushuitan-handoff-out",
         str(handoff_path),
+        "--shared-runtime-root",
+        str(Path(args.shared_runtime_root).resolve()),
     ]
     if args.run_id:
         command.extend(["--run-id", args.run_id])

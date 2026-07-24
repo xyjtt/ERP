@@ -217,6 +217,29 @@ class SkuOfflineBrowserTests(unittest.TestCase):
         self.assertEqual(config["input"]["filters"]["handling"], "全渠道替换")
         self.assertEqual(query["tab"], ["all"])
 
+    def test_prepare_session_checks_login_and_risk_after_opening_management_page(self) -> None:
+        class PrepareBrowser(SkuOfflineBrowser):
+            def __init__(self) -> None:
+                super().__init__({}, PROJECT_ROOT)
+                self.calls: list[str] = []
+
+            def open_management_page(self, _system_config: dict) -> None:
+                self.calls.append("open_management_page")
+
+            def _assert_not_redirected_to_login(self, context: dict) -> None:
+                self.calls.append("login_check")
+
+            def _assert_no_risk_control_block(self, context: dict) -> None:
+                self.calls.append("risk_check")
+
+        browser = PrepareBrowser()
+        browser.prepare_session({}, skip_login=True)
+
+        self.assertEqual(
+            browser.calls,
+            ["open_management_page", "login_check", "risk_check"],
+        )
+
     def test_grouped_replacement_submits_product_once(self) -> None:
         tasks = [
             OfflineTask(

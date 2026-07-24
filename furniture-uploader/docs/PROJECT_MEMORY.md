@@ -205,7 +205,7 @@
 - 真实“发布成功”后的 offer 链接/ID 还没有完成最终验证
 - 自动提交模式还没有完成生产级验证
 - 1688 下架页 live 选择器仍需继续联调确认
-- 店铺名称与实际登录店铺的自动映射尚未接入
+- 店铺名称与账号/Profile 映射已接入；执行机仍需维护真实 Profile 路径和账号键
 - SQL Server 真实账号密码仍待提供
 - 聚水潭系统链路仍属于后续阶段，不是当前 1688 主线 blocker
 
@@ -235,3 +235,11 @@
 3. `docs/DIRECT_1688_PROGRESS.md`
 4. `docs/DELIVERY_HANDOVER_2026-03-24.md`
 5. `docs/AI_CONTINUITY_GUIDE.md`
+
+## 2026-07-24 当前事实：下架/替换自动登录
+
+- `1688_sku_offline` 和继承它配置的 `1688_sku_replace` 默认复用店铺 Profile；检测到登录失效后，会关闭 ERP Selenium 会话，调用共享 1688 项目的 `python -m src.cli login --account-key ... --shop-name ...`，再重新打开并校验管理页。
+- 每个店铺每次执行最多自动登录 1 次。`src.cli login` 返回验证码、滑块或风控结果时，不自动处理，当前店铺停止并通过钉钉告警；其他店铺可以继续。
+- 自动登录只使用共享 1688 项目的账号凭据引用和 Profile，不在 ERP 代码、命令输出、报告或通知中写入密码、Cookie、Token。
+- 自动登录统计写入执行汇总：`auto_login_attempts`、`auto_login_success`、`auto_login_failed`。
+- 该能力已完成本地代码和测试验证，尚未替代执行机上的真实过期 Profile canary；交付前必须验证“过期态 -> 自动登录 -> 店铺身份复核 -> 继续执行”。

@@ -29,6 +29,7 @@ class Run1688SkuReplacePipelineTests(unittest.TestCase):
             limit=1,
             skip_login=True,
             no_notify=False,
+            shared_runtime_root="D:/runtime/1688",
         )
 
     def test_1688_command_uses_replace_system(self) -> None:
@@ -37,6 +38,10 @@ class Run1688SkuReplacePipelineTests(unittest.TestCase):
         self.assertIn("1688_sku_replace", command)
         self.assertIn("--jushuitan-handoff-out", command)
         self.assertIn("--yes", command)
+        self.assertEqual(
+            command[command.index("--shared-runtime-root") + 1],
+            str(Path(self.build_args().shared_runtime_root).resolve()),
+        )
 
     def test_jushuitan_command_uses_sync_action(self) -> None:
         command = build_jushuitan_command(

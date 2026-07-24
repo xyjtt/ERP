@@ -43,7 +43,8 @@ python scripts\build_1688_stop_sale_preview.py `
 python scripts\run_1688_sku_replace_pipeline.py `
   --mode preview `
   --file templates\1688_sku_replace_sample.csv `
-  --no-notify
+  --no-notify `
+  --shared-runtime-root E:\1688\1688-script-new
 ```
 
 ## 受控执行
@@ -57,11 +58,16 @@ python scripts\run_1688_sku_replace_pipeline.py `
   --mode execute `
   --file <approved-replacement.csv> `
   --limit 1 `
-  --yes
+  --yes `
+  --shared-runtime-root E:\1688\1688-script-new
 ```
 
 4. 验收 1688 报告中的 `success/already_replaced`、新货号持久化证据，以及聚水潭结果中的 `success/already_synced`。
 5. 确认钉钉通知、Worker 恢复和共享锁释放后再扩大批量。
+
+### 登录态失效处理
+
+生产执行默认复用映射的 Profile。发现登录失效后，执行器会释放 ERP 浏览器并调用共享 1688 项目的账号级登录一次，然后重新打开管理页和校验店铺。每店最多一次；验证码、滑块或风控不会自动处理，会停止该店并发钉钉通知。只有人工调试时才使用 `--require-manual-login`。
 
 ## 日志
 

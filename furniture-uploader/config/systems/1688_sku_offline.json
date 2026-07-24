@@ -35,6 +35,11 @@
     "allow_multi_store_batch": false,
     "require_store_account_mapping": true,
     "require_browser_profile_exists": true,
+    "auto_login_fallback": {
+      "enabled": true,
+      "timeout_seconds": 300,
+      "max_attempts_per_store": 1
+    },
     "stop_store_on_error_categories": [
       "login_required",
       "risk_control",

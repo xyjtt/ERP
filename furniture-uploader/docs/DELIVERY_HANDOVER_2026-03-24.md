@@ -160,3 +160,11 @@
 - 验证真实草稿
 - 验证真实提交
 - 回收成功结果
+
+## 9. 2026-07-24 自动登录交接说明
+
+- 新增 `rpa/sku_offline_auth.py`，下架和替换共用。
+- 执行机必须通过 `--shared-runtime-root` 指向真实 `E:\1688\1688-script-new`，该目录需要包含 `src\cli.py` 和账号 Profile/Credential Manager 配置。
+- 生产默认自动恢复过期登录态；人工调试可使用 `--require-manual-login`。
+- 预期钉钉结果：自动登录成功继续执行；退出码 1 或超时记录 `login_required` 并停止店铺；退出码 2 记录 `risk_control` 并停止店铺。
+- 交付验证缺口：需要执行机关闭或使一个测试店铺 Profile 失效，确认自动登录命令、店铺身份复核和后续 SKU 操作真实完成。不能用单元测试代替该 canary。

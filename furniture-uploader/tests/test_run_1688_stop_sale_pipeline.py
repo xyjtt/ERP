@@ -45,6 +45,7 @@ class Run1688StopSalePipelineTests(unittest.TestCase):
             source_table="dbo.op_stop_sale",
             timeout_1688_seconds=2700,
             timeout_jushuitan_seconds=1200,
+            shared_runtime_root="D:/runtime/1688",
         )
 
     def test_commands_share_deterministic_run_id(self) -> None:
@@ -62,6 +63,10 @@ class Run1688StopSalePipelineTests(unittest.TestCase):
         self.assertEqual(command_jst[command_jst.index("--run-id") + 1], args.run_id)
         self.assertIn("--yes", command_1688)
         self.assertIn("--yes", command_jst)
+        self.assertEqual(
+            command_1688[command_1688.index("--shared-runtime-root") + 1],
+            str(Path(args.shared_runtime_root).resolve()),
+        )
 
     def test_jushuitan_cleanup_environment_supplies_shared_config_requirements(self) -> None:
         handoff = Path("D:/audit/handoff.jsonl")

@@ -4,6 +4,7 @@ import argparse
 import copy
 import hashlib
 import json
+import os
 import re
 import shutil
 import sys
@@ -14,8 +15,9 @@ from typing import Any
 
 from config_loader import load_json_with_local_override
 from dingtalk import build_signed_webhook, resolve_dingtalk_credentials
-from exceptions import OfflineAccountMappingError
+from exceptions import OfflineAccountMappingError, OfflineLoginRequiredError
 from run_report import RunReportWriter
+from sku_offline_auth import ensure_1688_authenticated_session
 from sku_offline_browser import SkuOfflineBrowser
 from sku_offline_tasks import (
     FileIdentity,
@@ -75,10 +77,24 @@ def build_argument_parser() -> argparse.ArgumentParser:
         default=0,
         help="Only process the first N selected tasks after filtering and dedupe.",
     )
-    parser.add_argument(
+    login_mode = parser.add_mutually_exclusive_group()
+    login_mode.add_argument(
         "--skip-login",
+        dest="skip_login",
         action="store_true",
-        help="Skip the login step when the browser session is already authenticated.",
+        default=True,
+        help="Reuse the mapped Profile and automatically recover an expired login (default).",
+    )
+    login_mode.add_argument(
+        "--require-manual-login",
+        dest="skip_login",
+        action="store_false",
+        help="Use the legacy interactive login prompt instead of automatic login fallback.",
+    )
+    parser.add_argument(
+        "--shared-runtime-root",
+        default=os.getenv("SCRIPT_1688_ROOT", "D:/script_1688"),
+        help="Path to the shared 1688 runtime that owns account-scoped login.",
     )
     parser.add_argument(
         "--yes",
@@ -166,6 +182,7 @@ def main() -> None:
                 system_config=system_config,
                 preview=preview,
                 skip_login=args.skip_login,
+                shared_runtime_root=args.shared_runtime_root,
                 no_notify=args.no_notify,
                 run_report=run_report,
                 jushuitan_handoff_path=(
@@ -186,6 +203,7 @@ def main() -> None:
             system_config=system_config,
             watch_dir_override=args.dir,
             skip_login=args.skip_login,
+            shared_runtime_root=args.shared_runtime_root,
             limit=args.limit,
             no_notify=args.no_notify,
             run_report=run_report,
@@ -290,6 +308,7 @@ def execute_preview(
     system_config: dict[str, Any],
     preview: dict[str, Any],
     skip_login: bool,
+    shared_runtime_root: str | Path = Path("D:/script_1688"),
     no_notify: bool,
     run_report: RunReportWriter,
     jushuitan_handoff_path: Path | None = None,
@@ -313,6 +332,9 @@ def execute_preview(
         "already_replaced": 0,
         "stopped_stores": 0,
         "stopped_store_names": [],
+        "auto_login_attempts": 0,
+        "auto_login_success": 0,
+        "auto_login_failed": 0,
     }
     max_attempts = max(1, int(execution_config.get("max_retry", 1)) + 1)
     successful_task_statuses: dict[tuple[str, str, str], str] = {}
@@ -356,7 +378,61 @@ def execute_preview(
 
         try:
             browser.open()
-            browser.prepare_session(system_config, skip_login=skip_login)
+            try:
+                browser.prepare_session(system_config, skip_login=skip_login)
+            except OfflineLoginRequiredError:
+                auto_login_config = dict(execution_config.get("auto_login_fallback", {}))
+                max_auto_login_attempts = min(
+                    1,
+                    max(0, int(auto_login_config.get("max_attempts_per_store", 1))),
+                )
+                if (
+                    not skip_login
+                    or not bool(auto_login_config.get("enabled", False))
+                    or max_auto_login_attempts == 0
+                ):
+                    raise
+
+                summary["auto_login_attempts"] += 1
+                safe_console_print(
+                    f"[WARN] 1688 login expired for {store_name}; attempting account-scoped automatic login."
+                )
+                try:
+                    browser.close()
+                except Exception as exc:
+                    summary["auto_login_failed"] += 1
+                    raise OfflineLoginRequiredError(
+                        "Unable to release the mapped browser Profile before automatic login."
+                    ) from exc
+
+                browser.last_result_context = {}
+                try:
+                    ensure_1688_authenticated_session(
+                        shared_runtime_root,
+                        str(account_binding.get("account_key", "")),
+                        store_name,
+                        timeout_seconds=int(auto_login_config.get("timeout_seconds", 300)),
+                    )
+                    browser = SkuOfflineBrowser(
+                        store_operator_config.get("browser", {}),
+                        project_root,
+                    )
+                    browser.open()
+                    browser.prepare_session(system_config, skip_login=True)
+                except Exception as exc:
+                    summary["auto_login_failed"] += 1
+                    error_category = classify_offline_error(exc, {})
+                    browser.last_result_context = {
+                        "page_error_category": error_category,
+                        "page_error_stage": "auto_login_fallback",
+                        "page_error_text": str(exc),
+                    }
+                    raise
+
+                summary["auto_login_success"] += 1
+                safe_console_print(
+                    f"[INFO] 1688 automatic login and store session verification succeeded for {store_name}."
+                )
             for _, product_tasks in group_tasks_by_product(store_tasks).items():
                 pending_tasks = list(product_tasks)
                 attempts = 0
@@ -769,6 +845,7 @@ def process_scan_mode(
     system_config: dict[str, Any],
     watch_dir_override: str,
     skip_login: bool,
+    shared_runtime_root: str | Path,
     limit: int,
     no_notify: bool,
     run_report: RunReportWriter,
@@ -802,6 +879,7 @@ def process_scan_mode(
                 system_config=system_config,
                 preview=preview,
                 skip_login=skip_login,
+                shared_runtime_root=shared_runtime_root,
                 no_notify=no_notify,
                 run_report=run_report,
             )
@@ -996,6 +1074,9 @@ def build_summary_notification_content(summary: dict[str, Any]) -> str:
         f"执行成功：{summary.get('success', 0)}\n"
         f"{idempotent_line}"
         f"执行失败：{summary.get('failed', 0)}\n"
+        f"自动登录：尝试 {summary.get('auto_login_attempts', 0)}，"
+        f"成功 {summary.get('auto_login_success', 0)}，"
+        f"失败 {summary.get('auto_login_failed', 0)}\n"
         f"安全停止店铺：{summary.get('stopped_stores', 0)} {stopped_store_text}\n"
         f"重复数量：{summary.get('duplicate_count', 0)}\n"
         f"过滤数量：{summary.get('filtered_out_count', 0)}\n"
