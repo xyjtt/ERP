@@ -78,7 +78,7 @@ The first command validates and rolls back. Use `--apply` only after validation 
 
 ## Execution machine deployment
 
-Recommended project path: `E:\1688\furniture-uploader`. Shared crawler runtime: `E:\1688\1688-script-new`.
+Recommended repository path: `E:\1688\ERP-auto-listing`. Project path: `E:\1688\ERP-auto-listing\furniture-uploader`. Shared crawler runtime: `E:\1688\1688-script-new`.
 
 1. Check out the independent auto-listing commit into the project path.
 2. Install the Python dependencies from `requirements.txt` and confirm Edge plus a compatible EdgeDriver are available.
@@ -92,7 +92,7 @@ Recommended project path: `E:\1688\furniture-uploader`. Shared crawler runtime: 
 Deployment verification:
 
 ```powershell
-Set-Location E:\1688\furniture-uploader
+Set-Location E:\1688\ERP-auto-listing\furniture-uploader
 python --version
 python -m pip install -r requirements.txt
 python -m compileall -q rpa scripts tests
