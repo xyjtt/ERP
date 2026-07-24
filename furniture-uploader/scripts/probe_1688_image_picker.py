@@ -92,6 +92,11 @@ def collect_page_diagnostics(browser: BrowserRPA, evidence_output: str) -> dict[
     return diagnostics
 
 
+def is_same_pending_draft_page(draft_id: str, current_url: str) -> bool:
+    normalized_draft_id = str(draft_id or "").strip()
+    return bool(normalized_draft_id) and normalized_draft_id in str(current_url or "")
+
+
 def main() -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -131,9 +136,10 @@ def main() -> int:
         browser.open()
         browser_opened = True
         publish_url, _category_id = resolve_1688_publish_url(payload, mode="draft")
-        same_draft_page = str(
-            payload.get("workflow", {}).get("pending_draft_id") or ""
-        ) in str(browser.driver.current_url or "")
+        same_draft_page = is_same_pending_draft_page(
+            draft_id,
+            str(browser.driver.current_url or ""),
+        )
         if not same_draft_page:
             browser.driver.get(publish_url)
             browser._pause(float(browser.browser_config.get("page_load_wait_seconds", 2)))

@@ -12,7 +12,7 @@ SCRIPTS_ROOT = PROJECT_ROOT / "scripts"
 if str(SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_ROOT))
 
-from probe_1688_image_picker import collect_page_diagnostics
+from probe_1688_image_picker import collect_page_diagnostics, is_same_pending_draft_page
 
 
 class FakeDriver:
@@ -37,6 +37,20 @@ class FakeDriver:
 
 
 class ImagePickerProbeTests(unittest.TestCase):
+    def test_new_product_is_not_treated_as_the_current_draft_page(self) -> None:
+        self.assertFalse(
+            is_same_pending_draft_page(
+                "",
+                "https://work.1688.com/?_path_=sellerPro/2017sellerbase_offer",
+            )
+        )
+        self.assertTrue(
+            is_same_pending_draft_page(
+                "draft-123",
+                "https://offer-new.1688.com/popular/publish.htm?draftId=draft-123",
+            )
+        )
+
     def test_collect_page_diagnostics_captures_failure_context(self) -> None:
         driver = FakeDriver()
         browser = SimpleNamespace(driver=driver)
