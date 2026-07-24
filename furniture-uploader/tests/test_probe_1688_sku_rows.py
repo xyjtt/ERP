@@ -10,7 +10,11 @@ SCRIPTS_ROOT = PROJECT_ROOT / "scripts"
 if str(SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_ROOT))
 
-from probe_1688_sku_rows import _build_task, build_argument_parser  # noqa: E402
+from probe_1688_sku_rows import (  # noqa: E402
+    _build_task,
+    _summarize_sku_codes,
+    build_argument_parser,
+)
 
 
 class Probe1688SkuRowsTests(unittest.TestCase):
@@ -35,6 +39,14 @@ class Probe1688SkuRowsTests(unittest.TestCase):
         self.assertEqual(task.online_sku, "SKU-1")
         self.assertEqual(task.handling, "probe_only")
         self.assertEqual(args.lock_wait_seconds, 0)
+
+    def test_summarizes_duplicate_visible_sku_codes(self) -> None:
+        counts, duplicates = _summarize_sku_codes(
+            ["SKU-2", "SKU-1", "SKU-2", "", " SKU-3 ", "SKU-3"]
+        )
+
+        self.assertEqual(counts, {"SKU-1": 1, "SKU-2": 2, "SKU-3": 2})
+        self.assertEqual(duplicates, {"SKU-2": 2, "SKU-3": 2})
 
 
 if __name__ == "__main__":

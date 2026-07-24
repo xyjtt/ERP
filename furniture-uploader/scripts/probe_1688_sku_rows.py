@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -51,6 +52,13 @@ def _build_task(args: argparse.Namespace) -> OfflineTask:
         platform_store_item_code="",
         raw={},
     )
+
+
+def _summarize_sku_codes(codes: list[str]) -> tuple[dict[str, int], dict[str, int]]:
+    counts = Counter(str(code).strip() for code in codes if str(code).strip())
+    ordered_counts = dict(sorted(counts.items()))
+    duplicates = {code: count for code, count in ordered_counts.items() if count >= 2}
+    return ordered_counts, duplicates
 
 
 def _open_authenticated_browser(
@@ -142,6 +150,8 @@ def probe(args: argparse.Namespace) -> dict[str, Any]:
             browser._assert_no_risk_control_block(context)
             browser._assert_edit_page_identity(context, safety_config)
             rows = browser._find_matching_sku_rows(selectors, context)
+            visible_sku_codes = browser._collect_visible_sku_codes()
+            sku_code_counts, duplicate_sku_codes = _summarize_sku_codes(visible_sku_codes)
             switch_selector = selectors.get("sku_switch", {})
             labels = [
                 browser._read_switch_label(browser._get_row_switch_element(row, switch_selector))
@@ -155,6 +165,10 @@ def probe(args: argparse.Namespace) -> dict[str, Any]:
                 "sku": str(args.sku),
                 "matching_sku_row_count": len(rows),
                 "matching_switch_labels": labels,
+                "visible_sku_row_count": len(visible_sku_codes),
+                "visible_sku_codes": visible_sku_codes,
+                "sku_code_counts": sku_code_counts,
+                "duplicate_sku_codes": duplicate_sku_codes,
                 "management_products_tab": context.get("management_products_tab", ""),
                 "management_products_tab_verified": bool(
                     context.get("management_products_tab_verified", False)
