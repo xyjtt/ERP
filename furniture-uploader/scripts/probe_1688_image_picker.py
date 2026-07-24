@@ -43,6 +43,55 @@ def emit_evidence(evidence: dict[str, object], output_path: str) -> None:
     print(rendered)
 
 
+def collect_page_diagnostics(browser: BrowserRPA, evidence_output: str) -> dict[str, object]:
+    driver = browser.driver
+    if driver is None:
+        return {"available": False}
+    diagnostics: dict[str, object] = {
+        "available": True,
+        "current_url": str(driver.current_url or ""),
+        "page_title": str(driver.title or ""),
+        "tab_count": len(driver.window_handles),
+    }
+    try:
+        page_state = driver.execute_script(
+            """
+            const selectors = [
+              '#guid-title input[maxlength="60"]',
+              '#guid-title input',
+              '#saveDraftButton',
+              '#submitFormButton',
+              'input[maxlength="60"]',
+            ];
+            return {
+              ready_state: document.readyState,
+              body_text: String((document.body && document.body.innerText) || '').slice(0, 2000),
+              selector_counts: Object.fromEntries(
+                selectors.map((selector) => [selector, document.querySelectorAll(selector).length])
+              ),
+              frames: Array.from(document.querySelectorAll('iframe')).slice(0, 20).map((frame) => ({
+                id: String(frame.id || ''),
+                name: String(frame.name || ''),
+                src: String(frame.src || ''),
+              })),
+            };
+            """
+        )
+        if isinstance(page_state, dict):
+            diagnostics.update(page_state)
+    except Exception as exc:
+        diagnostics["script_error"] = f"{type(exc).__name__}: {exc}"[:1000]
+
+    screenshot_path = str(Path(evidence_output).with_suffix(".png"))
+    try:
+        diagnostics["screenshot_saved"] = bool(driver.save_screenshot(screenshot_path))
+        diagnostics["screenshot_path"] = screenshot_path
+    except Exception as exc:
+        diagnostics["screenshot_saved"] = False
+        diagnostics["screenshot_error"] = f"{type(exc).__name__}: {exc}"[:1000]
+    return diagnostics
+
+
 def main() -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -75,6 +124,7 @@ def main() -> int:
 
     browser = BrowserRPA(operator_config.get("browser", {}), PROJECT_ROOT)
     context: dict[str, object] = {}
+    page_diagnostics: dict[str, object] = {}
     probe_error: Exception | None = None
     browser_opened = False
     try:
@@ -109,6 +159,7 @@ def main() -> int:
         )
     except Exception as exc:
         probe_error = exc
+        page_diagnostics = collect_page_diagnostics(browser, args.evidence_output)
     finally:
         if browser_opened:
             browser.close()
@@ -136,6 +187,7 @@ def main() -> int:
             "album_access_verified": bool(context.get("image_probe_album_access_verified")),
             "album_capacity": int(context.get("image_probe_album_capacity") or 0),
             "platform_message": str(context.get("image_probe_album_full_message") or "")[:1000],
+            "page_diagnostics": page_diagnostics,
             "draft_saved": False,
             "offer_submitted": False,
         }
