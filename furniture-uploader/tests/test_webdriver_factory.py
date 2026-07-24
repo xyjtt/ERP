@@ -54,10 +54,29 @@ class WebdriverFactoryTests(unittest.TestCase):
             version_dir.mkdir(parents=True)
             (version_dir / "msedge.exe").touch()
 
-            self.assertEqual(
-                detect_edge_version_from_installation(str(install_root / "msedge.exe")),
-                "150.0.4078.83",
+            other_program_files = Path(temp_dir) / "OtherProgramFiles"
+            other_version_dir = (
+                other_program_files
+                / "Microsoft"
+                / "Edge"
+                / "Application"
+                / "150.0.4078.96"
             )
+            other_version_dir.mkdir(parents=True)
+            (other_version_dir / "msedge.exe").touch()
+
+            with patch.dict(
+                "os.environ",
+                {
+                    "PROGRAMFILES": str(other_program_files),
+                    "PROGRAMFILES(X86)": "",
+                    "LOCALAPPDATA": "",
+                },
+            ):
+                self.assertEqual(
+                    detect_edge_version_from_installation(str(install_root / "msedge.exe")),
+                    "150.0.4078.83",
+                )
 
     def test_cached_edge_driver_uses_latest_compatible_build(self) -> None:
         with TemporaryDirectory() as temp_dir:
