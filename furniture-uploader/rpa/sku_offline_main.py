@@ -374,65 +374,73 @@ def execute_preview(
             continue
 
         browser = SkuOfflineBrowser(store_operator_config.get("browser", {}), project_root)
+        auto_login_config = dict(execution_config.get("auto_login_fallback", {}))
+        max_auto_login_attempts = min(
+            1,
+            max(0, int(auto_login_config.get("max_attempts_per_store", 1))),
+        )
+        store_auto_login_attempts = 0
         store_stopped = False
+
+        def recover_store_session() -> bool:
+            nonlocal browser, store_auto_login_attempts
+            if (
+                not skip_login
+                or not bool(auto_login_config.get("enabled", False))
+                or store_auto_login_attempts >= max_auto_login_attempts
+            ):
+                return False
+
+            store_auto_login_attempts += 1
+            summary["auto_login_attempts"] += 1
+            safe_console_print(
+                f"[WARN] 1688 login expired for {store_name}; attempting account-scoped automatic login."
+            )
+            try:
+                browser.close()
+            except Exception as exc:
+                summary["auto_login_failed"] += 1
+                raise OfflineLoginRequiredError(
+                    "Unable to release the mapped browser Profile before automatic login."
+                ) from exc
+
+            browser.last_result_context = {}
+            try:
+                ensure_1688_authenticated_session(
+                    shared_runtime_root,
+                    str(account_binding.get("account_key", "")),
+                    store_name,
+                    timeout_seconds=int(auto_login_config.get("timeout_seconds", 300)),
+                )
+                browser = SkuOfflineBrowser(
+                    store_operator_config.get("browser", {}),
+                    project_root,
+                )
+                browser.open()
+                browser.prepare_session(system_config, skip_login=True)
+            except Exception as exc:
+                summary["auto_login_failed"] += 1
+                error_category = classify_offline_error(exc, {})
+                browser.last_result_context = {
+                    "page_error_category": error_category,
+                    "page_error_stage": "auto_login_fallback",
+                    "page_error_text": str(exc),
+                }
+                raise
+
+            summary["auto_login_success"] += 1
+            safe_console_print(
+                f"[INFO] 1688 automatic login and store session verification succeeded for {store_name}."
+            )
+            return True
 
         try:
             browser.open()
             try:
                 browser.prepare_session(system_config, skip_login=skip_login)
             except OfflineLoginRequiredError:
-                auto_login_config = dict(execution_config.get("auto_login_fallback", {}))
-                max_auto_login_attempts = min(
-                    1,
-                    max(0, int(auto_login_config.get("max_attempts_per_store", 1))),
-                )
-                if (
-                    not skip_login
-                    or not bool(auto_login_config.get("enabled", False))
-                    or max_auto_login_attempts == 0
-                ):
+                if not recover_store_session():
                     raise
-
-                summary["auto_login_attempts"] += 1
-                safe_console_print(
-                    f"[WARN] 1688 login expired for {store_name}; attempting account-scoped automatic login."
-                )
-                try:
-                    browser.close()
-                except Exception as exc:
-                    summary["auto_login_failed"] += 1
-                    raise OfflineLoginRequiredError(
-                        "Unable to release the mapped browser Profile before automatic login."
-                    ) from exc
-
-                browser.last_result_context = {}
-                try:
-                    ensure_1688_authenticated_session(
-                        shared_runtime_root,
-                        str(account_binding.get("account_key", "")),
-                        store_name,
-                        timeout_seconds=int(auto_login_config.get("timeout_seconds", 300)),
-                    )
-                    browser = SkuOfflineBrowser(
-                        store_operator_config.get("browser", {}),
-                        project_root,
-                    )
-                    browser.open()
-                    browser.prepare_session(system_config, skip_login=True)
-                except Exception as exc:
-                    summary["auto_login_failed"] += 1
-                    error_category = classify_offline_error(exc, {})
-                    browser.last_result_context = {
-                        "page_error_category": error_category,
-                        "page_error_stage": "auto_login_fallback",
-                        "page_error_text": str(exc),
-                    }
-                    raise
-
-                summary["auto_login_success"] += 1
-                safe_console_print(
-                    f"[INFO] 1688 automatic login and store session verification succeeded for {store_name}."
-                )
             for _, product_tasks in group_tasks_by_product(store_tasks).items():
                 pending_tasks = list(product_tasks)
                 attempts = 0
@@ -454,6 +462,20 @@ def execute_preview(
                             raise RuntimeError(
                                 "1688 grouped execution returned an incomplete SKU result set."
                             )
+
+                        outcome_categories = [
+                            classify_offline_error(
+                                outcome.get("error")
+                                if isinstance(outcome.get("error"), BaseException)
+                                else RuntimeError(str(outcome.get("error") or "")),
+                                dict(outcome.get("context") or {}),
+                            )
+                            for outcome in outcomes
+                            if str(outcome.get("status") or "failed") == "failed"
+                        ]
+                        if "login_required" in outcome_categories and recover_store_session():
+                            attempts = max(0, attempts - 1)
+                            continue
 
                         retry_tasks: list[OfflineTask] = []
                         for outcome in outcomes:
@@ -527,6 +549,17 @@ def execute_preview(
                             )
                     except Exception as exc:
                         error_category = classify_offline_error(exc, browser.last_result_context)
+                        if error_category == "login_required":
+                            try:
+                                if recover_store_session():
+                                    attempts = max(0, attempts - 1)
+                                    continue
+                            except Exception as recovery_exc:
+                                exc = recovery_exc
+                                error_category = classify_offline_error(
+                                    recovery_exc,
+                                    browser.last_result_context,
+                                )
                         if (
                             attempts < max_attempts
                             and should_retry_offline_error(error_category, execution_config)
