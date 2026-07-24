@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -29,6 +30,13 @@ EXECUTION_SECRET_ENV_NAMES = (
     "JST_PASSWORD",
     "DINGTALK_WEBHOOK",
     "DINGTALK_SECRET",
+)
+REQUIRED_PYTHON_MODULES = (
+    "selenium",
+    "pandas",
+    "openpyxl",
+    "webdriver_manager",
+    "pyodbc",
 )
 
 
@@ -81,6 +89,12 @@ def check_jushuitan_storage_state(path: Path) -> bool:
     return bool(isinstance(cookies, list) and cookies) or bool(
         isinstance(origins, list) and origins
     )
+
+
+def check_python_runtime_dependencies(
+    module_names: tuple[str, ...] = REQUIRED_PYTHON_MODULES,
+) -> dict[str, bool]:
+    return {name: importlib.util.find_spec(name) is not None for name in module_names}
 
 
 def build_report(args: argparse.Namespace) -> dict[str, Any]:
@@ -157,9 +171,11 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     except Exception as exc:
         app_audit_error = type(exc).__name__
     plaintext_keys = check_plaintext_env_file(jushuitan_root / ".env")
+    python_runtime_dependencies = check_python_runtime_dependencies()
     checks = {
         "windows": platform.system().lower() == "windows",
         "python": bool(sys.executable and Path(sys.executable).exists()),
+        "python_runtime_dependencies": all(python_runtime_dependencies.values()),
         "node": shutil.which("node") is not None,
         "npm": shutil.which("npm.cmd") is not None or shutil.which("npm") is not None,
         "script_1688_root": script_1688_root.exists(),
@@ -206,6 +222,10 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             "currently_present": lock_path.exists(),
         },
         "plaintext_env_keys": plaintext_keys,
+        "python_runtime": {
+            "executable": str(Path(sys.executable).resolve()),
+            "dependencies": python_runtime_dependencies,
+        },
     }
 
 

@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -14,6 +15,7 @@ if str(SCRIPTS_ROOT) not in sys.path:
 from preflight_1688_stop_sale_executor import (
     check_jushuitan_storage_state,
     check_plaintext_env_file,
+    check_python_runtime_dependencies,
 )
 
 
@@ -42,6 +44,15 @@ class ExecutorPreflightTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertTrue(check_jushuitan_storage_state(state_path))
+
+    def test_runtime_dependency_check_reports_each_missing_module(self) -> None:
+        with patch(
+            "preflight_1688_stop_sale_executor.importlib.util.find_spec",
+            side_effect=lambda name: object() if name == "selenium" else None,
+        ):
+            result = check_python_runtime_dependencies(("selenium", "pyodbc"))
+
+        self.assertEqual(result, {"selenium": True, "pyodbc": False})
 
 
 if __name__ == "__main__":
