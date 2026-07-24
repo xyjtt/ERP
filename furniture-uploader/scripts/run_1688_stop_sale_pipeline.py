@@ -339,6 +339,47 @@ def send_pipeline_notification(content: str, *, disabled: bool) -> bool:
     )
 
 
+def count_record_values(records: list[dict[str, Any]], key: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for record in records:
+        value = str(record.get(key) or "").strip() or "unknown"
+        counts[value] = counts.get(value, 0) + 1
+    return counts
+
+
+def first_record_error(records: list[dict[str, Any]]) -> str:
+    for record in records:
+        if str(record.get("status") or "").strip() != "failed":
+            continue
+        category = str(record.get("error_category") or record.get("category") or "").strip()
+        message = str(record.get("error_message") or record.get("message") or "").strip()
+        detail = ": ".join(item for item in (category, message) if item)
+        if detail:
+            return detail.replace("\r", " ").replace("\n", " ")[:500]
+    return ""
+
+
+def build_pipeline_notification(summary: dict[str, Any]) -> str:
+    offline_counts = json.dumps(summary.get("offline_counts", {}), ensure_ascii=False, sort_keys=True)
+    jushuitan_counts = json.dumps(
+        summary.get("jushuitan_counts", {}), ensure_ascii=False, sort_keys=True
+    )
+    categories = json.dumps(
+        summary.get("item_error_categories", {}), ensure_ascii=False, sort_keys=True
+    )
+    error_message = str(summary.get("error_message") or "").strip() or "none"
+    return (
+        "[1688 stop-sale pipeline]\n"
+        f"run_id: {summary.get('run_id', '')}\n"
+        f"status: {summary.get('audit_status', '')}\n"
+        f"1688: {offline_counts}\n"
+        f"Jushuitan: {jushuitan_counts}\n"
+        f"exceptions: {categories}\n"
+        f"error: {error_message}\n"
+        f"summary: {summary.get('summary_path', '')}"
+    )
+
+
 def notify_execute_startup_failure(
     *,
     run_id: str,
@@ -587,6 +628,13 @@ def run_pipeline(
         expected_count=expected_count,
         pipeline_error=pending_exception is not None,
     )
+    offline_counts = count_record_values(offline_records, "status")
+    jushuitan_counts = count_record_values(jushuitan_records, "status")
+    item_error_categories = count_record_values(
+        [record for record in offline_records if str(record.get("status") or "") == "failed"],
+        "error_category",
+    )
+    item_error = first_record_error(offline_records) or first_record_error(jushuitan_records)
     summary = {
         "run_id": run_id,
         "mode": args.mode,
@@ -602,6 +650,9 @@ def run_pipeline(
             audit_repository.config.safe_dict() if audit_repository is not None else None
         ),
         "audit_status": audit_status if args.mode == "execute" else None,
+        "offline_counts": offline_counts,
+        "jushuitan_counts": jushuitan_counts,
+        "item_error_categories": item_error_categories,
         "error_type": type(pending_exception).__name__ if pending_exception is not None else "",
         "error_stage": (
             pending_exception.stage
@@ -610,18 +661,52 @@ def run_pipeline(
         ),
         "1688_timeout_seconds": args.timeout_1688_seconds,
         "jushuitan_timeout_seconds": args.timeout_jushuitan_seconds,
+        "error_message": error_message or item_error,
         "summary_path": str(summary_path),
+        "notification_sent": False,
     }
+    if args.mode == "execute":
+        summary["notification_sent"] = send_pipeline_notification(
+            build_pipeline_notification(summary),
+            disabled=args.no_notify,
+        )
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     if audit_started and audit_repository is not None:
-        audit_repository.finish_run(
-            run_id=run_id,
-            status=audit_status,
-            offline_report_path=str(offline_report_path),
-            jushuitan_report_path=(str(jushuitan_report_path) if jushuitan_report_path.exists() else ""),
-            summary_path=str(summary_path),
-            error_message=error_message,
-        )
+        try:
+            audit_repository.finish_run(
+                run_id=run_id,
+                status=audit_status,
+                offline_report_path=str(offline_report_path),
+                jushuitan_report_path=(str(jushuitan_report_path) if jushuitan_report_path.exists() else ""),
+                summary_path=str(summary_path),
+                error_message=error_message or item_error,
+                notification_sent=bool(summary["notification_sent"]),
+            )
+        except Exception as exc:
+            audit_error = f"{type(exc).__name__}: {exc}"
+            summary["audit_status"] = derive_audit_status(
+                offline_return_code=result_1688_return_code,
+                jushuitan_return_code=jushuitan_return_code,
+                offline_records=offline_records,
+                expected_count=expected_count,
+                pipeline_error=True,
+            )
+            summary["error_type"] = type(exc).__name__
+            summary["error_message"] = (
+                f"{summary['error_message']}; audit finalize: {audit_error}"
+                if summary["error_message"]
+                else f"audit finalize: {audit_error}"
+            )
+            summary_path.write_text(
+                json.dumps(summary, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            send_pipeline_notification(
+                build_pipeline_notification(summary),
+                disabled=args.no_notify,
+            )
+            if pending_exception is None:
+                pending_exception = exc
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 
     if pending_exception is not None:

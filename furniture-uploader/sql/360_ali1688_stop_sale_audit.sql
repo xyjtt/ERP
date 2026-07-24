@@ -40,6 +40,8 @@ BEGIN
         jushuitan_report_path       NVARCHAR(1000) NULL,
         summary_path                NVARCHAR(1000) NULL,
         error_message               NVARCHAR(2000) NULL,
+        notification_sent           BIT NOT NULL CONSTRAINT DF_ali1688_stop_sale_run_notified DEFAULT (0),
+        notification_at             DATETIME2 NULL,
         started_at                  DATETIME2 NOT NULL,
         finished_at                 DATETIME2 NULL,
         created_at                  DATETIME2 NOT NULL,
@@ -92,6 +94,18 @@ BEGIN
     ALTER TABLE app.ali1688_stop_sale_run
         ADD jushuitan_target_count INT NOT NULL
             CONSTRAINT DF_ali1688_stop_sale_run_jst_target DEFAULT (0);
+END;
+
+IF COL_LENGTH(N'app.ali1688_stop_sale_run', N'notification_sent') IS NULL
+BEGIN
+    ALTER TABLE app.ali1688_stop_sale_run
+        ADD notification_sent BIT NOT NULL
+            CONSTRAINT DF_ali1688_stop_sale_run_notified DEFAULT (0);
+END;
+
+IF COL_LENGTH(N'app.ali1688_stop_sale_run', N'notification_at') IS NULL
+BEGIN
+    ALTER TABLE app.ali1688_stop_sale_run ADD notification_at DATETIME2 NULL;
 END;
 
 IF COL_LENGTH(N'app.ali1688_stop_sale_item', N'offline_task_key') IS NULL

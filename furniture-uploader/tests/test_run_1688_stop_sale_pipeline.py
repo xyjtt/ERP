@@ -209,6 +209,79 @@ class Run1688StopSalePipelineTests(unittest.TestCase):
         self.assertTrue(repository.started)
         self.assertIsNotNone(repository.finished)
         self.assertEqual(repository.finished["status"], "failed")
+        self.assertFalse(repository.finished["notification_sent"])
+
+    def test_execute_notifies_and_records_terminal_login_failure(self) -> None:
+        class FakeConfig:
+            def safe_dict(self):
+                return {"database": "JSReportReplica", "schema": "app"}
+
+        class FakeAuditRepository:
+            config = FakeConfig()
+
+            def __init__(self) -> None:
+                self.finished: dict | None = None
+
+            def start_run(self, **_kwargs) -> None:
+                return None
+
+            def heartbeat_run(self, _run_id: str) -> None:
+                return None
+
+            def record_1688_results(self, _run_id: str, _records: list[dict]) -> None:
+                return None
+
+            def record_jushuitan_results(self, _run_id: str, _records: list[dict]) -> None:
+                return None
+
+            def finish_run(self, **kwargs) -> None:
+                self.finished = kwargs
+
+        args = self.build_args()
+        args.no_notify = False
+        repository = FakeAuditRepository()
+        failed_record = {
+            "status": "failed",
+            "error_category": "login_required",
+            "error_message": "automatic login worker failed",
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pipeline_dir = Path(temp_dir)
+            with (
+                patch(
+                    "run_1688_stop_sale_pipeline.run_stage_command",
+                    return_value=SimpleNamespace(returncode=0),
+                ),
+                patch(
+                    "run_1688_stop_sale_pipeline.load_jsonl_records",
+                    return_value=[failed_record],
+                ),
+                patch(
+                    "run_1688_stop_sale_pipeline.send_pipeline_notification",
+                    return_value=True,
+                ) as notify,
+            ):
+                return_code = run_pipeline(
+                    args,
+                    run_id=args.run_id,
+                    pipeline_dir=pipeline_dir,
+                    jushuitan_root=pipeline_dir,
+                    shared_lock_path="D:/runtime/lock",
+                    audit_repository=repository,  # type: ignore[arg-type]
+                    audit_tasks=[SimpleNamespace(dedupe_key=("store", "product", "sku"))],
+                )
+            summary = json.loads(
+                (pipeline_dir / f"{args.run_id}.summary.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(return_code, 2)
+        self.assertEqual(summary["audit_status"], "failed")
+        self.assertEqual(summary["offline_counts"], {"failed": 1})
+        self.assertEqual(summary["item_error_categories"], {"login_required": 1})
+        self.assertTrue(summary["notification_sent"])
+        self.assertIn("login_required", notify.call_args.args[0])
+        self.assertIsNotNone(repository.finished)
+        self.assertTrue(repository.finished["notification_sent"])
 
     def test_preview_completes_without_an_audit_repository(self) -> None:
         args = self.build_args(mode="preview")

@@ -606,6 +606,7 @@ class StopSaleAuditRepository:
         jushuitan_report_path: str,
         summary_path: str,
         error_message: str = "",
+        notification_sent: bool = False,
     ) -> None:
         run_table = self._table("ali1688_stop_sale_run")
         item_table = self._table("ali1688_stop_sale_item")
@@ -635,6 +636,8 @@ class StopSaleAuditRepository:
                     jushuitan_success_count = ?, jushuitan_already_count = ?,
                     jushuitan_failed_count = ?, offline_report_path = ?,
                     jushuitan_report_path = ?, summary_path = ?, error_message = ?,
+                    notification_sent = ?,
+                    notification_at = CASE WHEN ? = 1 THEN SYSUTCDATETIME() ELSE NULL END,
                     finished_at = SYSUTCDATETIME(), updated_at = SYSUTCDATETIME()
                 WHERE run_id = ?
                 """,
@@ -645,6 +648,8 @@ class StopSaleAuditRepository:
                     jushuitan_report_path,
                     summary_path,
                     _clean_error(error_message),
+                    int(bool(notification_sent)),
+                    int(bool(notification_sent)),
                     run_id,
                 ),
             )

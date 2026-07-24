@@ -13,7 +13,10 @@ if str(RPA_ROOT) not in sys.path:
     sys.path.insert(0, str(RPA_ROOT))
 
 from exceptions import OfflineLoginRequiredError, OfflineRiskControlError  # noqa: E402
-from sku_offline_auth import ensure_1688_authenticated_session  # noqa: E402
+from sku_offline_auth import (  # noqa: E402
+    ensure_1688_authenticated_session,
+    extract_login_failure_diagnostic,
+)
 
 
 class SkuOfflineAuthTests(unittest.TestCase):
@@ -87,9 +90,19 @@ class SkuOfflineAuthTests(unittest.TestCase):
                     command_runner=runner,
                 )
 
-    def test_nonzero_exit_is_login_required_without_subprocess_output(self) -> None:
+    def test_nonzero_exit_includes_sanitized_subprocess_diagnostic(self) -> None:
         def runner(command, **_kwargs):
-            return subprocess.CompletedProcess(command, 1, stderr="password=do-not-leak")
+            return subprocess.CompletedProcess(
+                command,
+                1,
+                stderr=(
+                    '{"event":"auth.login.worker_failed",'
+                    '"message":"Failed to start account Edge",'
+                    '"exception":"EdgeWorkerError: port unavailable",'
+                    '"password":"do-not-leak"}\n'
+                    "password=do-not-leak"
+                ),
+            )
 
         with tempfile.TemporaryDirectory() as temp_dir:
             runtime_root = self.create_runtime(Path(temp_dir))
@@ -102,6 +115,20 @@ class SkuOfflineAuthTests(unittest.TestCase):
                 )
 
         self.assertNotIn("do-not-leak", str(caught.exception))
+        self.assertIn("auth.login.worker_failed", str(caught.exception))
+        self.assertIn("EdgeWorkerError: port unavailable", str(caught.exception))
+        self.assertIn("password=<redacted>", str(caught.exception))
+
+    def test_diagnostic_removes_url_queries_and_secret_values(self) -> None:
+        diagnostic = extract_login_failure_diagnostic(
+            "https://example.test/login?access_token=abc123\n",
+            "secret=hidden-value",
+        )
+
+        self.assertIn("https://example.test/login?<redacted>", diagnostic)
+        self.assertIn("secret=<redacted>", diagnostic)
+        self.assertNotIn("abc123", diagnostic)
+        self.assertNotIn("hidden-value", diagnostic)
 
     def test_timeout_is_login_required(self) -> None:
         def runner(command, **kwargs):
