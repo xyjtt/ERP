@@ -178,6 +178,10 @@ class SkuOfflineMainTests(unittest.TestCase):
         self.assertEqual(localize_error_category("submit_failed"), "提交失败")
         self.assertEqual(localize_error_category("browser_window_closed"), "浏览器窗口异常关闭")
         self.assertEqual(
+            localize_error_category("management_tab_mismatch"),
+            "商品管理未切换到全部Tab",
+        )
+        self.assertEqual(
             localize_error_category("delivery_service_backfill_failed"),
             "配送服务自动补全失败",
         )
@@ -313,11 +317,13 @@ class SkuOfflineMainTests(unittest.TestCase):
                 "store_mismatch",
                 "identity_mismatch",
                 "browser_window_closed",
+                "management_tab_mismatch",
             ]
         }
 
         self.assertTrue(should_stop_store_on_error("identity_mismatch", execution_config))
         self.assertTrue(should_stop_store_on_error("browser_window_closed", execution_config))
+        self.assertTrue(should_stop_store_on_error("management_tab_mismatch", execution_config))
         self.assertFalse(should_stop_store_on_error("delivery_service_backfill_failed", execution_config))
         self.assertFalse(should_stop_store_on_error("management_search_timeout", execution_config))
         self.assertFalse(should_stop_store_on_error("submit_blocked_before_request", execution_config))

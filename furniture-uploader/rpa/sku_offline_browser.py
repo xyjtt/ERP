@@ -29,6 +29,13 @@ from sku_offline_tasks import OfflineTask, store_name_matches
 
 
 class SkuOfflineBrowser(BrowserRPA):
+    MANAGEMENT_ALL_TAB_XPATHS = (
+        '//*[@role="tab" and normalize-space(.)="全部"]',
+        '//*[contains(@class, "tabs-tab") and normalize-space(.)="全部"]',
+        '//*[contains(@class, "next-tabs-tab") and normalize-space(.)="全部"]',
+        '//*[contains(@class, "ant-tabs-tab") and normalize-space(.)="全部"]',
+    )
+
     def _emit_stage(self, stage: str, context: dict[str, Any]) -> None:
         payload = {
             "time": datetime.now().isoformat(timespec="seconds"),
@@ -94,24 +101,14 @@ class SkuOfflineBrowser(BrowserRPA):
     def _activate_all_products_tab(self) -> bool:
         if not self.driver:
             raise RuntimeError("Browser has not been opened.")
-        xpaths = (
-            '//*[@role="tab" and normalize-space(.)="全部"]',
-            '//*[contains(@class, "tabs-tab") and normalize-space(.)="全部"]',
-        )
-        for xpath in xpaths:
+        for xpath in self.MANAGEMENT_ALL_TAB_XPATHS:
             try:
                 elements = list(self.driver.find_elements(By.XPATH, xpath))
             except Exception:
                 continue
             for element in elements:
                 try:
-                    class_name = str(element.get_attribute("class") or "").lower()
-                    class_tokens = set(class_name.split())
-                    aria_selected = str(element.get_attribute("aria-selected") or "").lower()
-                    if (
-                        any(token == "active" or token.endswith("-active") for token in class_tokens)
-                        or aria_selected == "true"
-                    ):
+                    if self._is_management_tab_active(element):
                         return False
                     self.driver.execute_script("arguments[0].click();", element)
                     self._pause(1.5)
@@ -119,6 +116,92 @@ class SkuOfflineBrowser(BrowserRPA):
                 except Exception:
                     continue
         return False
+
+    @staticmethod
+    def _is_management_tab_active(element: Any) -> bool:
+        class_name = str(element.get_attribute("class") or "").strip().lower()
+        class_tokens = set(class_name.split())
+        aria_selected = str(element.get_attribute("aria-selected") or "").strip().lower()
+        data_active = str(element.get_attribute("data-active") or "").strip().lower()
+        aria_current = str(element.get_attribute("aria-current") or "").strip().lower()
+        return (
+            any(token == "active" or token.endswith("-active") for token in class_tokens)
+            or aria_selected == "true"
+            or data_active == "true"
+            or aria_current in {"page", "true"}
+        )
+
+    def _ensure_all_products_tab_active(
+        self,
+        selectors: dict[str, Any],
+        context: dict[str, Any],
+    ) -> None:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+
+        configured = self._resolve_selector(selectors.get("all_products_tab", {}), context)
+        xpaths: list[str] = []
+        if self._selector_is_configured(configured) and configured.get("by", "").lower() == "xpath":
+            xpaths.append(configured["value"])
+        xpaths.extend(self.MANAGEMENT_ALL_TAB_XPATHS)
+        xpaths = list(dict.fromkeys(xpaths))
+
+        timeout_seconds = max(
+            0.0,
+            float(self.browser_config.get("management_tab_timeout_seconds", 10.0)),
+        )
+        poll_seconds = max(
+            0.05,
+            float(self.browser_config.get("management_tab_poll_seconds", 0.25)),
+        )
+        deadline = time.monotonic() + timeout_seconds
+        clicked = False
+        last_error = ""
+
+        while True:
+            visible_elements: list[Any] = []
+            for xpath in xpaths:
+                try:
+                    elements = list(self.driver.find_elements(By.XPATH, xpath))
+                except Exception as exc:
+                    last_error = f"{type(exc).__name__}: {exc}"
+                    continue
+                for element in elements:
+                    try:
+                        if hasattr(element, "is_displayed") and not element.is_displayed():
+                            continue
+                        if self._is_management_tab_active(element):
+                            context["management_products_tab"] = "all"
+                            context["management_products_tab_verified"] = True
+                            context["edit_entry_stage"] = "management_all_tab_verified"
+                            return
+                        visible_elements.append(element)
+                    except Exception as exc:
+                        last_error = f"{type(exc).__name__}: {exc}"
+
+            if not clicked and visible_elements:
+                try:
+                    self.driver.execute_script("arguments[0].click();", visible_elements[0])
+                    clicked = True
+                    context["management_products_tab_click"] = "all"
+                except Exception as exc:
+                    last_error = f"{type(exc).__name__}: {exc}"
+
+            remaining_seconds = deadline - time.monotonic()
+            if remaining_seconds <= 0:
+                break
+            self._pause(min(poll_seconds, remaining_seconds))
+
+        message = "1688商品管理页未能确认当前处于‘全部’Tab，已禁止在其他商品状态Tab继续执行。"
+        if last_error:
+            message = f"{message} 最后错误：{last_error[:200]}"
+        self._annotate_page_error_context(
+            context,
+            stage_name="management_tab_selection",
+            error_text=message,
+            error_category="management_tab_mismatch",
+        )
+        raise OfflineTaskStateError(message)
 
     def _navigate_with_timeout_recovery(self, url: str) -> bool:
         if not self.driver:
@@ -756,6 +839,7 @@ class SkuOfflineBrowser(BrowserRPA):
         selectors: dict[str, Any],
         context: dict[str, Any],
     ) -> None:
+        self._ensure_all_products_tab_active(selectors, context)
         self._wait_for_management_search_ready(context)
         product_id_input = self._resolve_selector(selectors.get("product_id_input", {}), context)
         if not self._selector_is_configured(product_id_input):

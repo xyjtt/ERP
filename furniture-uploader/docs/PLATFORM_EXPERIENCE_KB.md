@@ -3,10 +3,18 @@
 ## 2026-07-23 SKU Replacement Findings
 
 - 商品管理入口对下架和替换都必须归一化为 `tab=all`，并在页面加载后显式确认“全部”Tab；“销售中”会漏掉已下架、审核中或其他状态商品。
+- `tab=all` URL 不能作为最终证据：商品管理内容在 iframe/SPA 内渲染，搜索前必须在 iframe 中确认“全部”具有 active/aria-selected 状态；无法确认时按 `management_tab_mismatch` 停止整个店铺并告警。
+- 下架和替换 Pipeline 默认不等待共享锁；重复启动会立即失败并返回占锁状态。运行日志必须保留完整前台输出，不允许通过 `head` 截断后再次启动同一批次。
 - SKU 单品货号位于发布页运行时 `SellPublishSdk.engine.getJsonState().components.skuTable` 的 `sku_cargoNumber`；受控写入使用 `core.changeElementValue('skuTable', nextValues, {isDepth:false})`。
 - 同商品多 SKU 应先做整组冲突校验，再一次性修改 `skuTable`、一次提交，最后重新打开商品编辑页逐项复核新货号。
 - 幂等判断：旧货号不存在且新货号已存在时记为 `already_replaced`；新货号属于未参与映射的其他行时记为 `replacement_sku_conflict`，禁止提交。
 - 聚水潭替换后不是“清除链接”，而是“手动同步商品 -> 按链接同步”；按店铺填写去重商品 ID，每批限制 50 个，并为每个原始 SKU 保留独立结果。
+
+## 2026-07-24 Live Management Tab Probe
+
+- 开发机使用工莱真实 Profile 打开 1688 商品管理 iframe，未触发自动登录。
+- 探针先将真实页面切到 `销售中(1104)`，再调用统一的 Tab 校验逻辑；运行上下文记录 `management_products_tab_click=all`，最终 DOM 同时满足“全部”按钮 `aria-selected=true` 和父节点 `ant-tabs-tab-active`。
+- 本探针只切换商品列表 Tab，没有搜索商品、修改 SKU 或提交发布。
 
 ## 2026-03-26 Managed Update
 

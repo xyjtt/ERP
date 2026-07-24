@@ -46,7 +46,8 @@
       "store_mismatch",
       "identity_mismatch",
       "account_mapping",
-      "browser_window_closed"
+      "browser_window_closed",
+      "management_tab_mismatch"
     ],
     "non_retryable_error_categories": [
       "task_not_found",
@@ -142,6 +143,10 @@
       "management_iframe": {
         "by": "xpath",
         "value": "//iframe[contains(@src, 'offer.1688.com/app/pages-group/manage-home/index.html')]"
+      },
+      "all_products_tab": {
+        "by": "xpath",
+        "value": "//*[@role='tab' and normalize-space(.)='全部'] | //*[contains(@class, 'tabs-tab') and normalize-space(.)='全部'] | //*[contains(@class, 'next-tabs-tab') and normalize-space(.)='全部'] | //*[contains(@class, 'ant-tabs-tab') and normalize-space(.)='全部']"
       },
       "product_id_input": {
         "by": "xpath",

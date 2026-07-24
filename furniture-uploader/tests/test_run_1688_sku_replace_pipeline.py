@@ -12,6 +12,7 @@ if str(SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_ROOT))
 
 from run_1688_sku_replace_pipeline import (  # noqa: E402
+    build_argument_parser,
     build_1688_command,
     build_jushuitan_command,
     build_jushuitan_environment,
@@ -42,6 +43,11 @@ class Run1688SkuReplacePipelineTests(unittest.TestCase):
             command[command.index("--shared-runtime-root") + 1],
             str(Path(self.build_args().shared_runtime_root).resolve()),
         )
+
+    def test_duplicate_runs_fail_fast_on_shared_lock_by_default(self) -> None:
+        args = build_argument_parser().parse_args(["--file", "replace.csv"])
+
+        self.assertEqual(args.lock_wait_seconds, 0)
 
     def test_jushuitan_command_uses_sync_action(self) -> None:
         command = build_jushuitan_command(

@@ -102,6 +102,7 @@ class Run1688StopSalePipelineTests(unittest.TestCase):
         self.assertEqual(args.timeout_1688_seconds, 2700)
         self.assertEqual(args.timeout_jushuitan_seconds, 1200)
         self.assertEqual(args.active_stop_sale_max_age_minutes, 240)
+        self.assertEqual(args.lock_wait_seconds, 0)
 
     def test_cross_machine_guard_rejects_recent_running_batch(self) -> None:
         repository = SimpleNamespace(count_recent_active_stop_sale_runs=lambda _minutes: 1)

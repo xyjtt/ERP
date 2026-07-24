@@ -216,6 +216,7 @@ class SkuOfflineBrowserTests(unittest.TestCase):
         self.assertEqual(config["execution"]["operation"], "replace")
         self.assertEqual(config["input"]["filters"]["handling"], "全渠道替换")
         self.assertEqual(query["tab"], ["all"])
+        self.assertIn("全部", config["workflow"]["selectors"]["all_products_tab"]["value"])
 
     def test_prepare_session_checks_login_and_risk_after_opening_management_page(self) -> None:
         class PrepareBrowser(SkuOfflineBrowser):
@@ -372,6 +373,78 @@ class SkuOfflineBrowserTests(unittest.TestCase):
 
         self.assertFalse(browser._activate_all_products_tab())
         self.assertFalse(driver.clicked)
+
+    def test_management_frame_clicks_all_tab_and_confirms_active_state(self) -> None:
+        state = {"active": False}
+
+        class TabElement:
+            def get_attribute(self, name: str) -> str:
+                if name == "class":
+                    return "tabs-tab tabs-tab-active" if state["active"] else "tabs-tab"
+                if name == "aria-selected":
+                    return "true" if state["active"] else "false"
+                return ""
+
+            def is_displayed(self) -> bool:
+                return True
+
+        class TabDriver(FakeSuccessDriver):
+            def find_elements(self, by: str, value: str) -> list[TabElement]:
+                return [TabElement()]
+
+            def execute_script(self, script: str, *args: object) -> None:
+                if "arguments[0].click" in script:
+                    state["active"] = True
+
+        browser = SkuOfflineBrowser(
+            {"management_tab_timeout_seconds": 0.1},
+            PROJECT_ROOT,
+        )
+        browser._pause = lambda seconds: None  # type: ignore[method-assign]
+        browser.driver = TabDriver()
+        context: dict[str, object] = {}
+
+        browser._ensure_all_products_tab_active({}, context)
+
+        self.assertTrue(state["active"])
+        self.assertEqual(context["management_products_tab"], "all")
+        self.assertTrue(context["management_products_tab_verified"])
+
+    def test_management_frame_missing_all_tab_fails_closed(self) -> None:
+        class MissingTabDriver(FakeSuccessDriver):
+            def find_elements(self, by: str, value: str) -> list[object]:
+                return []
+
+        browser = SkuOfflineBrowser(
+            {"management_tab_timeout_seconds": 0},
+            PROJECT_ROOT,
+        )
+        browser.driver = MissingTabDriver()
+        context: dict[str, object] = {}
+
+        with self.assertRaisesRegex(OfflineTaskStateError, "全部"):
+            browser._ensure_all_products_tab_active({}, context)
+
+        self.assertEqual(context["page_error_category"], "management_tab_mismatch")
+        self.assertEqual(context["page_error_stage"], "management_tab_selection")
+
+    def test_management_search_verifies_all_tab_before_search_readiness(self) -> None:
+        browser = SkuOfflineBrowser({}, PROJECT_ROOT)
+        calls: list[str] = []
+        browser._ensure_all_products_tab_active = (  # type: ignore[method-assign]
+            lambda selectors, context: calls.append("verify_all_tab")
+        )
+
+        def stop_after_readiness(context: dict[str, object]) -> None:
+            calls.append("wait_search_ready")
+            raise RuntimeError("stop after ordering assertion")
+
+        browser._wait_for_management_search_ready = stop_after_readiness  # type: ignore[method-assign]
+
+        with self.assertRaisesRegex(RuntimeError, "ordering assertion"):
+            browser._search_product({}, {})
+
+        self.assertEqual(calls, ["verify_all_tab", "wait_search_ready"])
 
     def test_navigation_timeout_stops_loading_and_continues_validation(self) -> None:
         class TimeoutDriver(FakeSuccessDriver):

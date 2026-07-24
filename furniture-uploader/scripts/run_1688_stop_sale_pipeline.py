@@ -146,7 +146,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--jushuitan-root", default=str(DEFAULT_JUSHUITAN_ROOT))
     parser.add_argument("--shared-runtime-root", default=str(DEFAULT_SHARED_RUNTIME_ROOT))
     parser.add_argument("--shared-lock-path", default="")
-    parser.add_argument("--lock-wait-seconds", type=int, default=7200)
+    parser.add_argument(
+        "--lock-wait-seconds",
+        type=int,
+        default=0,
+        help="Seconds to wait for the shared browser lock. Defaults to fail-fast to block duplicate runs.",
+    )
     parser.add_argument("--lock-stale-seconds", type=int, default=21600)
     parser.add_argument("--lock-poll-seconds", type=float, default=10.0)
     parser.add_argument(
@@ -452,6 +457,16 @@ def build_shared_lock(args: argparse.Namespace, run_id: str):
     return lock, GlobalLockTimeoutError, str(lock_path)
 
 
+def emit_pipeline_event(run_id: str, event: str, **details: Any) -> None:
+    payload = {
+        "time": datetime.now().isoformat(timespec="seconds"),
+        "run_id": run_id,
+        "event": event,
+        **details,
+    }
+    print(f"[1688-PIPELINE] {json.dumps(payload, ensure_ascii=False)}", flush=True)
+
+
 def run_pipeline(
     args: argparse.Namespace,
     *,
@@ -497,6 +512,7 @@ def run_pipeline(
             audit_started = True
 
         command_1688 = build_1688_command(args, handoff_path)
+        emit_pipeline_event(run_id, "1688_stage_started", timeout_seconds=args.timeout_1688_seconds)
         audit_heartbeat = (
             (lambda: audit_repository.heartbeat_run(run_id))
             if audit_started and audit_repository is not None
@@ -510,6 +526,7 @@ def run_pipeline(
             heartbeat=audit_heartbeat,
         )
         result_1688_return_code = result_1688.returncode
+        emit_pipeline_event(run_id, "1688_stage_finished", return_code=result_1688_return_code)
         offline_records = load_jsonl_records(offline_report_path)
 
         handoff_count = count_handoff_records(handoff_path)
@@ -520,6 +537,12 @@ def run_pipeline(
                 jushuitan_root,
                 jushuitan_results_dir,
             )
+            emit_pipeline_event(
+                run_id,
+                "jushuitan_stage_started",
+                timeout_seconds=args.timeout_jushuitan_seconds,
+                handoff_count=handoff_count,
+            )
             result_jushuitan = run_stage_command(
                 command_jushuitan,
                 cwd=jushuitan_root,
@@ -529,7 +552,14 @@ def run_pipeline(
                 heartbeat=audit_heartbeat,
             )
             jushuitan_return_code = result_jushuitan.returncode
+            emit_pipeline_event(
+                run_id,
+                "jushuitan_stage_finished",
+                return_code=jushuitan_return_code,
+            )
             jushuitan_records = load_jsonl_records(jushuitan_report_path)
+        elif result_1688_return_code == 0:
+            emit_pipeline_event(run_id, "jushuitan_stage_skipped", reason="empty_handoff")
     except Exception as exc:
         error_message = f"{type(exc).__name__}: {exc}"
         pending_exception = exc
@@ -659,7 +689,14 @@ def main() -> int:
             raise
     lock, timeout_error, lock_path = build_shared_lock(args, run_id)
     try:
+        emit_pipeline_event(
+            run_id,
+            "shared_lock_acquire_started",
+            lock_path=lock_path,
+            wait_seconds=args.lock_wait_seconds,
+        )
         with lock:
+            emit_pipeline_event(run_id, "shared_lock_acquired", lock_path=lock_path)
             if args.mode == "execute":
                 assert_crawler_worker_paused(args.crawler_worker_task_name)
                 active_crawler_tasks = audit_repository.count_active_crawler_tasks() if audit_repository else 0

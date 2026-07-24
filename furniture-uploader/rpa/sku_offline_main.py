@@ -815,6 +815,7 @@ def should_stop_store_on_error(error_category: str, execution_config: dict[str, 
             "identity_mismatch",
             "account_mapping",
             "browser_window_closed",
+            "management_tab_mismatch",
         ],
     )
     categories = {str(item).strip() for item in configured if str(item).strip()}
@@ -1021,6 +1022,7 @@ def localize_error_category(error_category: str) -> str:
         "browser_window_closed": "浏览器窗口异常关闭",
         "delivery_service_backfill_failed": "配送服务自动补全失败",
         "management_search_timeout": "商品管理搜索超时",
+        "management_tab_mismatch": "商品管理未切换到全部Tab",
         "submit_blocked_before_request": "提交前页面校验阻断",
         "replacement_sku_conflict": "替换货号冲突",
         "replacement_verification_failed": "替换结果复核失败",

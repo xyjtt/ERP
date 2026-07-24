@@ -33,6 +33,7 @@ from run_1688_stop_sale_pipeline import (
     DEFAULT_JST_PRODUCT_URL,
     assert_crawler_worker_paused,
     count_handoff_records,
+    emit_pipeline_event,
     run_stage_command,
     send_pipeline_notification,
 )
@@ -54,7 +55,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--jushuitan-root", default=str(DEFAULT_JUSHUITAN_ROOT))
     parser.add_argument("--shared-runtime-root", default=str(DEFAULT_SHARED_RUNTIME_ROOT))
     parser.add_argument("--shared-lock-path", default="")
-    parser.add_argument("--lock-wait-seconds", type=int, default=7200)
+    parser.add_argument(
+        "--lock-wait-seconds",
+        type=int,
+        default=0,
+        help="Seconds to wait for the shared browser lock. Defaults to fail-fast to block duplicate runs.",
+    )
     parser.add_argument("--lock-stale-seconds", type=int, default=21600)
     parser.add_argument("--lock-poll-seconds", type=float, default=10.0)
     parser.add_argument("--1688-timeout-seconds", dest="timeout_1688_seconds", type=int, default=2700)
@@ -246,7 +252,14 @@ def run(args: argparse.Namespace) -> int:
     audit_started = False
 
     try:
+        emit_pipeline_event(
+            run_id,
+            "shared_lock_acquire_started",
+            lock_path=lock_path,
+            wait_seconds=args.lock_wait_seconds,
+        )
         with lock:
+            emit_pipeline_event(run_id, "shared_lock_acquired", lock_path=lock_path)
             worker_state = (
                 assert_crawler_worker_paused(args.crawler_worker_task_name)
                 if args.mode == "execute"
@@ -267,6 +280,11 @@ def run(args: argparse.Namespace) -> int:
                 if audit_started and audit_repository is not None
                 else None
             )
+            emit_pipeline_event(
+                run_id,
+                "1688_replace_stage_started",
+                timeout_seconds=args.timeout_1688_seconds,
+            )
             stage_1688 = run_stage_command(
                 build_1688_command(args, handoff_path),
                 cwd=PROJECT_ROOT,
@@ -275,7 +293,15 @@ def run(args: argparse.Namespace) -> int:
                 heartbeat=heartbeat,
             )
             return_1688 = stage_1688.returncode
-            if count_handoff_records(handoff_path) > 0:
+            emit_pipeline_event(run_id, "1688_replace_stage_finished", return_code=return_1688)
+            handoff_count = count_handoff_records(handoff_path)
+            if handoff_count > 0:
+                emit_pipeline_event(
+                    run_id,
+                    "jushuitan_sync_stage_started",
+                    timeout_seconds=args.timeout_jushuitan_seconds,
+                    handoff_count=handoff_count,
+                )
                 stage_jst = run_stage_command(
                     build_jushuitan_command(args, handoff_path, results_dir),
                     cwd=jushuitan_root,
@@ -285,6 +311,13 @@ def run(args: argparse.Namespace) -> int:
                     heartbeat=heartbeat,
                 )
                 return_jushuitan = stage_jst.returncode
+                emit_pipeline_event(
+                    run_id,
+                    "jushuitan_sync_stage_finished",
+                    return_code=return_jushuitan,
+                )
+            else:
+                emit_pipeline_event(run_id, "jushuitan_sync_stage_skipped", reason="empty_handoff")
     except Exception as exc:
         worker_state = {}
         error_message = f"{type(exc).__name__}: {exc}"
