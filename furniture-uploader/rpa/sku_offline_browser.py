@@ -148,7 +148,7 @@ class SkuOfflineBrowser(BrowserRPA):
 
         timeout_seconds = max(
             0.0,
-            float(self.browser_config.get("management_tab_timeout_seconds", 10.0)),
+            float(self.browser_config.get("management_tab_timeout_seconds", 30.0)),
         )
         poll_seconds = max(
             0.05,

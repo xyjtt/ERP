@@ -15,6 +15,7 @@
 - 开发机使用工莱真实 Profile 打开 1688 商品管理 iframe，未触发自动登录。
 - 探针先将真实页面切到 `销售中(1104)`，再调用统一的 Tab 校验逻辑；运行上下文记录 `management_products_tab_click=all`，最终 DOM 同时满足“全部”按钮 `aria-selected=true` 和父节点 `ant-tabs-tab-active`。
 - 本探针只切换商品列表 Tab，没有搜索商品、修改 SKU 或提交发布。
+- 后续只读商品探针出现过 iframe 超过 10 秒才渲染 Tab 的情况；生产默认等待已调整为 30 秒，超时后仍按 `management_tab_mismatch` fail-closed。
 
 ## 2026-07-24 Duplicate Barcode Offline Rule
 
