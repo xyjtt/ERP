@@ -1157,11 +1157,12 @@ class SkuOfflineBrowser(BrowserRPA):
         sku_row_selector = self._resolve_selector(selectors.get("sku_row", {}), context)
         if not self._selector_is_configured(sku_row_selector):
             raise ValueError("sku_row selector is not configured.")
-        sku_row = self._find_sku_row_by_runtime_value(context)
-        if sku_row is not None:
-            return self._toggle_found_sku_row(selectors, context, sku_row)
+        sku_rows = self._find_sku_rows_by_runtime_value(context)
+        if sku_rows:
+            return self._toggle_found_sku_rows(selectors, context, sku_rows)
         try:
             sku_row = self._wait_for_element(sku_row_selector)
+            sku_rows = self._find_sku_rows_by_selector(sku_row_selector) or [sku_row]
         except TimeoutException as exc:
             available_skus = self._collect_visible_sku_codes()
             context["available_sku_count"] = str(len(available_skus))
@@ -1174,23 +1175,24 @@ class SkuOfflineBrowser(BrowserRPA):
                 if fallback_sku:
                     fallback_context = dict(context)
                     fallback_context["online_sku"] = fallback_sku
-                    sku_row = self._find_sku_row_by_runtime_value(fallback_context)
-                    if sku_row is not None:
+                    sku_rows = self._find_sku_rows_by_runtime_value(fallback_context)
+                    if sku_rows:
                         context["online_sku_requested"] = str(context.get("online_sku", "")).strip()
                         context["online_sku"] = fallback_sku
                         context["online_sku_match_mode"] = "normalized_exact"
-                        return self._toggle_found_sku_row(selectors, context, sku_row)
+                        return self._toggle_found_sku_rows(selectors, context, sku_rows)
                     fallback_selector = self._resolve_selector(selectors.get("sku_row", {}), fallback_context)
                     if self._selector_is_configured(fallback_selector):
                         try:
                             sku_row = self._wait_for_element(fallback_selector)
+                            sku_rows = self._find_sku_rows_by_selector(fallback_selector) or [sku_row]
                             context["online_sku_requested"] = str(context.get("online_sku", "")).strip()
                             context["online_sku"] = fallback_sku
                             context["online_sku_match_mode"] = "normalized_exact"
                         except TimeoutException:
-                            sku_row = None
-                        if sku_row is not None:
-                            return self._toggle_found_sku_row(selectors, context, sku_row)
+                            sku_rows = []
+                        if sku_rows:
+                            return self._toggle_found_sku_rows(selectors, context, sku_rows)
 
                 raise OfflineTaskNotFoundError(
                     self._build_sku_not_found_message(
@@ -1200,19 +1202,63 @@ class SkuOfflineBrowser(BrowserRPA):
                 ) from exc
             raise
 
-        return self._toggle_found_sku_row(selectors, context, sku_row)
+        return self._toggle_found_sku_rows(selectors, context, sku_rows)
 
-    def _find_sku_row_by_runtime_value(self, context: dict[str, Any]) -> Any | None:
+    def _find_sku_rows_by_selector(self, selector: dict[str, str]) -> list[Any]:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        by_key = str(selector.get("by", "css")).strip().lower()
+        value = str(selector.get("value", "")).strip()
+        if not value:
+            return []
+        try:
+            rows = list(self.driver.find_elements(BY_MAPPING.get(by_key, By.CSS_SELECTOR), value))
+        except Exception:
+            return []
+        return self._dedupe_web_elements(rows)
+
+    def _find_matching_sku_rows(
+        self,
+        selectors: dict[str, Any],
+        context: dict[str, Any],
+        *,
+        fallback_rows: list[Any] | None = None,
+    ) -> list[Any]:
+        runtime_rows = self._find_sku_rows_by_runtime_value(context)
+        if runtime_rows:
+            return runtime_rows
+        sku_row_selector = self._resolve_selector(selectors.get("sku_row", {}), context)
+        if self._selector_is_configured(sku_row_selector):
+            selector_rows = self._find_sku_rows_by_selector(sku_row_selector)
+            if selector_rows:
+                return selector_rows
+        return self._dedupe_web_elements(list(fallback_rows or []))
+
+    @staticmethod
+    def _dedupe_web_elements(elements: list[Any]) -> list[Any]:
+        deduped: list[Any] = []
+        seen: set[str] = set()
+        for element in elements:
+            key = str(getattr(element, "id", "") or id(element))
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(element)
+        return deduped
+
+    def _find_sku_rows_by_runtime_value(self, context: dict[str, Any]) -> list[Any]:
         if not self.driver:
             raise RuntimeError("Browser has not been opened.")
         target_sku = str(context.get("online_sku", "")).strip()
         if not target_sku:
-            return None
-        return self.driver.execute_script(
+            return []
+        rows = self.driver.execute_script(
             """
             const target = String(arguments[0] || '').trim();
             const normalizedTarget = target.replace(/[^A-Za-z0-9]/g, '').toUpperCase();
-            if (!normalizedTarget) return null;
+            if (!normalizedTarget) return [];
+            const exactRows = [];
+            const normalizedRows = [];
             const rows = Array.from(document.querySelectorAll('#guid-skuTable tbody tr, table tbody tr'));
             for (const row of rows) {
               const values = Array.from(row.querySelectorAll('input, textarea'))
@@ -1220,17 +1266,112 @@ class SkuOfflineBrowser(BrowserRPA):
                 .filter(Boolean);
               const rowText = String(row.innerText || '').trim();
               if (rowText) values.push(rowText);
+              let exact = false;
+              let normalized = false;
               for (const value of values) {
                 const normalizedValue = String(value || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase();
-                if (value === target || normalizedValue === normalizedTarget) {
-                  return row;
-                }
+                if (value === target) exact = true;
+                if (normalizedValue === normalizedTarget) normalized = true;
               }
+              if (exact) exactRows.push(row);
+              else if (normalized) normalizedRows.push(row);
             }
-            return null;
+            return exactRows.length > 0 ? exactRows : normalizedRows;
             """,
             target_sku,
         )
+        if not isinstance(rows, list):
+            return []
+        return self._dedupe_web_elements(rows)
+
+    def _find_sku_row_by_runtime_value(self, context: dict[str, Any]) -> Any | None:
+        rows = self._find_sku_rows_by_runtime_value(context)
+        return rows[0] if rows else None
+
+    def _toggle_found_sku_rows(
+        self,
+        selectors: dict[str, Any],
+        context: dict[str, Any],
+        sku_rows: list[Any],
+    ) -> bool:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        rows = self._dedupe_web_elements(list(sku_rows))
+        if not rows:
+            raise OfflineTaskNotFoundError(
+                f"SKU '{context.get('online_sku', '')}' was not found on the edit page."
+            )
+        switch_selector = selectors.get("sku_switch", {})
+        if not switch_selector:
+            raise ValueError("sku_switch selector is not configured.")
+
+        row_states: list[tuple[Any, Any, str, bool]] = []
+        for row in rows:
+            switch_element = self._get_row_switch_element(row, switch_selector)
+            label = self._read_switch_label(switch_element)
+            already_offline = self._is_already_offline(switch_element, label)
+            if not already_offline and not self._is_online_state(switch_element, label):
+                raise OfflineTaskStateError(
+                    f"Unable to determine current switch state for SKU '{context.get('online_sku', '')}'."
+                )
+            row_states.append((row, switch_element, label, already_offline))
+
+        context["matching_sku_row_count"] = len(row_states)
+        context["matching_sku_online_before"] = sum(1 for item in row_states if not item[3])
+        context["matching_sku_offline_before"] = sum(1 for item in row_states if item[3])
+        context["switch_labels_before"] = [item[2] for item in row_states]
+        context["switch_label_before"] = row_states[0][2]
+        self._assert_target_not_sole_online_sku(
+            context,
+            target_rows=rows,
+            switch_selector=switch_selector,
+        )
+
+        changed_count = 0
+        online_before = int(context["matching_sku_online_before"])
+        for _ in range(online_before):
+            current_rows = self._find_matching_sku_rows(
+                selectors,
+                context,
+                fallback_rows=rows,
+            )
+            online_candidate: tuple[Any, Any] | None = None
+            for row in current_rows:
+                switch_element = self._get_row_switch_element(row, switch_selector)
+                label = self._read_switch_label(switch_element)
+                if self._is_online_state(switch_element, label):
+                    online_candidate = (row, switch_element)
+                    break
+            if online_candidate is None:
+                break
+            row, switch_element = online_candidate
+            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", switch_element)
+            self.driver.execute_script("arguments[0].click();", switch_element)
+            self._pause(0.8)
+            self._wait_for_switch_change(row, switch_selector, expect_offline=True)
+            changed_count += 1
+
+        final_rows = self._find_matching_sku_rows(
+            selectors,
+            context,
+            fallback_rows=rows,
+        )
+        labels_after: list[str] = []
+        for row in final_rows:
+            refreshed_switch = self._get_row_switch_element(row, switch_selector)
+            refreshed_label = self._read_switch_label(refreshed_switch)
+            labels_after.append(refreshed_label)
+            if not self._is_already_offline(refreshed_switch, refreshed_label):
+                raise OfflineTaskStateError(
+                    f"A duplicate row for SKU '{context.get('online_sku', '')}' remained online after toggle."
+                )
+
+        context["matching_sku_changed_count"] = changed_count
+        context["matching_sku_offline_after_toggle"] = len(final_rows)
+        context["switch_labels_after"] = labels_after
+        context["switch_label_after"] = labels_after[0] if labels_after else ""
+        context["execution_result"] = "offline_toggled" if changed_count else "already_offline"
+        return changed_count > 0
 
     def _toggle_found_sku_row(
         self,
@@ -1238,41 +1379,15 @@ class SkuOfflineBrowser(BrowserRPA):
         context: dict[str, Any],
         sku_row: Any,
     ) -> bool:
-        if not self.driver:
-            raise RuntimeError("Browser has not been opened.")
+        return self._toggle_found_sku_rows(selectors, context, [sku_row])
 
-        switch_selector = selectors.get("sku_switch", {})
-        if not switch_selector:
-            raise ValueError("sku_switch selector is not configured.")
-        switch_element = sku_row.find_element(
-            BY_MAPPING.get(str(switch_selector.get("by", "css")).strip().lower(), By.CSS_SELECTOR),
-            str(switch_selector.get("value", "")).strip(),
-        )
-        switch_label_before = self._read_switch_label(switch_element)
-        context["switch_label_before"] = switch_label_before
-
-        if self._is_already_offline(switch_element, switch_label_before):
-            return False
-        if not self._is_online_state(switch_element, switch_label_before):
-            raise OfflineTaskStateError(
-                f"Unable to determine current switch state for SKU '{context.get('online_sku', '')}'."
-            )
-
-        self._assert_target_not_sole_online_sku(context)
-        self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", switch_element)
-        self.driver.execute_script("arguments[0].click();", switch_element)
-        self._pause(0.8)
-        self._wait_for_switch_change(sku_row, switch_selector, expect_offline=True)
-        context["switch_label_after"] = self._read_switch_label(
-            sku_row.find_element(
-                BY_MAPPING.get(str(switch_selector.get("by", "css")).strip().lower(), By.CSS_SELECTOR),
-                str(switch_selector.get("value", "")).strip(),
-            )
-        )
-        context["execution_result"] = "offline_toggled"
-        return True
-
-    def _assert_target_not_sole_online_sku(self, context: dict[str, Any]) -> None:
+    def _assert_target_not_sole_online_sku(
+        self,
+        context: dict[str, Any],
+        *,
+        target_rows: list[Any] | None = None,
+        switch_selector: dict[str, Any] | None = None,
+    ) -> None:
         if not self.driver:
             raise RuntimeError("Browser has not been opened.")
         switch_elements = self.driver.execute_script(
@@ -1309,12 +1424,29 @@ class SkuOfflineBrowser(BrowserRPA):
             "online_switch_count": sum(1 for item in visible_states if item["online"]),
             "states": visible_states,
         }
+        target_online_count = 1
+        if target_rows:
+            target_online_count = 0
+            resolved_switch_selector = switch_selector or {
+                "by": "css",
+                "value": 'button[role="switch"].ant-switch, [role="switch"]',
+            }
+            for row in self._dedupe_web_elements(list(target_rows)):
+                try:
+                    switch_element = self._get_row_switch_element(row, resolved_switch_selector)
+                    label = self._read_switch_label(switch_element)
+                    if self._is_online_state(switch_element, label):
+                        target_online_count += 1
+                except Exception:
+                    continue
+        summary["target_matching_row_count"] = len(target_rows or []) or 1
+        summary["target_online_switch_count"] = target_online_count
         context["sku_switch_summary_before"] = summary
-        if summary["visible_switch_count"] != 1 or summary["online_switch_count"] != 1:
+        if target_online_count <= 0 or summary["online_switch_count"] > target_online_count:
             return
 
         error_text = (
-            "目标 SKU 是该商品唯一在线 SKU，1688 要求至少保留一个在线 SKU；"
+            "目标条形码对应的全部规格行下架后，该商品将没有在线 SKU；1688 要求至少保留一个在线 SKU；"
             "脚本禁止自动整商品下架。"
         )
         context["automatic_product_offline_allowed"] = "false"
@@ -1635,23 +1767,10 @@ class SkuOfflineBrowser(BrowserRPA):
             if expected_product_id and actual_product_id != expected_product_id:
                 context["trace_miss_persistence_probe"] = "identity_mismatch"
                 return False
-            sku_row = self._find_sku_row_by_runtime_value(context)
-            if sku_row is None:
-                sku_row_selector = self._resolve_selector(selectors.get("sku_row", {}), context)
-                if not self._selector_is_configured(sku_row_selector):
-                    context["trace_miss_persistence_probe"] = "sku_selector_missing"
-                    return False
-                sku_row = self._wait_for_element(sku_row_selector)
-            switch_selector = selectors.get("sku_switch", {})
-            if not switch_selector:
-                context["trace_miss_persistence_probe"] = "switch_selector_missing"
-                return False
-            switch_element = sku_row.find_element(
-                BY_MAPPING.get(str(switch_selector.get("by", "css")).strip().lower(), By.CSS_SELECTOR),
-                str(switch_selector.get("value", "")).strip(),
+            switch_element, switch_label, aria_checked = self._read_current_sku_switch_state(
+                selectors,
+                context,
             )
-            switch_label = self._read_switch_label(switch_element)
-            aria_checked = str(switch_element.get_attribute("aria-checked") or "")
             context["trace_miss_probe_switch_label"] = switch_label
             context["trace_miss_probe_switch_aria_checked"] = aria_checked
             persisted = self._is_already_offline(switch_element, switch_label)
@@ -1723,17 +1842,22 @@ class SkuOfflineBrowser(BrowserRPA):
         sku_row_selector = self._resolve_selector(selectors.get("sku_row", {}), context)
         if not self._selector_is_configured(sku_row_selector):
             raise ValueError("sku_row selector is not configured.")
-        sku_row = self._find_sku_row_by_runtime_value(context)
-        if sku_row is None:
+        sku_rows = self._find_sku_rows_by_runtime_value(context)
+        if not sku_rows:
             sku_row = self._wait_for_element(sku_row_selector)
+            sku_rows = self._find_sku_rows_by_selector(sku_row_selector) or [sku_row]
 
         switch_selector = selectors.get("sku_switch", {})
         if not switch_selector:
             raise ValueError("sku_switch selector is not configured.")
-        switch_element = self._get_row_switch_element(sku_row, switch_selector)
-        label_before_submit = self._read_switch_label(switch_element)
-        context["switch_label_before_submit"] = label_before_submit
-        if not self._is_already_offline(switch_element, label_before_submit):
+        labels_before_submit: list[str] = []
+        reasserted_count = 0
+        for sku_row in sku_rows:
+            switch_element = self._get_row_switch_element(sku_row, switch_selector)
+            label_before_submit = self._read_switch_label(switch_element)
+            labels_before_submit.append(label_before_submit)
+            if self._is_already_offline(switch_element, label_before_submit):
+                continue
             if not self._is_online_state(switch_element, label_before_submit):
                 raise OfflineTaskStateError(
                     f"Unable to ensure offline state before submit for SKU '{context.get('online_sku', '')}'."
@@ -1742,6 +1866,10 @@ class SkuOfflineBrowser(BrowserRPA):
             self.driver.execute_script("arguments[0].click();", switch_element)
             self._pause(0.8)
             self._wait_for_switch_change(sku_row, switch_selector, expect_offline=True)
+            reasserted_count += 1
+        context["switch_labels_before_submit"] = labels_before_submit
+        context["switch_label_before_submit"] = labels_before_submit[0] if labels_before_submit else ""
+        context["matching_sku_reasserted_count"] = reasserted_count
 
         self._ensure_switch_state_stable(
             sku_row_selector=sku_row_selector,
@@ -1753,16 +1881,26 @@ class SkuOfflineBrowser(BrowserRPA):
         state_patch_result = self._force_target_sku_offline_in_runtime_state(context)
         context["runtime_sku_state_patch"] = state_patch_result
         if bool(state_patch_result.get("supported")) and bool(state_patch_result.get("found")):
-            after_status = int(state_patch_result.get("after_status", 0) or 0)
-            if after_status != -2:
+            if not bool(state_patch_result.get("all_offline")):
                 raise OfflineTaskStateError(
                     f"Runtime skuTable status is not offline before submit for SKU '{context.get('online_sku', '')}'."
                 )
-        refreshed_row = self._find_sku_row_by_runtime_value(context)
-        if refreshed_row is None:
+            context["runtime_matching_sku_count"] = int(state_patch_result.get("matched_count", 0) or 0)
+        refreshed_rows = self._find_sku_rows_by_runtime_value(context)
+        if not refreshed_rows:
             refreshed_row = self._wait_for_element(sku_row_selector)
-        refreshed_switch = self._get_row_switch_element(refreshed_row, switch_selector)
-        context["switch_label_reasserted_before_submit"] = self._read_switch_label(refreshed_switch)
+            refreshed_rows = self._find_sku_rows_by_selector(sku_row_selector) or [refreshed_row]
+        refreshed_labels: list[str] = []
+        for refreshed_row in refreshed_rows:
+            refreshed_switch = self._get_row_switch_element(refreshed_row, switch_selector)
+            refreshed_label = self._read_switch_label(refreshed_switch)
+            refreshed_labels.append(refreshed_label)
+            if not self._is_already_offline(refreshed_switch, refreshed_label):
+                raise OfflineTaskStateError(
+                    f"A duplicate row for SKU '{context.get('online_sku', '')}' is still online before submit."
+                )
+        context["switch_labels_reasserted_before_submit"] = refreshed_labels
+        context["switch_label_reasserted_before_submit"] = refreshed_labels[0] if refreshed_labels else ""
 
     def _raise_if_inline_validation_present(
         self,
@@ -2076,35 +2214,39 @@ class SkuOfflineBrowser(BrowserRPA):
         stable_since = 0.0
         last_label = ""
         while True:
-            runtime_row = self._find_sku_row_by_runtime_value(context)
-            candidate_rows = [runtime_row] if runtime_row is not None else self.driver.find_elements(row_by, row_value)
-            switch_element = None
+            runtime_rows = self._find_sku_rows_by_runtime_value(context)
+            candidate_rows = runtime_rows or list(self.driver.find_elements(row_by, row_value))
+            switch_elements: list[Any] = []
             for row in candidate_rows:
                 try:
                     switch_candidate = self._get_row_switch_element(row, switch_selector)
                     if row.is_displayed() and switch_candidate.is_displayed():
-                        switch_element = switch_candidate
-                        break
-                    if switch_element is None:
-                        switch_element = switch_candidate
+                        switch_elements.append(switch_candidate)
+                    elif not switch_elements:
+                        switch_elements.append(switch_candidate)
                 except Exception:
                     continue
 
-            if switch_element is not None:
-                label = self._read_switch_label(switch_element)
-                aria_checked = str(switch_element.get_attribute("aria-checked") or "").strip().lower()
-                observed_state = label or (f"aria-checked={aria_checked}" if aria_checked else "")
-                last_label = observed_state
-                state_ok = (
-                    self._is_already_offline(switch_element, label)
-                    if expect_offline
-                    else self._is_online_state(switch_element, label)
-                )
+            if switch_elements:
+                observed_states: list[str] = []
+                state_results: list[bool] = []
+                for switch_element in switch_elements:
+                    label = self._read_switch_label(switch_element)
+                    aria_checked = str(switch_element.get_attribute("aria-checked") or "").strip().lower()
+                    observed_states.append(label or (f"aria-checked={aria_checked}" if aria_checked else ""))
+                    state_results.append(
+                        self._is_already_offline(switch_element, label)
+                        if expect_offline
+                        else self._is_online_state(switch_element, label)
+                    )
+                last_label = " | ".join(observed_states)
+                state_ok = bool(state_results) and all(state_results)
                 if state_ok:
                     if stable_since <= 0:
                         stable_since = time.time()
                     elif time.time() - stable_since >= max(stable_seconds, 0.2):
-                        context[context_key] = observed_state
+                        context[context_key] = last_label
+                        context[f"{context_key}_matching_row_count"] = len(state_results)
                         return
                 else:
                     stable_since = 0.0
@@ -2147,7 +2289,6 @@ class SkuOfflineBrowser(BrowserRPA):
             if (!Array.isArray(skuValues) || skuValues.length === 0) {
               return { supported: true, found: false, reason: 'sku_table_empty' };
             }
-            let matchedIndex = -1;
             let exactMatches = [];
             let normalizedMatches = [];
             skuValues.forEach((item, index) => {
@@ -2163,22 +2304,18 @@ class SkuOfflineBrowser(BrowserRPA):
                 normalizedMatches.push(index);
               }
             });
-            if (exactMatches.length === 1) {
-              matchedIndex = exactMatches[0];
-            } else if (exactMatches.length === 0 && normalizedMatches.length === 1) {
-              matchedIndex = normalizedMatches[0];
-            }
-            if (matchedIndex < 0) {
+            const matchedIndices = exactMatches.length > 0 ? exactMatches : normalizedMatches;
+            if (matchedIndices.length === 0) {
               return {
                 supported: true,
                 found: false,
                 reason: 'target_sku_not_found',
               };
             }
-            const matchedSku = skuValues[matchedIndex] || {};
-            const beforeStatus = Number(matchedSku.sku_status);
+            const matchedIndexSet = new Set(matchedIndices);
+            const beforeStatuses = matchedIndices.map((index) => Number((skuValues[index] || {}).sku_status));
             const nextValues = skuValues.map((item, index) => {
-              if (index !== matchedIndex) {
+              if (!matchedIndexSet.has(index)) {
                 return item;
               }
               return {
@@ -2195,14 +2332,22 @@ class SkuOfflineBrowser(BrowserRPA):
             const refreshedValues = Array.isArray(refreshedProps.value)
               ? refreshedProps.value
               : (Array.isArray(refreshedFields.value) ? refreshedFields.value : []);
-            const refreshedSku = Array.isArray(refreshedValues) ? refreshedValues[matchedIndex] || {} : {};
+            const afterStatuses = matchedIndices.map((index) =>
+              Number((Array.isArray(refreshedValues) ? refreshedValues[index] || {} : {}).sku_status)
+            );
             return {
               supported: true,
               found: true,
-              matched_cargo: String(matchedSku.sku_cargoNumber || ''),
-              before_status: Number.isFinite(beforeStatus) ? beforeStatus : 0,
-              after_status: Number(refreshedSku.sku_status),
-              changed: beforeStatus !== -2,
+              matched_count: matchedIndices.length,
+              matched_indices: matchedIndices,
+              matched_cargos: matchedIndices.map((index) => String((skuValues[index] || {}).sku_cargoNumber || '')),
+              before_statuses: beforeStatuses,
+              after_statuses: afterStatuses,
+              before_status: beforeStatuses[0],
+              after_status: afterStatuses[0],
+              all_offline: afterStatuses.every((status) => status === -2),
+              changed_count: beforeStatuses.filter((status) => status !== -2).length,
+              changed: beforeStatuses.some((status) => status !== -2),
             };
             """,
             target_sku,
@@ -4333,32 +4478,43 @@ class SkuOfflineBrowser(BrowserRPA):
     ) -> None:
         if not self.driver:
             raise RuntimeError("Browser has not been opened.")
-        if str(context.get("switch_label_before", "")).strip() != "上架":
+        labels_before = [
+            str(item).strip()
+            for item in context.get("switch_labels_before", [])
+            if str(item).strip()
+        ]
+        if not labels_before:
+            labels_before = [str(context.get("switch_label_before", "")).strip()]
+        if not any("上架" in label and "下架" not in label for label in labels_before):
             return
         try:
             sku_row_selector = self._resolve_selector(selectors.get("sku_row", {}), context)
             if not self._selector_is_configured(sku_row_selector):
                 return
-            sku_row = self._wait_for_element(sku_row_selector)
+            sku_rows = self._find_sku_rows_by_runtime_value(context)
+            if not sku_rows:
+                sku_row = self._wait_for_element(sku_row_selector)
+                sku_rows = self._find_sku_rows_by_selector(sku_row_selector) or [sku_row]
             switch_selector = selectors.get("sku_switch", {})
             if not switch_selector:
                 return
-            switch_element = sku_row.find_element(
-                BY_MAPPING.get(str(switch_selector.get("by", "css")).strip().lower(), By.CSS_SELECTOR),
-                str(switch_selector.get("value", "")).strip(),
-            )
-            switch_label = self._read_switch_label(switch_element)
-            if self._is_already_offline(switch_element, switch_label):
-                self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", switch_element)
-                self.driver.execute_script("arguments[0].click();", switch_element)
-                self._pause(0.8)
-                self._wait_for_switch_change(sku_row, switch_selector, expect_offline=False)
-                context["switch_label_reverted"] = self._read_switch_label(
-                    sku_row.find_element(
-                        BY_MAPPING.get(str(switch_selector.get("by", "css")).strip().lower(), By.CSS_SELECTOR),
-                        str(switch_selector.get("value", "")).strip(),
-                    )
+            reverted_labels: list[str] = []
+            for index, sku_row in enumerate(sku_rows):
+                original_label = labels_before[index] if index < len(labels_before) else ""
+                if "上架" not in original_label or "下架" in original_label:
+                    continue
+                switch_element = self._get_row_switch_element(sku_row, switch_selector)
+                switch_label = self._read_switch_label(switch_element)
+                if self._is_already_offline(switch_element, switch_label):
+                    self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", switch_element)
+                    self.driver.execute_script("arguments[0].click();", switch_element)
+                    self._pause(0.8)
+                    self._wait_for_switch_change(sku_row, switch_selector, expect_offline=False)
+                reverted_labels.append(
+                    self._read_switch_label(self._get_row_switch_element(sku_row, switch_selector))
                 )
+            context["switch_labels_reverted"] = reverted_labels
+            context["switch_label_reverted"] = reverted_labels[0] if reverted_labels else ""
         except Exception as exc:
             context["switch_revert_error"] = str(exc)
 
@@ -4536,23 +4692,41 @@ class SkuOfflineBrowser(BrowserRPA):
         selectors: dict[str, Any],
         context: dict[str, Any],
     ) -> tuple[Any, str, str]:
-        sku_row = self._find_sku_row_by_runtime_value(context)
-        if sku_row is None:
+        sku_rows = self._find_sku_rows_by_runtime_value(context)
+        if not sku_rows:
             sku_row_selector = self._resolve_selector(selectors.get("sku_row", {}), context)
             if not self._selector_is_configured(sku_row_selector):
                 raise PublishSubmitError("sku_row selector is not configured for post-submit verification.")
             sku_row = self._wait_for_element(sku_row_selector)
+            sku_rows = self._find_sku_rows_by_selector(sku_row_selector) or [sku_row]
 
         switch_selector = selectors.get("sku_switch", {})
         if not switch_selector:
             raise PublishSubmitError("sku_switch selector is not configured for post-submit verification.")
-        switch_element = sku_row.find_element(
-            BY_MAPPING.get(str(switch_selector.get("by", "css")).strip().lower(), By.CSS_SELECTOR),
-            str(switch_selector.get("value", "")).strip(),
-        )
-        switch_label = self._read_switch_label(switch_element)
-        aria_checked = str(switch_element.get_attribute("aria-checked") or "")
-        return switch_element, switch_label, aria_checked
+        switch_elements: list[Any] = []
+        switch_labels: list[str] = []
+        aria_values: list[str] = []
+        for sku_row in sku_rows:
+            switch_element = self._get_row_switch_element(sku_row, switch_selector)
+            switch_elements.append(switch_element)
+            switch_labels.append(self._read_switch_label(switch_element))
+            aria_values.append(str(switch_element.get_attribute("aria-checked") or ""))
+        context["post_submit_matching_sku_row_count"] = len(switch_elements)
+        context["post_submit_switch_labels"] = switch_labels
+        context["post_submit_switch_aria_checked_values"] = aria_values
+        if not all(
+            self._is_already_offline(element, label)
+            for element, label in zip(switch_elements, switch_labels)
+        ):
+            online_indices = [
+                index
+                for index, (element, label) in enumerate(zip(switch_elements, switch_labels))
+                if not self._is_already_offline(element, label)
+            ]
+            raise PublishSubmitError(
+                f"Duplicate SKU rows are still online after submit at row indexes: {online_indices}."
+            )
+        return switch_elements[0], switch_labels[0], aria_values[0]
 
     def _wait_for_success(
         self,

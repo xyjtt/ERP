@@ -16,6 +16,13 @@
 - 探针先将真实页面切到 `销售中(1104)`，再调用统一的 Tab 校验逻辑；运行上下文记录 `management_products_tab_click=all`，最终 DOM 同时满足“全部”按钮 `aria-selected=true` 和父节点 `ant-tabs-tab-active`。
 - 本探针只切换商品列表 Tab，没有搜索商品、修改 SKU 或提交发布。
 
+## 2026-07-24 Duplicate Barcode Offline Rule
+
+- 同一商品 ID 内允许多个规格行使用完全相同的单品货号/条形码。停产输入仍按商品 ID + 条形码去重，但编辑页必须定位并下架该条形码的全部匹配行，只提交一次。
+- 每切换一行后重新扫描当前 React DOM，避免第一行切换引起表格重渲染后继续使用失效的 WebElement。
+- 提交前的 `skuTable` 状态写入和提交后复核都必须覆盖全部匹配索引；任一重复行仍在线时，该任务不得记为成功。
+- 若目标条形码的全部匹配行就是商品当前全部在线 SKU，批量下架会导致零在线 SKU，仍按 `sole_sku_requires_product_offline` 业务异常停止并钉钉告警，不自动整商品下架。
+
 ## 2026-03-26 Managed Update
 
 - New live-page finding:

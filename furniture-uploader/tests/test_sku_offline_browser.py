@@ -22,6 +22,7 @@ from exceptions import (
     OfflineStoreMismatchError,
     OfflineTaskNotFoundError,
     OfflineTaskStateError,
+    PublishSubmitError,
     PublishValidationError,
 )
 from sku_offline_browser import SkuOfflineBrowser
@@ -823,9 +824,9 @@ class SkuOfflineBrowserTests(unittest.TestCase):
         browser.driver = FakeSuccessDriver()
         row = object()
         calls: list[str] = []
-        browser._find_sku_row_by_runtime_value = lambda context: row  # type: ignore[method-assign]
+        browser._find_sku_rows_by_runtime_value = lambda context: [row]  # type: ignore[method-assign]
         browser._wait_for_element = lambda selector: calls.append("wait")  # type: ignore[method-assign]
-        browser._toggle_found_sku_row = lambda selectors, context, sku_row: sku_row is row  # type: ignore[method-assign]
+        browser._toggle_found_sku_rows = lambda selectors, context, sku_rows: sku_rows == [row]  # type: ignore[method-assign]
 
         changed = browser._toggle_sku_offline(
             {"sku_row": {"by": "xpath", "value": "//tr[.//input[@value='{online_sku}']]"}},
@@ -834,6 +835,179 @@ class SkuOfflineBrowserTests(unittest.TestCase):
 
         self.assertTrue(changed)
         self.assertEqual(calls, [])
+
+    def test_duplicate_barcode_rows_are_all_toggled_offline(self) -> None:
+        class DuplicateSwitch:
+            def __init__(self, online: bool) -> None:
+                self.online = online
+
+            @property
+            def text(self) -> str:
+                return "上架" if self.online else "下架"
+
+            def get_attribute(self, name: str) -> str:
+                return ("true" if self.online else "false") if name == "aria-checked" else ""
+
+            def is_displayed(self) -> bool:
+                return True
+
+        class DuplicateRow:
+            def __init__(self, row_id: str, switch: DuplicateSwitch) -> None:
+                self.id = row_id
+                self.switch = switch
+
+            def find_element(self, by: str, value: str) -> DuplicateSwitch:
+                return self.switch
+
+        class DuplicateDriver(FakeSuccessDriver):
+            def __init__(self, switches: list[DuplicateSwitch]) -> None:
+                super().__init__()
+                self.switches = switches
+
+            def execute_script(self, script: str, *args: object) -> object:
+                if "button[role=\"switch\"].ant-switch" in script:
+                    return self.switches
+                if "arguments[0].click" in script:
+                    args[0].online = not args[0].online  # type: ignore[attr-defined]
+                return None
+
+        duplicate_switches = [DuplicateSwitch(True), DuplicateSwitch(True)]
+        other_switch = DuplicateSwitch(True)
+        browser = SkuOfflineBrowser({}, PROJECT_ROOT)
+        browser.driver = DuplicateDriver([*duplicate_switches, other_switch])
+        rows = [
+            DuplicateRow("row-1", duplicate_switches[0]),
+            DuplicateRow("row-2", duplicate_switches[1]),
+        ]
+        browser._find_sku_rows_by_runtime_value = lambda context: rows  # type: ignore[method-assign]
+        browser._pause = lambda seconds: None  # type: ignore[method-assign]
+        browser._wait_for_switch_change = lambda *args, **kwargs: None  # type: ignore[method-assign]
+        context: dict[str, object] = {"online_sku": "DUPLICATE-CODE"}
+
+        changed = browser._toggle_sku_offline(
+            {
+                "sku_row": {"by": "xpath", "value": "//tr"},
+                "sku_switch": {"by": "css", "value": "button.ant-switch"},
+            },
+            context,
+        )
+
+        self.assertTrue(changed)
+        self.assertEqual([switch.online for switch in duplicate_switches], [False, False])
+        self.assertTrue(other_switch.online)
+        self.assertEqual(context["matching_sku_row_count"], 2)
+        self.assertEqual(context["matching_sku_changed_count"], 2)
+
+    def test_duplicate_barcode_rows_are_idempotent_when_all_already_offline(self) -> None:
+        class OfflineSwitch:
+            text = "下架"
+
+            def get_attribute(self, name: str) -> str:
+                return "false" if name == "aria-checked" else ""
+
+            def is_displayed(self) -> bool:
+                return True
+
+        class OfflineRow:
+            def __init__(self, row_id: str) -> None:
+                self.id = row_id
+                self.switch = OfflineSwitch()
+
+            def find_element(self, by: str, value: str) -> OfflineSwitch:
+                return self.switch
+
+        browser = SkuOfflineBrowser({}, PROJECT_ROOT)
+        browser.driver = FakeSuccessDriver()
+        rows = [OfflineRow("row-1"), OfflineRow("row-2")]
+        browser._find_sku_rows_by_runtime_value = lambda context: rows  # type: ignore[method-assign]
+        browser._assert_target_not_sole_online_sku = lambda *args, **kwargs: None  # type: ignore[method-assign]
+        context: dict[str, object] = {"online_sku": "DUPLICATE-CODE"}
+
+        changed = browser._toggle_sku_offline(
+            {
+                "sku_row": {"by": "xpath", "value": "//tr"},
+                "sku_switch": {"by": "css", "value": "button.ant-switch"},
+            },
+            context,
+        )
+
+        self.assertFalse(changed)
+        self.assertEqual(context["matching_sku_offline_before"], 2)
+
+    def test_duplicate_barcode_rows_block_when_they_cover_all_online_skus(self) -> None:
+        class OnlineSwitch:
+            text = "上架"
+
+            def get_attribute(self, name: str) -> str:
+                return "true" if name == "aria-checked" else ""
+
+            def is_displayed(self) -> bool:
+                return True
+
+        class OnlineRow:
+            def __init__(self, row_id: str, switch: OnlineSwitch) -> None:
+                self.id = row_id
+                self.switch = switch
+
+            def find_element(self, by: str, value: str) -> OnlineSwitch:
+                return self.switch
+
+        switches = [OnlineSwitch(), OnlineSwitch()]
+        rows = [OnlineRow("row-1", switches[0]), OnlineRow("row-2", switches[1])]
+        browser = SkuOfflineBrowser({}, PROJECT_ROOT)
+        browser.driver = FakeSuccessDriver()
+        browser.driver.execute_script = lambda script, *args: switches  # type: ignore[attr-defined]
+        browser._find_sku_rows_by_runtime_value = lambda context: rows  # type: ignore[method-assign]
+        context: dict[str, object] = {"online_sku": "DUPLICATE-CODE"}
+
+        with self.assertRaises(PublishValidationError):
+            browser._toggle_sku_offline(
+                {
+                    "sku_row": {"by": "xpath", "value": "//tr"},
+                    "sku_switch": {"by": "css", "value": "button.ant-switch"},
+                },
+                context,
+            )
+
+        self.assertEqual(context["page_error_category"], "sole_sku_requires_product_offline")
+        self.assertEqual(context["sku_switch_summary_before"]["target_online_switch_count"], 2)
+
+    def test_post_submit_verification_rejects_any_duplicate_row_still_online(self) -> None:
+        class VerifySwitch:
+            def __init__(self, online: bool) -> None:
+                self.online = online
+
+            @property
+            def text(self) -> str:
+                return "上架" if self.online else "下架"
+
+            def get_attribute(self, name: str) -> str:
+                return ("true" if self.online else "false") if name == "aria-checked" else ""
+
+        class VerifyRow:
+            def __init__(self, row_id: str, switch: VerifySwitch) -> None:
+                self.id = row_id
+                self.switch = switch
+
+            def find_element(self, by: str, value: str) -> VerifySwitch:
+                return self.switch
+
+        rows = [
+            VerifyRow("row-1", VerifySwitch(False)),
+            VerifyRow("row-2", VerifySwitch(True)),
+        ]
+        browser = SkuOfflineBrowser({}, PROJECT_ROOT)
+        browser.driver = FakeSuccessDriver()
+        browser._find_sku_rows_by_runtime_value = lambda context: rows  # type: ignore[method-assign]
+        context: dict[str, object] = {"online_sku": "DUPLICATE-CODE"}
+
+        with self.assertRaisesRegex(PublishSubmitError, "Duplicate SKU rows"):
+            browser._read_current_sku_switch_state(
+                {"sku_switch": {"by": "css", "value": "button.ant-switch"}},
+                context,
+            )
+
+        self.assertEqual(context["post_submit_matching_sku_row_count"], 2)
 
     def test_sole_online_sku_is_blocked_before_toggle(self) -> None:
         browser = SkuOfflineBrowser({}, PROJECT_ROOT)
@@ -996,7 +1170,7 @@ class SkuOfflineBrowserTests(unittest.TestCase):
         browser._assert_no_risk_control_block = lambda context: None  # type: ignore[method-assign]
         browser._activate_sales_info_section = lambda selectors, context: activated.append("sales")  # type: ignore[method-assign]
         browser._extract_product_id_from_current_url = lambda: "1023529250812"  # type: ignore[method-assign]
-        browser._find_sku_row_by_runtime_value = lambda context: sku_row  # type: ignore[method-assign]
+        browser._find_sku_rows_by_runtime_value = lambda context: [sku_row]  # type: ignore[method-assign]
         browser._read_switch_label = lambda element: "下架"  # type: ignore[method-assign]
         browser._is_already_offline = lambda element, label: True  # type: ignore[method-assign]
 
@@ -1020,7 +1194,7 @@ class SkuOfflineBrowserTests(unittest.TestCase):
         browser.driver = FakeSuccessDriver()
         sku_row = object()
         switch = object()
-        browser._find_sku_row_by_runtime_value = lambda context: sku_row  # type: ignore[method-assign]
+        browser._find_sku_rows_by_runtime_value = lambda context: [sku_row]  # type: ignore[method-assign]
         browser._wait_for_element = lambda selector: (_ for _ in ()).throw(  # type: ignore[method-assign]
             AssertionError("XPath fallback should not run when the runtime row exists")
         )
@@ -1125,7 +1299,7 @@ class SkuOfflineBrowserTests(unittest.TestCase):
                 "find_element": lambda self, by, value: switch,
             },
         )()
-        browser._find_sku_row_by_runtime_value = lambda context: row  # type: ignore[method-assign]
+        browser._find_sku_rows_by_runtime_value = lambda context: [row]  # type: ignore[method-assign]
         browser.driver.find_elements = lambda *args: (_ for _ in ()).throw(  # type: ignore[attr-defined]
             AssertionError("static XPath fallback should not run")
         )
