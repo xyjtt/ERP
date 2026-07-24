@@ -148,15 +148,15 @@ def detect_edge_version_from_installation(browser_binary_path: str = "") -> str:
         if direct_version:
             return direct_version
         install_roots.append(binary_path.parent)
-
-    for env_name, suffix in (
-        ("PROGRAMFILES(X86)", Path("Microsoft/Edge/Application")),
-        ("PROGRAMFILES", Path("Microsoft/Edge/Application")),
-        ("LOCALAPPDATA", Path("Microsoft/Edge/Application")),
-    ):
-        base = str(os.getenv(env_name, "")).strip()
-        if base:
-            install_roots.append(Path(base) / suffix)
+    else:
+        for env_name, suffix in (
+            ("PROGRAMFILES(X86)", Path("Microsoft/Edge/Application")),
+            ("PROGRAMFILES", Path("Microsoft/Edge/Application")),
+            ("LOCALAPPDATA", Path("Microsoft/Edge/Application")),
+        ):
+            base = str(os.getenv(env_name, "")).strip()
+            if base:
+                install_roots.append(Path(base) / suffix)
 
     versions: list[str] = []
     seen: set[Path] = set()
