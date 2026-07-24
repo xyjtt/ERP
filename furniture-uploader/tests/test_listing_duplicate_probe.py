@@ -13,6 +13,7 @@ if str(RPA_ROOT) not in sys.path:
 from listing_duplicate_probe import (
     evaluate_duplicate_gate,
     parse_draft_count,
+    parse_pagination_total,
     summarize_search_result,
 )
 
@@ -22,6 +23,11 @@ class ListingDuplicateProbeTests(unittest.TestCase):
         self.assertEqual(parse_draft_count("草稿箱 (3)"), 3)
         self.assertEqual(parse_draft_count("草稿（19）"), 19)
         self.assertIsNone(parse_draft_count("全部商品"))
+
+    def test_parse_pagination_total(self) -> None:
+        self.assertEqual(parse_pagination_total("共 17 条"), 17)
+        self.assertEqual(parse_pagination_total("总计3条"), 3)
+        self.assertIsNone(parse_pagination_total("每页 20 条"))
 
     def test_search_result_requires_rows_or_explicit_no_data(self) -> None:
         found = summarize_search_result("XG0143", ["XG014317 商品"], "")

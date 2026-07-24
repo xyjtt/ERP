@@ -40,6 +40,20 @@ def parse_draft_count(text: Any) -> int | None:
     return None
 
 
+def parse_pagination_total(text: Any) -> int | None:
+    body = str(text or "")
+    patterns = (
+        r"共\s*(\d+)\s*条",
+        r"共\s*(\d+)\s*个商品",
+        r"总计\s*(\d+)\s*条",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, body)
+        if match:
+            return int(match.group(1))
+    return None
+
+
 def summarize_search_result(
     query: str,
     row_texts: Iterable[str],
@@ -155,36 +169,38 @@ class LiveListingDuplicateProbe:
         self._switch_management_frame(selectors)
         self.browser._wait_for_management_search_ready({})
 
-        body_text = self._body_text()
         frame_draft_hints = self._draft_hints()
-        draft_count = parse_draft_count(
-            "\n".join(
-                [
-                    top_level_body,
-                    body_text,
-                    *(item["text"] for item in top_level_draft_hints),
-                    *(item["text"] for item in frame_draft_hints),
-                ]
-            )
-        )
         results = []
         for candidate in candidates:
             sku_result = self._search(selectors, candidate.sku)
             spu_result = self._search(selectors, candidate.spu)
-            gate = evaluate_duplicate_gate(
-                sku_search=sku_result,
-                spu_search=spu_result,
-                draft_count=draft_count,
-                draft_limit=self.draft_limit,
-            )
             results.append(
                 {
                     "sku": candidate.sku,
                     "spu": candidate.spu,
                     "sku_search": sku_result,
                     "spu_search": spu_result,
-                    "duplicate_check": gate,
                 }
+            )
+
+        draft_evidence = self._inspect_draft_count(selectors)
+        draft_count = draft_evidence["draft_count"]
+        if draft_count is None:
+            draft_count = parse_draft_count(
+                "\n".join(
+                    [
+                        top_level_body,
+                        *(item["text"] for item in top_level_draft_hints),
+                        *(item["text"] for item in frame_draft_hints),
+                    ]
+                )
+            )
+        for item in results:
+            item["duplicate_check"] = evaluate_duplicate_gate(
+                sku_search=item["sku_search"],
+                spu_search=item["spu_search"],
+                draft_count=draft_count,
+                draft_limit=self.draft_limit,
             )
 
         passed = bool(tab_all and identity["matched"] and results) and all(
@@ -200,6 +216,7 @@ class LiveListingDuplicateProbe:
             "tab_count": len(driver.window_handles),
             "draft_count": draft_count,
             "draft_limit": self.draft_limit,
+            "draft_count_evidence": draft_evidence,
             "draft_hints": {
                 "top_level": top_level_draft_hints,
                 "management_frame": frame_draft_hints,
@@ -272,6 +289,20 @@ class LiveListingDuplicateProbe:
         result = summarize_search_result(query, row_texts, self._body_text())
         result["input_value_verified"] = input_value == query
         result["rows_changed"] = tuple(row_texts) != before_rows
+        if (
+            result["status"] == "inconclusive"
+            and result["input_value_verified"]
+            and result["rows_changed"]
+            and row_texts
+        ):
+            result["status"] = "found"
+            result["match_method"] = "filtered_result_set"
+        elif result["exact_text_match_count"]:
+            result["match_method"] = "visible_exact_text"
+        elif result["status"] == "clear":
+            result["match_method"] = "platform_no_data"
+        else:
+            result["match_method"] = "inconclusive"
         return result
 
     def _wait_for_search_settle(
@@ -356,3 +387,96 @@ class LiveListingDuplicateProbe:
             for item in list(values or [])
             if isinstance(item, dict) and str(item.get("text") or "").strip()
         ]
+
+    def _inspect_draft_count(self, selectors: dict[str, Any]) -> dict[str, Any]:
+        driver = self.browser.driver
+        assert driver is not None
+        product_selector = self.browser._resolve_selector(selectors.get("product_id_input", {}), {})
+        title_selector = self.browser._resolve_selector(selectors.get("title_sku_input", {}), {})
+        product_input = self.browser._wait_for_element(product_selector, clickable=True)
+        title_input = self.browser._wait_for_element(title_selector, clickable=True)
+        self.browser._fill_management_search_field(product_input, "")
+        self.browser._fill_management_search_field(title_input, "")
+        title_input.send_keys(Keys.ENTER)
+        time.sleep(2.0)
+
+        draft_tabs = driver.find_elements(
+            By.XPATH,
+            "//*[normalize-space(text())='草稿箱']",
+        )
+        draft_tab = next((item for item in draft_tabs if item.is_displayed()), None)
+        if draft_tab is None:
+            return {
+                "draft_count": None,
+                "status": "inconclusive",
+                "reason": "draft tab is not visible",
+            }
+        driver.execute_script("arguments[0].click();", draft_tab)
+        time.sleep(2.0)
+
+        deadline = time.monotonic() + float(
+            self.browser.browser_config.get("explicit_wait_seconds", 20)
+        )
+        previous_rows: tuple[str, ...] | None = None
+        stable_count = 0
+        while time.monotonic() < deadline:
+            rows = tuple(self._visible_result_rows())
+            body = self._body_text()
+            no_data_marker = next(
+                (marker for marker in NO_DATA_MARKERS if marker in body),
+                "",
+            )
+            pagination_texts = [
+                str(element.text or "").strip()
+                for element in driver.find_elements(
+                    By.CSS_SELECTOR,
+                    ".ant-pagination-total-text, .next-pagination-total, [class*='pagination']",
+                )
+                if str(element.text or "").strip()
+            ]
+            pagination_total = parse_pagination_total("\n".join(pagination_texts))
+            active = bool(
+                driver.execute_script(
+                    """
+                    const node = arguments[0];
+                    for (const candidate of [node, node.parentElement, node.parentElement && node.parentElement.parentElement]) {
+                      if (candidate && String(candidate.className || '').toLowerCase().includes('active')) return true;
+                    }
+                    return false;
+                    """,
+                    draft_tab,
+                )
+            )
+            if rows == previous_rows:
+                stable_count += 1
+            else:
+                stable_count = 0
+            previous_rows = rows
+            if active and stable_count >= 2:
+                if pagination_total is not None:
+                    draft_count = pagination_total
+                    source = "pagination_total"
+                elif no_data_marker and not rows:
+                    draft_count = 0
+                    source = "platform_no_data"
+                elif len(rows) < 20:
+                    draft_count = len(rows)
+                    source = "visible_rows_below_page_size"
+                else:
+                    draft_count = None
+                    source = "page_size_boundary"
+                return {
+                    "draft_count": draft_count,
+                    "status": "passed" if draft_count is not None else "inconclusive",
+                    "source": source,
+                    "active": active,
+                    "visible_row_count": len(rows),
+                    "pagination_texts": pagination_texts,
+                    "no_data_marker": no_data_marker,
+                }
+            time.sleep(0.5)
+        return {
+            "draft_count": None,
+            "status": "inconclusive",
+            "reason": "draft tab did not settle",
+        }
