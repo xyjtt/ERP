@@ -20,6 +20,7 @@ from auto_listing_executor import (
     build_execution_payload,
     execute_browser_task,
     extract_detail_upload_resume_evidence,
+    extract_draft_reconciliation_evidence,
     extract_submit_reconciliation_evidence,
     restore_execution_only_detail_images,
 )
@@ -41,6 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
             "approve",
             "reject",
             "submit",
+            "reconcile-draft",
             "reconcile-submit",
             "writeback",
         ],
@@ -66,6 +68,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="failure-context JSON containing contiguous completed picker batches",
     )
     parser.add_argument("--offer-url", default="", help="verified offer URL for writeback")
+    parser.add_argument(
+        "--draft-evidence",
+        default="",
+        help="failed draft context that proves 1688 returned a matching draft_id",
+    )
+    parser.add_argument(
+        "--draft-inspection",
+        default="",
+        help="read-only independent inspection of the recovered draft",
+    )
     parser.add_argument(
         "--submit-evidence",
         default="",
@@ -172,6 +184,20 @@ def main() -> int:
         failure_payload = json.loads(Path(args.submit_evidence).read_text(encoding="utf-8-sig"))
         evidence = extract_submit_reconciliation_evidence(payload, failure_payload)
         updated = advance_listing_state(payload, "submit_succeeded", evidence=evidence)
+        repository = _load_listing_audit_repository(args.shared_runtime_root)
+        repository.upsert_task(updated)
+        repository.record_latest_event(updated, operator_name=args.operator)
+        _write_result(updated, args.output)
+        return 0
+    if args.mode == "reconcile-draft":
+        if not args.draft_evidence:
+            raise ValueError("--draft-evidence is required for reconcile-draft")
+        if not args.draft_inspection:
+            raise ValueError("--draft-inspection is required for reconcile-draft")
+        failure_payload = json.loads(Path(args.draft_evidence).read_text(encoding="utf-8-sig"))
+        inspection_payload = json.loads(Path(args.draft_inspection).read_text(encoding="utf-8-sig"))
+        evidence = extract_draft_reconciliation_evidence(payload, failure_payload, inspection_payload)
+        updated = advance_listing_state(payload, "draft_saved", evidence=evidence)
         repository = _load_listing_audit_repository(args.shared_runtime_root)
         repository.upsert_task(updated)
         repository.record_latest_event(updated, operator_name=args.operator)

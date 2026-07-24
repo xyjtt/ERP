@@ -24,6 +24,7 @@ from auto_listing_executor import (
     build_release_variant_payload,
     extract_draft_id,
     extract_detail_upload_resume_evidence,
+    extract_draft_reconciliation_evidence,
     extract_submit_reconciliation_evidence,
     extract_offer_id,
     restore_execution_only_detail_images,
@@ -227,6 +228,39 @@ class AutoListingExecutorTests(unittest.TestCase):
             ["main_image", "detail_images", "buyer_protection_ship_time", "logistics_dimensions"],
         )
 
+    def test_full_draft_repair_repopulates_core_fields(self) -> None:
+        publish = {
+            "steps": [
+                {"name": "category"},
+                {"name": "title"},
+                {"name": "price"},
+                {"name": "quantity"},
+                {"name": "category_defaults"},
+                {"name": "spec_values"},
+                {"name": "main_image"},
+                {"name": "detail_images"},
+                {"name": "buyer_protection_ship_time"},
+                {"name": "logistics_dimensions"},
+            ]
+        }
+
+        _configure_draft_repair_steps(publish, full_rebuild=True)
+
+        self.assertEqual(
+            [step["name"] for step in publish["steps"]],
+            [
+                "title",
+                "price",
+                "quantity",
+                "category_defaults",
+                "spec_values",
+                "main_image",
+                "detail_images",
+                "buyer_protection_ship_time",
+                "logistics_dimensions",
+            ],
+        )
+
     def test_capacity_repair_preserves_existing_main_image(self) -> None:
         publish = {
             "steps": [
@@ -316,6 +350,72 @@ class AutoListingExecutorTests(unittest.TestCase):
 
         self.assertEqual(evidence["offer_id"], "1068081966540")
         self.assertEqual(evidence["post_submit_verified"], "reconciled_success_page")
+
+    def test_draft_reconciliation_requires_matching_success_and_read_only_inspection(self) -> None:
+        payload = sample_payload()
+        failure_payload = {
+            "task_id": payload["task_id"],
+            "error_type": "PublishValidationError",
+            "error": "main image did not persist",
+            "result_context": {
+                "current_url": "https://offer-new.1688.com/popular/publish.htm?draftId=draft-1",
+                "draft_submit_trace": {
+                    "status": 200,
+                    "url": "https://offer-new.1688.com/popular/draftSubmit.htm",
+                    "responseJson": {"success": True, "data": {"draftId": "draft-1"}},
+                },
+                "draft_submit_reapply_required_fields": ["send_address", "buyer_protection"],
+            },
+        }
+        inspection_payload = {
+            "status": "failed",
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+            "task_id": payload["task_id"],
+            "draft_id": "draft-1",
+            "checks": {
+                "draft_id": True,
+                "title": False,
+                "price": False,
+                "quantity": False,
+                "main_image_present": False,
+            },
+            "draft_saved": False,
+            "offer_submitted": False,
+        }
+
+        evidence = extract_draft_reconciliation_evidence(
+            payload, failure_payload, inspection_payload
+        )
+
+        self.assertEqual(evidence["draft_id"], "draft-1")
+        self.assertEqual(evidence["repair_scope"], "full")
+        self.assertFalse(evidence["post_save_verified"])
+
+    def test_draft_reconciliation_rejects_mismatched_inspection_draft(self) -> None:
+        payload = sample_payload()
+        failure_payload = {
+            "task_id": payload["task_id"],
+            "error_type": "PublishValidationError",
+            "result_context": {
+                "current_url": "https://offer-new.1688.com/popular/publish.htm?draftId=draft-1",
+                "draft_submit_trace": {
+                    "status": 200,
+                    "url": "https://offer-new.1688.com/popular/draftSubmit.htm",
+                    "responseJson": {"success": True, "data": {"draftId": "draft-1"}},
+                },
+            },
+        }
+        inspection_payload = {
+            "status": "failed",
+            "task_id": payload["task_id"],
+            "draft_id": "draft-2",
+            "checks": {"draft_id": True, "title": False},
+            "draft_saved": False,
+            "offer_submitted": False,
+        }
+
+        with self.assertRaisesRegex(ListingContractError, "inspection draft_id"):
+            extract_draft_reconciliation_evidence(payload, failure_payload, inspection_payload)
 
     def test_extract_draft_id_prefers_submit_response(self) -> None:
         context = {

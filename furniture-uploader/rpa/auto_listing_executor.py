@@ -34,6 +34,20 @@ DRAFT_REPAIR_STEP_NAMES = {
     "logistics_dimensions",
 }
 
+FULL_DRAFT_REPAIR_STEP_NAMES = DRAFT_REPAIR_STEP_NAMES | {
+    "title",
+    "price",
+    "price_begin_amount",
+    "quantity",
+    "brand",
+    "material",
+    "category_defaults",
+    "spec_values",
+    "ship_from_template",
+    "freight_template",
+    "ship_time_template",
+}
+
 
 def _enabled(name: str) -> bool:
     return str(os.getenv(name, "")).strip().lower() in {"1", "true", "yes", "on"}
@@ -245,8 +259,9 @@ def _configure_draft_repair_steps(
     publish: dict[str, Any],
     *,
     skip_main_image: bool = False,
+    full_rebuild: bool = False,
 ) -> None:
-    allowed_names = set(DRAFT_REPAIR_STEP_NAMES)
+    allowed_names = set(FULL_DRAFT_REPAIR_STEP_NAMES if full_rebuild else DRAFT_REPAIR_STEP_NAMES)
     if skip_main_image:
         allowed_names.discard("main_image")
     publish["steps"] = [
@@ -393,6 +408,93 @@ def extract_submit_reconciliation_evidence(
     }
 
 
+def extract_draft_reconciliation_evidence(
+    payload: dict[str, Any],
+    failure_payload: dict[str, Any],
+    inspection_payload: dict[str, Any],
+) -> dict[str, Any]:
+    task_id = str(payload.get("task_id") or "").strip()
+    if str(failure_payload.get("task_id") or "").strip() != task_id:
+        raise ListingContractError("draft reconciliation evidence task_id does not match payload")
+    if str((payload.get("workflow") or {}).get("state") or "").strip() != STATE_DRAFT_PENDING:
+        raise ListingContractError("draft reconciliation requires draft_pending state")
+    if str(failure_payload.get("error_type") or "").strip() != "PublishValidationError":
+        raise ListingContractError("draft reconciliation requires a post-save validation failure")
+
+    context = failure_payload.get("result_context") or {}
+    if not isinstance(context, dict):
+        raise ListingContractError("draft reconciliation evidence is missing result_context")
+    trace = context.get("draft_submit_trace") or {}
+    if not isinstance(trace, dict):
+        raise ListingContractError("draft reconciliation evidence is missing draft_submit_trace")
+    if int(trace.get("status") or context.get("draft_submit_response_status") or 0) != 200:
+        raise ListingContractError("draft reconciliation evidence has a non-200 save response")
+    response_json = trace.get("responseJson") or {}
+    if not isinstance(response_json, dict) or response_json.get("success") is not True:
+        raise ListingContractError("draft reconciliation evidence has no successful save response")
+    response_draft_id = _nested_identifier(response_json, {"draftid", "draft_id"})
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", response_draft_id):
+        raise ListingContractError("draft reconciliation evidence has no valid response draft_id")
+
+    current_url = str(context.get("current_url") or "").strip()
+    current_parsed = urlparse(current_url)
+    if current_parsed.hostname != "offer-new.1688.com" or current_parsed.path != "/popular/publish.htm":
+        raise ListingContractError("draft reconciliation evidence is not a 1688 draft page")
+    trace_parsed = urlparse(str(trace.get("url") or ""))
+    if trace_parsed.hostname != "offer-new.1688.com" or not trace_parsed.path.endswith("/draftSubmit.htm"):
+        raise ListingContractError("draft reconciliation evidence is not a 1688 draft save request")
+    current_query = parse_qs(current_parsed.query)
+    page_draft_id = str(
+        (current_query.get("draftId") or current_query.get("offerDraftId") or [""])[0]
+    ).strip()
+    if page_draft_id != response_draft_id:
+        raise ListingContractError("draft reconciliation page draft_id does not match save response")
+
+    if str(inspection_payload.get("task_id") or "").strip() != task_id:
+        raise ListingContractError("draft inspection task_id does not match payload")
+    if str(inspection_payload.get("draft_id") or "").strip() != response_draft_id:
+        raise ListingContractError("draft inspection draft_id does not match save response")
+    if inspection_payload.get("draft_saved") is not False or inspection_payload.get("offer_submitted") is not False:
+        raise ListingContractError("draft inspection must be read-only")
+    inspection_status = str(inspection_payload.get("status") or "").strip()
+    checks = inspection_payload.get("checks") or {}
+    if inspection_status not in {"passed", "failed"} or not isinstance(checks, dict) or not checks:
+        raise ListingContractError("draft inspection status or checks are invalid")
+    if checks.get("draft_id") is not True:
+        raise ListingContractError("draft inspection did not verify the draft_id")
+
+    missing_checks = sorted(str(name) for name, passed in checks.items() if passed is not True)
+    full_rebuild_checks = {
+        "title",
+        "price",
+        "quantity",
+        "main_image_present",
+        "main_image_square",
+        "detail_image_count",
+        "spec_color",
+        "logistics",
+    }
+    repair_scope = "full" if full_rebuild_checks.intersection(missing_checks) else "required_fields"
+    return {
+        "draft_id": response_draft_id,
+        "draft_url": (
+            "https://offer.1688.com/offer/post/fillProductInfo.htm?"
+            + urlencode({"operator": "draft2offer", "offerDraftId": response_draft_id})
+        ),
+        "publish_url": current_url,
+        "draft_response_status": 200,
+        "post_save_verified": inspection_status == "passed" and not missing_checks,
+        "reconciled_after_validation_failure": True,
+        "repair_scope": repair_scope,
+        "missing_checks": missing_checks,
+        "inspection_checked_at": str(inspection_payload.get("checked_at") or "").strip(),
+        "validation_error": str(failure_payload.get("error") or "").strip(),
+        "submit_reapply_required_fields": list(
+            context.get("draft_submit_reapply_required_fields", []) or []
+        ),
+    }
+
+
 def _has_image_album_capacity_block(payload: dict[str, Any]) -> bool:
     workflow = payload.get("workflow") or {}
     events = list(workflow.get("event_history") or [])
@@ -460,7 +562,11 @@ def execute_browser_task(
     else:
         _configure_auto_listing_steps(publish)
         if pending_draft_id:
-            _configure_draft_repair_steps(publish)
+            draft_evidence = ((payload.get("workflow") or {}).get("draft") or {})
+            _configure_draft_repair_steps(
+                publish,
+                full_rebuild=str(draft_evidence.get("repair_scope") or "").strip() == "full",
+            )
     detail_image_count = len(list(((payload.get("images") or {}).get("detail_urls") or [])))
     if detail_image_count:
         publish.setdefault("draft_verification", {})["minimum_description_image_count"] = detail_image_count
