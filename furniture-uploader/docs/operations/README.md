@@ -1,5 +1,9 @@
 # Operations
 
+## Recent Reports
+
+- `2026-07-27_stop_sale_execution_report.md` - 7 月 27 日每日下架生产结果、根因、代码修复和执行机验收边界。
+
 本目录用于本地部署、联调和上线检查。
 
 当前建议优先查看：

@@ -1,5 +1,14 @@
 # DIRECT 1688 Progress
 
+## 2026-07-27 Managed Update (Stop-Sale Runtime Recovery Fixes)
+
+- 已完成三项开发修复：每个 Pipeline 尝试前重申 Worker 暂停、启动保护失败形成审计/Summary/钉钉闭环、`automation_error` 重试前重建当前店铺浏览器。
+- 已增加回归测试，覆盖 Worker 在两次尝试之间被外部重启、保护检查失败不启动 1688 子进程、分组结果异常和直接抛异常两种浏览器恢复路径。
+- 开发机全量验证：Python `319 passed, 5 subtests passed`，聚水潭 `check`、`18/18` 测试和 `build` 全部通过。
+- 现场根因不归因于 `1688-Watchdog`；该任务仅探测状态。真正的外部 Worker 启动源仍需在执行机任务历史和进程创建链中继续确认，但代码已能在每次尝试前安全收口。
+- `daily_20260727_123002_977385` 的生产结果保持为未全量完成，不能因本次开发回归而改写为成功。
+- 下一节点：提交并推送后，在无正在运行的业务任务时部署到执行机，执行 preflight、单店单商品真实 Canary，核对 1688 页面、聚水潭、审计表、Summary 和钉钉，再决定是否恢复每日全量任务。
+
 ## 2026-07-23 Managed Update (SKU Replacement Code Complete, Live Canary Pending)
 
 - `1688_sku_replace` 已完成代码闭环：BI preview、分店/商品分组、旧货号改新货号、一次提交、提交后复核、日志和钉钉异常字段。

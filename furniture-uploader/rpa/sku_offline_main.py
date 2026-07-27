@@ -335,6 +335,9 @@ def execute_preview(
         "auto_login_attempts": 0,
         "auto_login_success": 0,
         "auto_login_failed": 0,
+        "browser_recovery_attempts": 0,
+        "browser_recovery_success": 0,
+        "browser_recovery_failed": 0,
     }
     max_attempts = max(1, int(execution_config.get("max_retry", 1)) + 1)
     successful_task_statuses: dict[tuple[str, str, str], str] = {}
@@ -434,6 +437,34 @@ def execute_preview(
             )
             return True
 
+        def recreate_store_browser() -> None:
+            nonlocal browser
+            summary["browser_recovery_attempts"] += 1
+            safe_console_print(
+                f"[WARN] Recreate the owned 1688 browser session for {store_name} before retry."
+            )
+            try:
+                browser.close()
+                browser = SkuOfflineBrowser(
+                    store_operator_config.get("browser", {}),
+                    project_root,
+                )
+                browser.open()
+                try:
+                    browser.prepare_session(system_config, skip_login=True)
+                except OfflineLoginRequiredError:
+                    if not recover_store_session():
+                        raise
+            except Exception as exc:
+                summary["browser_recovery_failed"] += 1
+                browser.last_result_context = {
+                    "page_error_category": classify_offline_error(exc, {}),
+                    "page_error_stage": "browser_recovery",
+                    "page_error_text": str(exc),
+                }
+                raise
+            summary["browser_recovery_success"] += 1
+
         try:
             browser.open()
             try:
@@ -478,6 +509,7 @@ def execute_preview(
                             continue
 
                         retry_tasks: list[OfflineTask] = []
+                        retry_requires_browser_recovery = False
                         for outcome in outcomes:
                             task = outcome["task"]
                             result_context = dict(outcome.get("context") or {})
@@ -512,6 +544,10 @@ def execute_preview(
                                 and not should_stop_store_on_error(error_category, execution_config)
                             ):
                                 retry_tasks.append(task)
+                                retry_requires_browser_recovery = (
+                                    retry_requires_browser_recovery
+                                    or error_category == "automation_error"
+                                )
                                 continue
 
                             summary["failed"] += 1
@@ -543,6 +579,8 @@ def execute_preview(
                             break
                         pending_tasks = retry_tasks
                         if pending_tasks:
+                            if retry_requires_browser_recovery:
+                                recreate_store_browser()
                             safe_console_print(
                                 f"[WARN] Retry grouped product {pending_tasks[0].product_id} "
                                 f"for {len(pending_tasks)} SKU(s), attempt {attempts + 1}/{max_attempts}."
@@ -564,12 +602,24 @@ def execute_preview(
                             attempts < max_attempts
                             and should_retry_offline_error(error_category, execution_config)
                             and not should_stop_store_on_error(error_category, execution_config)
+                            and str(browser.last_result_context.get("page_error_stage") or "")
+                            != "browser_recovery"
                         ):
-                            safe_console_print(
-                                f"[WARN] Retry grouped product {product_tasks[0].product_id} "
-                                f"for {len(pending_tasks)} SKU(s), attempt {attempts + 1}/{max_attempts}."
-                            )
-                            continue
+                            try:
+                                if error_category == "automation_error":
+                                    recreate_store_browser()
+                            except Exception as recovery_exc:
+                                exc = recovery_exc
+                                error_category = classify_offline_error(
+                                    recovery_exc,
+                                    browser.last_result_context,
+                                )
+                            else:
+                                safe_console_print(
+                                    f"[WARN] Retry grouped product {product_tasks[0].product_id} "
+                                    f"for {len(pending_tasks)} SKU(s), attempt {attempts + 1}/{max_attempts}."
+                                )
+                                continue
 
                         for task in pending_tasks:
                             summary["failed"] += 1

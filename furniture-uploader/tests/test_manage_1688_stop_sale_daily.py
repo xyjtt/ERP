@@ -351,6 +351,10 @@ class Manage1688StopSaleDailyTests(unittest.TestCase):
                 ),
                 patch("manage_1688_stop_sale_daily.build_manager_lock", return_value=nullcontext()),
                 patch("manage_1688_stop_sale_daily.paused_worker", fake_paused_worker),
+                patch(
+                    "manage_1688_stop_sale_daily.ensure_worker_paused",
+                    return_value={"before": {}, "paused": {}, "actions": []},
+                ),
                 patch("manage_1688_stop_sale_daily._run_logged", side_effect=[2, 0]) as run_logged,
                 patch(
                     "manage_1688_stop_sale_daily._load_pipeline_result",
@@ -415,6 +419,10 @@ class Manage1688StopSaleDailyTests(unittest.TestCase):
                 ),
                 patch("manage_1688_stop_sale_daily.build_manager_lock", return_value=nullcontext()),
                 patch("manage_1688_stop_sale_daily.paused_worker", fake_paused_worker),
+                patch(
+                    "manage_1688_stop_sale_daily.ensure_worker_paused",
+                    return_value={"before": {}, "paused": {}, "actions": []},
+                ),
                 patch("manage_1688_stop_sale_daily._run_logged", side_effect=[2, 0]) as run_logged,
                 patch(
                     "manage_1688_stop_sale_daily._load_pipeline_result",
@@ -484,6 +492,23 @@ class Manage1688StopSaleDailyTests(unittest.TestCase):
                 ),
                 patch("manage_1688_stop_sale_daily.build_manager_lock", return_value=nullcontext()),
                 patch("manage_1688_stop_sale_daily.paused_worker", fake_paused_worker),
+                patch(
+                    "manage_1688_stop_sale_daily.ensure_worker_paused",
+                    side_effect=[
+                        {"before": {"scheduled_task_state": "Disabled"}, "paused": {}, "actions": []},
+                        {
+                            "before": {
+                                "scheduled_task_state": "Running",
+                                "worker_process_count": 2,
+                            },
+                            "paused": {
+                                "scheduled_task_state": "Disabled",
+                                "worker_process_count": 0,
+                            },
+                            "actions": ["Disable", "Stop"],
+                        },
+                    ],
+                ) as ensure_paused,
                 patch("manage_1688_stop_sale_daily._run_logged", side_effect=[124, 0]) as run_logged,
                 patch(
                     "manage_1688_stop_sale_daily._load_pipeline_result",
@@ -519,6 +544,10 @@ class Manage1688StopSaleDailyTests(unittest.TestCase):
         self.assertEqual(return_code, 0)
         self.assertEqual(summary["status"], "success")
         self.assertEqual(len(summary["batch_attempts"]), 2)
+        self.assertEqual(summary["worker_pause_check_count"], 2)
+        self.assertEqual(len(summary["worker_reassertions"]), 1)
+        self.assertEqual(summary["worker_reassertions"][0]["actions"], ["Disable", "Stop"])
+        self.assertEqual(ensure_paused.call_count, 2)
         self.assertEqual(second_command[second_command.index("--file") + 1], str(retry_file.resolve()))
 
     def test_missing_pipeline_summary_is_infrastructure_failure(self) -> None:

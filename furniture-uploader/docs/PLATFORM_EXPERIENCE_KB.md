@@ -1,5 +1,14 @@
 # Platform Experience Knowledge Base
 
+## 2026-07-27 Long-Running Stop-Sale Recovery Findings
+
+- 长时间每日下架不能假设 Crawler Worker 在外层上下文中一直保持 Disabled。其他计划任务或人工操作可能在中途重新启用它，因此每个浏览器批次尝试前都要重新检查计划任务状态、Worker 进程和 Profile Edge 进程。
+- 重申暂停时只允许操作指定的 `YYDD-1688-Crawler-Worker` 任务并等待其拥有的进程自然退出；未知 Profile Edge 必须等待或安全失败，不能通过全局结束 Python/Edge/Node 兜底。
+- Worker 或活动爬虫保护失败属于“批次已创建但未执行”的终态，应写 `not_attempted`、Pipeline Summary、审计结束状态和钉钉通知。仅打印异常或只发管理器总通知不足以追踪单批次。
+- `Timed out receiving message from renderer`、通用 selector 超时等 `automation_error` 可能表示当前 Edge renderer 已损坏。继续在同一个浏览器对象内重试价值很低；应关闭当前代码拥有的店铺浏览器、重新打开相同 Profile、校验会话后再重试。
+- 浏览器重建仅适用于可重试自动化异常。`login_required` 使用账户级自动登录恢复，`risk_control` 必须停止，`sole_sku_requires_product_offline`、`product_unavailable` 等业务终态只记录和通知。
+- 2026-07-27 现场排查已明确：`1688-Watchdog` 只上报 CDP/爬虫状态，不会启动 Crawler Worker，不能把它写成事故根因。
+
 ## 2026-07-23 SKU Replacement Findings
 
 - 商品管理入口对下架和替换都必须归一化为 `tab=all`，并在页面加载后显式确认“全部”Tab；“销售中”会漏掉已下架、审核中或其他状态商品。

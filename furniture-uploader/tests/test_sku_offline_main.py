@@ -871,6 +871,171 @@ class SkuOfflineMainTests(unittest.TestCase):
         self.assertEqual(summary["auto_login_success"], 1)
         self.assertEqual(summary["auto_login_failed"], 0)
 
+    def test_automation_error_recreates_browser_before_group_retry(self) -> None:
+        task = OfflineTask(
+            source_file="demo.csv",
+            source_sheet="CSV",
+            source_row_number=2,
+            store_name="STORE-A",
+            platform="Alibaba",
+            product_id="1001",
+            online_sku="SKU-A",
+            handling="all-channel-offline",
+            replacement_sku="",
+            change_image="",
+            platform_store_item_code="CODE-A",
+            raw={},
+        )
+
+        class FakeBrowser:
+            instances: list["FakeBrowser"] = []
+
+            def __init__(self, *_args, **_kwargs) -> None:
+                self.index = len(self.instances)
+                self.instances.append(self)
+                self.last_result_context: dict[str, str] = {}
+                self.last_screenshot_path = ""
+                self.last_html_snapshot_path = ""
+                self.opened = False
+                self.prepared = False
+                self.closed = False
+
+            def open(self) -> None:
+                self.opened = True
+
+            def prepare_session(self, *_args, **_kwargs) -> None:
+                self.prepared = True
+
+            def reset_runtime_artifacts(self) -> None:
+                self.last_result_context = {}
+
+            def execute_offline_group(self, _config, tasks, **_kwargs):
+                if self.index == 0:
+                    return [
+                        {
+                            "task": tasks[0],
+                            "status": "failed",
+                            "context": {"page_error_category": "automation_error"},
+                            "error": RuntimeError("Timed out receiving message from renderer"),
+                        }
+                    ]
+                return [{"task": tasks[0], "status": "success", "context": {}}]
+
+            def close(self) -> None:
+                self.closed = True
+
+        system_config = {
+            "execution": {
+                "max_retry": 1,
+                "require_store_account_mapping": True,
+                "store_accounts": [{"store_name": "STORE-A", "account_key": "store_a"}],
+                "auto_login_fallback": {"enabled": False},
+            },
+            "notifications": {"dingtalk": {"enabled": False}},
+        }
+
+        with (
+            patch("sku_offline_main.SkuOfflineBrowser", FakeBrowser),
+            patch("sku_offline_main.send_summary_notification"),
+        ):
+            summary = execute_preview(
+                project_root=PROJECT_ROOT,
+                operator_config={"browser": {}},
+                system_config=system_config,
+                preview={"selected_tasks": [task]},
+                skip_login=True,
+                no_notify=True,
+                run_report=FakeRunReport(),  # type: ignore[arg-type]
+            )
+
+        self.assertEqual(len(FakeBrowser.instances), 2)
+        self.assertTrue(FakeBrowser.instances[0].closed)
+        self.assertTrue(FakeBrowser.instances[1].opened)
+        self.assertTrue(FakeBrowser.instances[1].prepared)
+        self.assertTrue(FakeBrowser.instances[1].closed)
+        self.assertEqual(summary["success"], 1)
+        self.assertEqual(summary["failed"], 0)
+        self.assertEqual(summary["browser_recovery_attempts"], 1)
+        self.assertEqual(summary["browser_recovery_success"], 1)
+        self.assertEqual(summary["browser_recovery_failed"], 0)
+
+    def test_raised_automation_error_recreates_browser_before_retry(self) -> None:
+        task = OfflineTask(
+            source_file="demo.csv",
+            source_sheet="CSV",
+            source_row_number=2,
+            store_name="STORE-A",
+            platform="Alibaba",
+            product_id="1001",
+            online_sku="SKU-A",
+            handling="all-channel-offline",
+            replacement_sku="",
+            change_image="",
+            platform_store_item_code="CODE-A",
+            raw={},
+        )
+
+        class FakeBrowser:
+            instances: list["FakeBrowser"] = []
+
+            def __init__(self, *_args, **_kwargs) -> None:
+                self.index = len(self.instances)
+                self.instances.append(self)
+                self.last_result_context: dict[str, str] = {}
+                self.last_screenshot_path = ""
+                self.last_html_snapshot_path = ""
+                self.closed = False
+
+            def open(self) -> None:
+                return None
+
+            def prepare_session(self, *_args, **_kwargs) -> None:
+                return None
+
+            def reset_runtime_artifacts(self) -> None:
+                self.last_result_context = {}
+
+            def execute_offline_group(self, _config, tasks, **_kwargs):
+                if self.index == 0:
+                    raise RuntimeError("renderer process is unresponsive")
+                return [{"task": tasks[0], "status": "success", "context": {}}]
+
+            def close(self) -> None:
+                self.closed = True
+
+        system_config = {
+            "execution": {
+                "max_retry": 1,
+                "require_store_account_mapping": True,
+                "store_accounts": [{"store_name": "STORE-A", "account_key": "store_a"}],
+                "auto_login_fallback": {"enabled": False},
+            },
+            "notifications": {"dingtalk": {"enabled": False}},
+        }
+
+        with (
+            patch("sku_offline_main.SkuOfflineBrowser", FakeBrowser),
+            patch("sku_offline_main.send_summary_notification"),
+        ):
+            summary = execute_preview(
+                project_root=PROJECT_ROOT,
+                operator_config={"browser": {}},
+                system_config=system_config,
+                preview={"selected_tasks": [task]},
+                skip_login=True,
+                no_notify=True,
+                run_report=FakeRunReport(),  # type: ignore[arg-type]
+            )
+
+        self.assertEqual(len(FakeBrowser.instances), 2)
+        self.assertTrue(FakeBrowser.instances[0].closed)
+        self.assertTrue(FakeBrowser.instances[1].closed)
+        self.assertEqual(summary["success"], 1)
+        self.assertEqual(summary["failed"], 0)
+        self.assertEqual(summary["browser_recovery_attempts"], 1)
+        self.assertEqual(summary["browser_recovery_success"], 1)
+        self.assertEqual(summary["browser_recovery_failed"], 0)
+
     def test_jushuitan_handoff_preserves_distinct_platform_store_codes(self) -> None:
         first = OfflineTask(
             source_file="demo.csv",

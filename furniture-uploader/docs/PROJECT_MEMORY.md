@@ -1,5 +1,15 @@
 # Project Memory
 
+## 2026-07-27 Managed Update (Daily Stop-Sale Recovery Hardening)
+
+- 执行机批次 `daily_20260727_123002_977385` 于 12:30:02 至 16:58:59 运行：加载 116 条、选中 104 条、重复 12 条；1688 成功 13 条、已下架 10 条、失败 64 条、未尝试 17 条；聚水潭成功 23 条，最终状态为 `failed`。
+- 主要技术故障包括：乐畅登录失效并触发安全停店、工莱/沃来等待“销售信息”超时、淘淘 Edge renderer 超时。业务终态继续按异常记录并通知，不允许自动整商品下架。
+- 最后两个淘淘重试批次在启动 Pipeline 前发现 Crawler Worker 被外部重新启动，旧实现因此没有生成批次 Summary、审计终态和批次通知。调查已确认 `1688-Watchdog` 只做状态探测，不是 Worker 启动源。
+- 调度器现在在每次店铺批次和每次重试前重新检查 Worker；如被外部启动，只禁用/停止 Worker 自身并等待其进程退出，同时在管理器 Summary 中记录 `worker_pause_check_count` 和 `worker_reassertions`。
+- Pipeline 的 Worker/活动爬虫保护检查已移入审计批次生命周期。保护失败也会把待处理明细记为 `not_attempted`，生成 Summary，完成审计并发送钉钉通知。
+- 1688 自动化遇到可重试的 `automation_error` 时，不再复用可能损坏的 renderer；先关闭当前店铺拥有的浏览器并重建 Profile 会话，再重试同一商品组。登录、风控和业务终态仍沿用原有保守处理。
+- 开发机验证通过：Python `319 passed, 5 subtests passed`、`compileall` 通过；聚水潭 `npm run check`、`18/18` 测试和 `npm run build` 通过。执行机部署、真实浏览器 Canary、正式审计库和钉钉结果复核仍是交付门槛。
+
 ## 2026-07-23 Managed Update (1688 SKU Replacement + Jushuitan Link Sync)
 
 - 新增 `1688_sku_replace` 执行系统，筛选 `平台=Alibaba / 处理说明=全渠道替换`。

@@ -517,6 +517,7 @@ def run_pipeline(
     shared_lock_path: str,
     audit_repository: StopSaleAuditRepository | None = None,
     audit_tasks: list[Any] | None = None,
+    execute_guard: Callable[[], None] | None = None,
 ) -> int:
     handoff_path = pipeline_dir / f"{run_id}.jushuitan.jsonl"
     summary_path = pipeline_dir / f"{run_id}.summary.json"
@@ -551,6 +552,8 @@ def run_pipeline(
                 source_table=str(args.source_table),
             )
             audit_started = True
+            if execute_guard is not None:
+                execute_guard()
 
         command_1688 = build_1688_command(args, handoff_path)
         emit_pipeline_event(run_id, "1688_stage_started", timeout_seconds=args.timeout_1688_seconds)
@@ -773,6 +776,7 @@ def main() -> int:
             )
             raise
     lock, timeout_error, lock_path = build_shared_lock(args, run_id)
+    pipeline_invoked = False
     try:
         emit_pipeline_event(
             run_id,
@@ -782,18 +786,27 @@ def main() -> int:
         )
         with lock:
             emit_pipeline_event(run_id, "shared_lock_acquired", lock_path=lock_path)
+            execute_guard: Callable[[], None] | None = None
             if args.mode == "execute":
-                assert_crawler_worker_paused(args.crawler_worker_task_name)
-                active_crawler_tasks = audit_repository.count_active_crawler_tasks() if audit_repository else 0
-                if active_crawler_tasks > 0:
-                    raise RuntimeError(
-                        f"Crawler task center still has {active_crawler_tasks} active task(s); "
-                        "stop-sale execute is blocked until they reach a terminal state."
-                    )
                 assert_no_recent_stop_sale_runs(
                     audit_repository,
                     args.active_stop_sale_max_age_minutes,
                 )
+
+                def execute_guard() -> None:
+                    assert_crawler_worker_paused(args.crawler_worker_task_name)
+                    active_crawler_tasks = (
+                        audit_repository.count_active_crawler_tasks()
+                        if audit_repository is not None
+                        else 0
+                    )
+                    if active_crawler_tasks > 0:
+                        raise RuntimeError(
+                            f"Crawler task center still has {active_crawler_tasks} active task(s); "
+                            "stop-sale execute is blocked until they reach a terminal state."
+                        )
+
+            pipeline_invoked = True
             return run_pipeline(
                 args,
                 run_id=run_id,
@@ -802,6 +815,7 @@ def main() -> int:
                 shared_lock_path=lock_path,
                 audit_repository=audit_repository,
                 audit_tasks=audit_tasks,
+                execute_guard=execute_guard,
             )
     except Exception as exc:
         if timeout_error is not None and isinstance(exc, timeout_error):
@@ -817,6 +831,8 @@ def main() -> int:
             )
             return 75
         if isinstance(exc, PipelineStageTimeoutError):
+            if pipeline_invoked:
+                return 124
             send_pipeline_notification(
                 "【1688 停产下架】\n"
                 f"批次：{run_id}\n"
@@ -828,7 +844,7 @@ def main() -> int:
                 disabled=args.no_notify,
             )
             return 124
-        if args.mode == "execute":
+        if args.mode == "execute" and not pipeline_invoked:
             notify_execute_startup_failure(
                 run_id=run_id,
                 exc=exc,

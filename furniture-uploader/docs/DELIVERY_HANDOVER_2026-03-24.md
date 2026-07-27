@@ -1,5 +1,14 @@
 # Delivery Handover 2026-03-24
 
+## 2026-07-27 Stop-Sale Runtime Recovery Handover
+
+- 开发分支：`codex/1688-sku-replacement-20260723`。本次修复提交部署前必须先确认执行机没有正在运行的下架、替换或爬虫业务。
+- 部署时不得 stash/reset/checkout/clean 执行机现有修改；先汇报 dirty 清单，再以不覆盖本地文件的方式处理差异和冲突。
+- 新管理器 Summary 字段：`worker_pause_check_count` 记录尝试前检查次数，`worker_reassertions` 记录外部重启后执行的 Disable/Stop 动作及对应店铺、批次、尝试和 run_id。
+- 新 RPA Summary 字段：`browser_recovery_attempts`、`browser_recovery_success`、`browser_recovery_failed`。
+- 执行机验收顺序：确认无活动业务 -> 安全部署 -> preflight `status=ok` -> 单店单商品真实 Canary -> 核对 1688 页面与聚水潭结果 -> 核对 `app.ali1688_stop_sale_run/item` -> 核对 Pipeline Summary 和钉钉 -> 恢复 Worker/每日任务。
+- 任何开发机单测、mock 或 preview 结果都不能替代真实页面/API、正式审计库和通知验收。
+
 这是当前项目的正式交接文档，面向两类接手方：
 
 - 人类开发/运营同事

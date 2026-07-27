@@ -211,6 +211,67 @@ class Run1688StopSalePipelineTests(unittest.TestCase):
         self.assertEqual(repository.finished["status"], "failed")
         self.assertFalse(repository.finished["notification_sent"])
 
+    def test_execute_guard_failure_is_audited_summarized_and_notified(self) -> None:
+        class FakeConfig:
+            def safe_dict(self):
+                return {"database": "JSReportReplica", "schema": "app"}
+
+        class FakeAuditRepository:
+            config = FakeConfig()
+
+            def __init__(self) -> None:
+                self.started = False
+                self.recorded: list[dict] | None = None
+                self.finished: dict | None = None
+
+            def start_run(self, **_kwargs) -> None:
+                self.started = True
+
+            def record_1688_results(self, _run_id: str, records: list[dict]) -> None:
+                self.recorded = records
+
+            def finish_run(self, **kwargs) -> None:
+                self.finished = kwargs
+
+        args = self.build_args()
+        args.no_notify = False
+        repository = FakeAuditRepository()
+        guard_error = RuntimeError("Crawler Worker restarted during the daily run")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pipeline_dir = Path(temp_dir)
+            with (
+                patch("run_1688_stop_sale_pipeline.run_stage_command") as run_stage,
+                patch(
+                    "run_1688_stop_sale_pipeline.send_pipeline_notification",
+                    return_value=True,
+                ) as notify,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "Crawler Worker restarted"):
+                    run_pipeline(
+                        args,
+                        run_id=args.run_id,
+                        pipeline_dir=pipeline_dir,
+                        jushuitan_root=pipeline_dir,
+                        shared_lock_path="D:/runtime/lock",
+                        audit_repository=repository,  # type: ignore[arg-type]
+                        audit_tasks=[SimpleNamespace(dedupe_key=("store", "product", "sku"))],
+                        execute_guard=lambda: (_ for _ in ()).throw(guard_error),
+                    )
+            summary = json.loads(
+                (pipeline_dir / f"{args.run_id}.summary.json").read_text(encoding="utf-8")
+            )
+
+        self.assertTrue(repository.started)
+        self.assertEqual(repository.recorded, [])
+        self.assertIsNotNone(repository.finished)
+        self.assertEqual(repository.finished["status"], "failed")
+        self.assertTrue(repository.finished["notification_sent"])
+        self.assertEqual(summary["audit_status"], "failed")
+        self.assertEqual(summary["error_type"], "RuntimeError")
+        self.assertTrue(summary["notification_sent"])
+        run_stage.assert_not_called()
+        notify.assert_called_once()
+
     def test_execute_notifies_and_records_terminal_login_failure(self) -> None:
         class FakeConfig:
             def safe_dict(self):

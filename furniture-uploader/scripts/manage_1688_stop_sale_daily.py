@@ -328,20 +328,39 @@ def _wait_for_worker_quiet(task_name: str, timeout_seconds: int = 180) -> dict[s
     raise DailyManagerError(f"Worker did not become idle before timeout: {last_state}")
 
 
-@contextmanager
-def paused_worker(task_name: str) -> Iterator[dict[str, Any]]:
+def ensure_worker_paused(task_name: str, timeout_seconds: int = 180) -> dict[str, Any]:
     before = query_crawler_worker_state(task_name)
     if not before.get("scheduled_task_exists"):
         raise DailyManagerError(f"Worker scheduled task does not exist: {task_name}")
 
-    original_state = str(before.get("scheduled_task_state") or "").strip().lower()
-    if original_state != "disabled":
+    actions: list[str] = []
+    current_state = str(before.get("scheduled_task_state") or "").strip().lower()
+    if current_state != "disabled":
         _powershell_task_action("Disable", task_name)
-    if original_state == "running" or int(before.get("worker_process_count") or 0) > 0:
+        actions.append("Disable")
+    if current_state == "running" or int(before.get("worker_process_count") or 0) > 0:
         _powershell_task_action("Stop", task_name)
+        actions.append("Stop")
 
-    paused = _wait_for_worker_quiet(task_name)
-    lifecycle = {"before": before, "paused": paused, "restored": {}}
+    return {
+        "before": before,
+        "paused": _wait_for_worker_quiet(task_name, timeout_seconds),
+        "actions": actions,
+    }
+
+
+@contextmanager
+def paused_worker(task_name: str) -> Iterator[dict[str, Any]]:
+    initial_pause = ensure_worker_paused(task_name)
+    before = initial_pause["before"]
+    original_state = str(before.get("scheduled_task_state") or "").strip().lower()
+    lifecycle = {
+        "before": before,
+        "paused": initial_pause["paused"],
+        "initial_actions": initial_pause["actions"],
+        "reassertions": [],
+        "restored": {},
+    }
     try:
         yield lifecycle
     finally:
@@ -648,6 +667,8 @@ def run_daily(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         "timeout_1688_seconds": int(args.timeout_1688_seconds),
         "timeout_jushuitan_seconds": int(args.timeout_jushuitan_seconds),
         "worker_status": "not_started",
+        "worker_pause_check_count": 0,
+        "worker_reassertions": [],
         "manager_dir": str(manager_dir),
         "preflight_log": str(manager_dir / "preflight.log"),
         "preview_log": str(manager_dir / "preview.log"),
@@ -745,6 +766,19 @@ def run_daily(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
                             run_id = f"{manager_run_id}_s{index:02d}_b{batch_index:03d}"
                             if attempt_number > 1:
                                 run_id += f"_a{attempt_number:02d}"
+                            pause_check = ensure_worker_paused(str(args.worker_task_name))
+                            summary["worker_pause_check_count"] += 1
+                            if pause_check["actions"]:
+                                intervention = {
+                                    "checked_at": datetime.now().isoformat(timespec="seconds"),
+                                    "store_name": store_name,
+                                    "batch_number": batch_index,
+                                    "attempt_number": attempt_number,
+                                    "run_id": run_id,
+                                    **pause_check,
+                                }
+                                summary["worker_reassertions"].append(intervention)
+                                worker_info.setdefault("reassertions", []).append(intervention)
                             return_code = _run_logged(
                                 build_pipeline_command(args, current_input, run_id),
                                 cwd=PROJECT_ROOT,
