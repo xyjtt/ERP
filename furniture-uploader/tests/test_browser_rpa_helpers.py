@@ -1558,6 +1558,60 @@ class BrowserRPAHelperTests(unittest.TestCase):
         self.assertIn("descriptionHandleNode.handleChange", driver.script)
         self.assertTrue((context.get("draft_core_fields_pre_save") or {}).get("ok"))
 
+    def test_pre_save_core_guard_rejects_missing_required_size(self) -> None:
+        self.browser.driver = FakeDriver()
+        self.browser._draft_title_value = lambda: "胡桃色床头柜"  # type: ignore[assignment]
+        self.browser._draft_main_image_present = lambda: True  # type: ignore[assignment]
+        self.browser._draft_description_image_count = lambda: 2  # type: ignore[assignment]
+        self.browser._collect_spec_values = lambda: {"颜色": "胡桃色", "尺寸": ""}  # type: ignore[assignment]
+        context: dict[str, object] = {}
+
+        with self.assertRaisesRegex(PublishValidationError, "required specs are empty.*尺寸"):
+            self.browser._verify_core_fields_before_draft_save(
+                {
+                    "draft_verification": {
+                        "enabled": True,
+                        "require_title": True,
+                        "require_main_image": True,
+                        "minimum_description_image_count": 1,
+                        "require_specs": True,
+                        "required_spec_labels": ["颜色", "尺寸"],
+                    }
+                },
+                context,
+            )
+
+        self.assertEqual(context["draft_title_pre_save"], "胡桃色床头柜")
+        self.assertTrue(context["draft_main_image_pre_save"])
+        self.assertEqual(context["draft_description_image_count_pre_save"], 2)
+
+    def test_pre_save_core_guard_accepts_complete_draft_fields(self) -> None:
+        self.browser.driver = FakeDriver()
+        self.browser._draft_title_value = lambda: "胡桃色床头柜"  # type: ignore[assignment]
+        self.browser._draft_main_image_present = lambda: True  # type: ignore[assignment]
+        self.browser._draft_description_image_count = lambda: 2  # type: ignore[assignment]
+        self.browser._collect_spec_values = lambda: {"颜色": "胡桃色", "尺寸": "50x40x45cm"}  # type: ignore[assignment]
+        context: dict[str, object] = {}
+
+        self.browser._verify_core_fields_before_draft_save(
+            {
+                "draft_verification": {
+                    "enabled": True,
+                    "require_title": True,
+                    "require_main_image": True,
+                    "minimum_description_image_count": 1,
+                    "require_specs": True,
+                    "required_spec_labels": ["颜色", "尺寸"],
+                }
+            },
+            context,
+        )
+
+        self.assertEqual(
+            context["draft_spec_values_pre_save"],
+            {"颜色": "胡桃色", "尺寸": "50x40x45cm"},
+        )
+
     def test_draft_description_image_count_uses_javascript_word_boundary(self) -> None:
         class DescriptionCountDriver(FakeDriver):
             def __init__(self) -> None:
@@ -2687,10 +2741,16 @@ class BrowserRPAHelperTests(unittest.TestCase):
         self.browser._wait_for_spec_container = lambda label: container  # type: ignore[assignment]
         self.browser._pause = lambda _seconds: None  # type: ignore[assignment]
 
-        def fake_fill(element: FakeSpecInput, value: str, *, clear: bool = True) -> None:
+        def fake_fill(
+            element: FakeSpecInput,
+            label: str,
+            value: str,
+            rule: dict[str, object],
+        ) -> None:
             element.value = value
+            element.send_keys(Keys.ENTER)
 
-        self.browser._fill_text_field = fake_fill  # type: ignore[assignment]
+        self.browser._fill_spec_text_value = fake_fill  # type: ignore[assignment]
 
         self.browser._apply_spec_rule(
             {
@@ -2706,6 +2766,68 @@ class BrowserRPAHelperTests(unittest.TestCase):
         self.assertEqual(inputs[0].enter_count, 1)
         self.assertEqual(inputs[1].enter_count, 1)
 
+    def test_fill_spec_text_value_uses_direct_chinese_entry_and_enter(self) -> None:
+        class FakeSpecInput:
+            def __init__(self) -> None:
+                self.value = ""
+                self.keys: list[object] = []
+
+            def send_keys(self, *args: object) -> None:
+                self.keys.extend(args)
+
+        class FakeSpecDriver:
+            def __init__(self) -> None:
+                self.scripts: list[str] = []
+
+            def execute_script(self, script: str, *args: object) -> object:
+                self.scripts.append(script)
+                return None
+
+        input_element = FakeSpecInput()
+        driver = FakeSpecDriver()
+        self.browser.driver = driver
+        self.browser._pause = lambda _seconds: None  # type: ignore[assignment]
+        self.browser._fill_text_field = (  # type: ignore[assignment]
+            lambda element, value, clear=True: setattr(element, "value", value)
+        )
+        verified: dict[str, object] = {}
+        self.browser._verify_spec_text_value = (  # type: ignore[assignment]
+            lambda label, value, wait_seconds: verified.update(
+                {"label": label, "value": value, "wait_seconds": wait_seconds}
+            )
+        )
+
+        self.browser._fill_spec_text_value(
+            input_element,
+            "颜色",
+            "胡桃色",
+            {"verify_wait_seconds": 1.5},
+        )
+
+        self.assertEqual(input_element.value, "胡桃色")
+        self.assertIn(Keys.ENTER, input_element.keys)
+        self.assertEqual(verified["label"], "颜色")
+        self.assertEqual(verified["value"], "胡桃色")
+        self.assertIn('.value-select-container[aria-haspopup="true"]', driver.scripts[0])
+
+    def test_verify_spec_text_value_rejects_required_warning(self) -> None:
+        self.browser._wait_for_spec_container = lambda label: object()  # type: ignore[assignment]
+        self.browser._read_spec_text_state = lambda container, value: {  # type: ignore[assignment]
+            "values": [value],
+            "exact_match": True,
+            "required_warning": True,
+        }
+
+        with self.assertRaisesRegex(PublishValidationError, "required-field warning"):
+            self.browser._verify_spec_text_value("颜色", "胡桃色", wait_seconds=0)
+
+    def test_apply_required_spec_rule_rejects_missing_source_value(self) -> None:
+        with self.assertRaisesRegex(PublishValidationError, "has no source value"):
+            self.browser._apply_spec_rule(
+                {"label": "尺寸", "source": "size", "required": True},
+                {"size": ""},
+            )
+
     def test_resolve_profile_rule_value_prefers_source_candidates(self) -> None:
         value = self.browser._resolve_profile_rule_value(
             {
@@ -2720,6 +2842,36 @@ class BrowserRPAHelperTests(unittest.TestCase):
             },
         )
         self.assertEqual(value, "SKU-A|SKU-B")
+
+    def test_1688_color_spec_prefers_structured_color_value(self) -> None:
+        config = json.loads(
+            (PROJECT_ROOT / "config" / "platforms" / "1688.json").read_text(encoding="utf-8")
+        )
+        spec_step = next(
+            step
+            for step in config["publish"]["steps"]
+            if step.get("name") == "spec_values"
+        )
+
+        for profile_name in ("bedside_table", "*"):
+            color_rule = next(
+                rule
+                for rule in spec_step["profiles"][profile_name]["rules"]
+                if rule.get("label") == "颜色"
+            )
+            self.assertEqual(color_rule["source_candidates"][0], "color")
+            self.assertTrue(color_rule["required"])
+            size_rule = next(
+                rule
+                for rule in spec_step["profiles"][profile_name]["rules"]
+                if rule.get("label") == "尺寸"
+            )
+            self.assertTrue(size_rule["required"])
+
+        verification = config["publish"]["draft_verification"]
+        self.assertEqual(verification["required_spec_labels"], ["颜色", "尺寸"])
+        self.assertTrue(verification["require_title"])
+        self.assertEqual(verification["minimum_description_image_count"], 1)
 
     def test_split_spec_rule_values_supports_custom_pattern(self) -> None:
         values = self.browser._split_spec_rule_values(

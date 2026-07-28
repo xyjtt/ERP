@@ -59,3 +59,9 @@
 - 成功页结果提取闭环打通
 - 自动提交进入可上线状态
 - 完成一次真实 SKU 下架联调
+## 2026-07-28 Draft Save Policy Tightening
+
+- A successful draft HTTP response is no longer treated as proof that required page state persisted.
+- Required listing fields are now checked before the save click and checked again after save plus refresh.
+- SKU color and size use direct text entry with Enter; suggestion-list matching is advisory UI only and is not part of the data contract.
+- Forced confirmation of a modal warning that specifications will be cleared is prohibited.

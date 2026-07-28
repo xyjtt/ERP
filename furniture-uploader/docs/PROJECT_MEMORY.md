@@ -222,3 +222,10 @@
 3. `docs/DIRECT_1688_PROGRESS.md`
 4. `docs/DELIVERY_HANDOVER_2026-03-24.md`
 5. `docs/AI_CONTINUITY_GUIDE.md`
+## 2026-07-28 CTG0286 Draft Integrity Update
+
+- The executor draft `6a635fcee4b0eda6ebbdf340` exposed an invalid forced-save path: title, main image, color, size, and logistics fields were cleared even though the draft request returned HTTP 200.
+- Live read-only evidence confirmed that the 1688 color specification accepts direct Chinese text entry followed by Enter. It does not require an exact match in the standard color suggestion list.
+- Development now blocks draft save before dispatch when title, main image, required detail images, color, or size is missing. Post-save refresh verification remains required.
+- Development validation: listing tests `371/371`; title engine `89 passed, 3 subtests passed`.
+- This is not executor or business acceptance. Deploy the clean commit without preserving the executor's temporary forced-save implementation, then repair only the existing CTG0286 draft and independently inspect it.

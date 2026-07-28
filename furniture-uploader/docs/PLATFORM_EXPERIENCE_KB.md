@@ -144,3 +144,11 @@
 - 发现新的稳定上传方式
 - 修掉一个平台级坑
 - 总结出可以复用到同平台其他页面的实现
+## 2026-07-28 Live Finding: 1688 SKU Specification Entry
+
+- Scope: `#guid-saleProp .module-spec-decorator` on the current 1688 publish page.
+- Color accepts direct Chinese text. The verified sequence is: scroll the input into view, click the nearest `.value-select-container[aria-haspopup="true"]`, focus the input, clear and type the Chinese value, then press Enter.
+- Do not require an exact suggestion option and do not choose the first standard color. The standard color-family overlay is optional UI assistance.
+- Acceptance requires the expected input value to be present after Enter and the local required-field warning to be absent.
+- Apply the same direct-entry and read-back rule to size.
+- Never click a direct-save confirmation when the modal states that incomplete specification data will be cleared.

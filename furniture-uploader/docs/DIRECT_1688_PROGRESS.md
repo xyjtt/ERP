@@ -181,3 +181,10 @@
 3. 验证草稿保存结果
 4. 再做一次真实提交验证
 5. 用测试店铺验证 `1688_sku_offline` 提交闭环
+## 2026-07-28 Development Update: Required Draft Fields
+
+- Replaced exact dropdown color matching with direct Chinese text entry plus Enter and immediate read-back verification.
+- Color and size are both required and are checked before draft save and after refresh.
+- Draft save is also blocked before dispatch when title, main image, or the configured minimum detail-image count is missing.
+- Current development verification: listing `371/371`; title engine `89 passed, 3 subtests passed`; compile and JSON checks passed.
+- Remaining work: controlled executor deployment, fresh browser mutex/capacity/source checks, repair of draft `6a635fcee4b0eda6ebbdf340`, and independent real-page inspection. No submit is authorized by this development result.

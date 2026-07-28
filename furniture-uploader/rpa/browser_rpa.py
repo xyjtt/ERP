@@ -3214,12 +3214,18 @@ class BrowserRPA:
     def _apply_spec_rule(self, rule: dict[str, Any], context: dict[str, Any]) -> None:
         label = str(rule.get("label", "")).strip()
         value = self._resolve_profile_rule_value(rule, context)
-        if not label or not value:
+        required = bool(rule.get("required", False))
+        if not label:
+            return
+        if not value:
+            if required:
+                raise PublishValidationError(f"Spec rule '{label}' has no source value.")
             return
         spec_values = self._split_spec_rule_values(value, rule)
         if not spec_values:
+            if required:
+                raise PublishValidationError(f"Spec rule '{label}' has no usable source value.")
             return
-        required = bool(rule.get("required", False))
         try:
             container = self._wait_for_spec_container(label)
         except TimeoutException:
@@ -3234,13 +3240,87 @@ class BrowserRPA:
                     raise ValueError(f"Spec rule '{label}' has no editable input.")
                 print(f"[WARN] Skip remaining values for spec rule '{label}' because no editable input is available.")
                 return
-            self._fill_text_field(input_element, item, clear=True)
-            input_element.send_keys(Keys.ENTER)
-            self._pause(float(rule.get("select_wait_seconds", 0.4)))
+            self._fill_spec_text_value(input_element, label, item, rule)
             try:
                 container = self._wait_for_spec_container(label)
             except TimeoutException:
                 pass
+
+    def _fill_spec_text_value(
+        self,
+        input_element: WebElement,
+        label: str,
+        value: str,
+        rule: dict[str, Any],
+    ) -> None:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+
+        self.driver.execute_script(
+            """
+            const input = arguments[0];
+            const trigger = input.closest('.value-select-container[aria-haspopup="true"]') || input;
+            input.scrollIntoView({block: 'center', inline: 'nearest'});
+            trigger.click();
+            input.focus();
+            """,
+            input_element,
+        )
+        self._fill_text_field(input_element, value, clear=True)
+        input_element.send_keys(Keys.ENTER)
+        self._pause(float(rule.get("select_wait_seconds", 0.4)))
+        self._verify_spec_text_value(
+            label,
+            value,
+            wait_seconds=float(rule.get("verify_wait_seconds", 2.0)),
+        )
+
+    def _verify_spec_text_value(self, label: str, expected_value: str, *, wait_seconds: float) -> None:
+        deadline = time.monotonic() + max(0.0, wait_seconds)
+        last_state: dict[str, Any] = {}
+        while True:
+            try:
+                container = self._wait_for_spec_container(label)
+                last_state = self._read_spec_text_state(container, expected_value)
+            except (StaleElementReferenceException, TimeoutException):
+                last_state = {}
+            if bool(last_state.get("exact_match")) and not bool(last_state.get("required_warning")):
+                return
+            if time.monotonic() >= deadline:
+                break
+            self._pause(min(0.2, max(0.0, deadline - time.monotonic())))
+
+        values = [str(item).strip() for item in list(last_state.get("values", []) or [])]
+        if bool(last_state.get("required_warning")):
+            raise PublishValidationError(
+                f"Spec rule '{label}' still shows a required-field warning after entering '{expected_value}'."
+            )
+        raise PublishValidationError(
+            f"Spec rule '{label}' did not retain '{expected_value}' after Enter; current values: {values}."
+        )
+
+    def _read_spec_text_state(self, container: WebElement, expected_value: str) -> dict[str, Any]:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        payload = self.driver.execute_script(
+            """
+            const root = arguments[0];
+            const normalize = (value) => String(value == null ? '' : value).replace(/\\s+/g, ' ').trim();
+            const expected = normalize(arguments[1]);
+            const values = Array.from(root.querySelectorAll('input'))
+              .map((node) => normalize(node.value))
+              .filter(Boolean);
+            const text = normalize(root.innerText || root.textContent || '');
+            return {
+              values,
+              exact_match: values.includes(expected),
+              required_warning: text.includes('\u5fc5\u586b'),
+            };
+            """,
+            container,
+            expected_value,
+        )
+        return dict(payload or {})
 
     def _resolve_profile_rules(self, step: dict[str, Any], context: dict[str, Any]) -> list[dict[str, Any]]:
         profiles = step.get("profiles", {})
@@ -8347,6 +8427,60 @@ class BrowserRPA:
             },
         )
         context["draft_core_fields_pre_save"] = state if isinstance(state, dict) else {"ok": False}
+        self._verify_core_fields_before_draft_save(publish_config, context)
+
+    def _verify_core_fields_before_draft_save(
+        self,
+        publish_config: dict[str, Any],
+        context: dict[str, Any],
+    ) -> None:
+        verification = publish_config.get("draft_verification", {})
+        if not verification or not verification.get("enabled", True):
+            return
+
+        if verification.get("require_title", False):
+            actual_title = self._draft_title_value()
+            context["draft_title_pre_save"] = actual_title
+            if not actual_title:
+                raise PublishValidationError("draft save blocked: title is empty before save.")
+
+        if verification.get("require_main_image", True):
+            main_image_present = self._draft_main_image_present()
+            context["draft_main_image_pre_save"] = main_image_present
+            if not main_image_present:
+                raise PublishValidationError("draft save blocked: main image is empty before save.")
+
+        minimum_description_image_count = max(
+            0,
+            int(verification.get("minimum_description_image_count", 0) or 0),
+        )
+        if minimum_description_image_count > 0:
+            description_image_count = self._draft_description_image_count()
+            context["draft_description_image_count_pre_save"] = description_image_count
+            if description_image_count < minimum_description_image_count:
+                raise PublishValidationError(
+                    "draft save blocked: description images are incomplete before save "
+                    f"({description_image_count}/{minimum_description_image_count})."
+                )
+
+        if verification.get("require_specs", True):
+            required_spec_labels = [
+                str(item).strip()
+                for item in verification.get("required_spec_labels", [])
+                if str(item).strip()
+            ]
+            spec_values = self._collect_spec_values()
+            context["draft_spec_values_pre_save"] = spec_values
+            missing_labels = [
+                label
+                for label in required_spec_labels
+                if not str(spec_values.get(label, "")).strip()
+            ]
+            if missing_labels:
+                raise PublishValidationError(
+                    "draft save blocked: required specs are empty before save: "
+                    + ", ".join(missing_labels)
+                )
 
     def _ensure_required_cat_props_before_draft_save(
         self,
@@ -9927,6 +10061,7 @@ class BrowserRPA:
         assist_messages = self._collect_assist_messages()
         context["draft_assist_messages"] = assist_messages
         context["draft_required_field_labels"] = self._extract_required_labels_from_assist_messages(assist_messages)
+        context["draft_title_value"] = self._draft_title_value()
         main_image_wait_seconds = max(
             0.0,
             float(verification.get("main_image_wait_seconds", 0) or 0),
@@ -10027,6 +10162,14 @@ class BrowserRPA:
             context,
             trace_patch_snapshot,
         )
+        if verification.get("require_title", False):
+            actual_title = str(context.get("draft_title_value", "")).strip()
+            expected_title = re.sub(r"\s+", " ", str(context.get("title", "")).strip())
+            if not actual_title:
+                raise PublishValidationError("draft_verify blocked: title did not persist after save.")
+            if expected_title and re.sub(r"\s+", " ", actual_title) != expected_title:
+                raise PublishValidationError("draft_verify blocked: title changed after save.")
+
         if verification.get("require_main_image", True) and not context["draft_main_image_present"]:
             raise PublishValidationError("draft_verify blocked: main image did not persist after save.")
 
@@ -10375,6 +10518,29 @@ class BrowserRPA:
             """
         )
         return [str(item).strip() for item in (messages or []) if str(item).strip()]
+
+    def _draft_title_value(self) -> str:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        payload = self.driver.execute_script(
+            """
+            const sdk = window.SellPublishSdk;
+            const state = sdk && sdk.engine && sdk.engine.getJsonState ? sdk.engine.getJsonState() : {};
+            const titleProps = ((((state || {}).components || {}).subject || {}).props || {});
+            const stateValue = titleProps.value;
+            const normalizedStateValue = String(
+              stateValue && typeof stateValue === 'object'
+                ? (stateValue.value || stateValue.text || stateValue.title || '')
+                : (stateValue || '')
+            ).replace(/\\s+/g, ' ').trim();
+            if (normalizedStateValue) {
+              return normalizedStateValue;
+            }
+            const input = document.querySelector('#guid-title input[maxlength="60"], #guid-title input');
+            return input ? String(input.value || '').replace(/\\s+/g, ' ').trim() : '';
+            """
+        )
+        return str(payload or "").strip()
 
     def _draft_main_image_state(self) -> dict[str, Any]:
         if not self.driver:

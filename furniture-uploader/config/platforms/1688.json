@@ -146,6 +146,7 @@
       "refresh_after_save": true,
       "settle_seconds": 1.2,
       "refresh_wait_seconds": 4,
+      "require_title": true,
       "require_main_image": true,
       "require_description": true,
       "main_image_wait_seconds": 30,
@@ -153,6 +154,7 @@
       "require_square_main_image": true,
       "description_image_wait_seconds": 30,
       "description_image_poll_seconds": 0.8,
+      "minimum_description_image_count": 1,
       "require_send_address": true,
       "strict_send_address_persist": true,
       "require_buyer_protection": true,
@@ -169,7 +171,8 @@
       ],
       "require_specs": true,
       "required_spec_labels": [
-        "颜色"
+        "颜色",
+        "尺寸"
       ],
       "forbidden_assist_keywords": [
         "商品主图为必填项",
@@ -458,9 +461,10 @@
               {
                 "label": "颜色",
                 "source": "color",
+                "required": true,
                 "source_candidates": [
-                  "company_sku_names",
                   "color",
+                  "company_sku_names",
                   "outer_sku"
                 ],
                 "multi_value": true,
@@ -468,7 +472,8 @@
               },
               {
                 "label": "尺寸",
-                "source": "size"
+                "source": "size",
+                "required": true
               }
             ]
           },
@@ -477,9 +482,10 @@
               {
                 "label": "颜色",
                 "source": "color",
+                "required": true,
                 "source_candidates": [
-                  "company_sku_names",
                   "color",
+                  "company_sku_names",
                   "outer_sku"
                 ],
                 "multi_value": true,
@@ -487,7 +493,8 @@
               },
               {
                 "label": "尺寸",
-                "source": "size"
+                "source": "size",
+                "required": true
               }
             ]
           }
