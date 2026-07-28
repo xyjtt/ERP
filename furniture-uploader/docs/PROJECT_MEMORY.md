@@ -229,3 +229,9 @@
 - Development now blocks draft save before dispatch when title, main image, required detail images, color, or size is missing. Post-save refresh verification remains required.
 - Development validation: listing tests `371/371`; title engine `89 passed, 3 subtests passed`.
 - This is not executor or business acceptance. Deploy the clean commit without preserving the executor's temporary forced-save implementation, then repair only the existing CTG0286 draft and independently inspect it.
+
+## 2026-07-28 CTG0286 Independent Draft Acceptance Hardening
+
+- Independent saved-draft inspection now requires exact persisted specification values, not merely non-empty fields.
+- For CTG028601N1416V01, the acceptance contract is color `胡桃色` and size `48/40/50`; stale values such as `红色100` fail review.
+- Development validation after this change: listing tests `373/373`; doctor `status: ok` with the two pre-existing empty-selector warnings only.

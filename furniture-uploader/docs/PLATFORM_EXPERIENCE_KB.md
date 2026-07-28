@@ -152,3 +152,9 @@
 - Acceptance requires the expected input value to be present after Enter and the local required-field warning to be absent.
 - Apply the same direct-entry and read-back rule to size.
 - Never click a direct-save confirmation when the modal states that incomplete specification data will be cleared.
+
+## 2026-07-28 Required Specification Review Rule
+
+- A required 1688 specification must be checked for exact persisted text after refresh; non-empty alone is insufficient.
+- Direct Chinese input plus Enter is valid for color, but review must compare the resulting value with the payload.
+- For CTG028601N1416V01, expected persisted values are color `胡桃色` and size `48/40/50`.

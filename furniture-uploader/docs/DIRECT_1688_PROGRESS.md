@@ -188,3 +188,9 @@
 - Draft save is also blocked before dispatch when title, main image, or the configured minimum detail-image count is missing.
 - Current development verification: listing `371/371`; title engine `89 passed, 3 subtests passed`; compile and JSON checks passed.
 - Remaining work: controlled executor deployment, fresh browser mutex/capacity/source checks, repair of draft `6a635fcee4b0eda6ebbdf340`, and independent real-page inspection. No submit is authorized by this development result.
+
+## 2026-07-28 CTG0286 Independent Inspection Gate
+
+- `inspect_1688_saved_draft.py` now compares persisted color and size with the payload's exact expected values.
+- A non-empty but wrong color or size no longer passes the post-save independent review.
+- Local regression is `373/373`; live draft repair and real-page inspection remain required before business acceptance.

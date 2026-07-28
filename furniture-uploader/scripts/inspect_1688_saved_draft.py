@@ -34,6 +34,11 @@ def _decimal_equal(left: object, right: object) -> bool:
         return False
 
 
+def _spec_equal(actual: object, expected: object) -> bool:
+    expected_value = str(expected or "").strip()
+    return bool(expected_value) and str(actual or "").strip() == expected_value
+
+
 def main() -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -44,6 +49,10 @@ def main() -> int:
     expected_title = str((payload.get("product") or {}).get("selected_title") or "").strip()
     expected_price = str((payload.get("pricing") or {}).get("publish_price") or "").strip()
     expected_quantity = int((payload.get("inventory") or {}).get("quantity") or 0)
+    expected_specs = {
+        "颜色": str((payload.get("attributes") or {}).get("color") or "").strip(),
+        "尺寸": str((payload.get("attributes") or {}).get("size") or "").strip(),
+    }
     expected_logistics = {
         "length": str((payload.get("logistics") or {}).get("length_cm") or "").strip(),
         "width": str((payload.get("logistics") or {}).get("width_cm") or "").strip(),
@@ -116,7 +125,8 @@ def main() -> int:
         "main_image_present": bool(main_image.get("present")),
         "main_image_square": bool(main_image.get("square")),
         "detail_image_count": description_image_count == expected_detail_count,
-        "spec_color": bool(str(spec_values.get("颜色", "")).strip()),
+        "spec_color": _spec_equal(spec_values.get("颜色"), expected_specs["颜色"]),
+        "spec_size": _spec_equal(spec_values.get("尺寸"), expected_specs["尺寸"]),
         "logistics": all(str(logistics.get(key, "")).strip() == value for key, value in expected_logistics.items()),
         "send_address_reapply_recorded": bool(send_address) or "send_address" in reapply_fields,
         "buyer_protection_reapply_recorded": bool(buyer_protection) or "buyer_protection" in reapply_fields,
@@ -139,6 +149,14 @@ def main() -> int:
             "buyer_protection": buyer_protection,
             "buyer_protection_schedule": buyer_schedule,
             "assist_messages": assist_messages,
+        },
+        "expected": {
+            "title": expected_title,
+            "price": expected_price,
+            "quantity": expected_quantity,
+            "spec_values": expected_specs,
+            "logistics": expected_logistics,
+            "detail_image_count": expected_detail_count,
         },
         "submit_reapply_required_fields": reapply_fields,
         "draft_saved": False,
