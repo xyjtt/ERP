@@ -3267,7 +3267,8 @@ class BrowserRPA:
             input_element,
         )
         self._fill_text_field(input_element, value, clear=True)
-        input_element.send_keys(Keys.ENTER)
+        commit_key = str(rule.get("commit_key", "enter")).strip().lower()
+        input_element.send_keys(Keys.TAB if commit_key == "tab" else Keys.ENTER)
         self._pause(float(rule.get("select_wait_seconds", 0.4)))
         self._verify_spec_text_value(
             label,
@@ -3307,7 +3308,9 @@ class BrowserRPA:
             const root = arguments[0];
             const normalize = (value) => String(value == null ? '' : value).replace(/\\s+/g, ' ').trim();
             const expected = normalize(arguments[1]);
-            const values = Array.from(root.querySelectorAll('input'))
+            const values = Array.from(
+              root.querySelectorAll('.value-select-item:not(.resident) input')
+            )
               .map((node) => normalize(node.value))
               .filter(Boolean);
             const text = normalize(root.innerText || root.textContent || '');

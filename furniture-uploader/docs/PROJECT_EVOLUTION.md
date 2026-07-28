@@ -63,7 +63,7 @@
 
 - A successful draft HTTP response is no longer treated as proof that required page state persisted.
 - Required listing fields are now checked before the save click and checked again after save plus refresh.
-- SKU color and size use direct text entry with Enter; suggestion-list matching is advisory UI only and is not part of the data contract.
+- SKU color and size use direct text entry with Tab; suggestion-list matching is advisory UI only and is not part of the data contract.
 - Forced confirmation of a modal warning that specifications will be cleared is prohibited.
 
 ## 2026-07-28 Exact Specification Acceptance
@@ -71,3 +71,9 @@
 - Saved-draft verification evolved from presence checks to exact business-value checks for required specifications.
 - This prevents a stale platform value such as `红色100` from being accepted when the payload requires `胡桃色`.
 - The same rule applies to size, including the CTG0286 value `48/40/50`.
+
+## 2026-07-28 Live Specification Commit Correction
+
+- Live probing showed that Enter can leave an apparently populated resident input without creating a SKU specification item.
+- Specification entry now uses Tab and verifies the non-resident committed item before continuing.
+- Listing regression increased to `375/375` after adding the commit-state coverage.

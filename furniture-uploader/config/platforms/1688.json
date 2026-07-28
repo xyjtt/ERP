@@ -468,12 +468,14 @@
                   "outer_sku"
                 ],
                 "multi_value": true,
+                "commit_key": "tab",
                 "split_pattern": "\\s*(?:\\||,|，|;|；|\\n)+\\s*"
               },
               {
                 "label": "尺寸",
                 "source": "size",
-                "required": true
+                "required": true,
+                "commit_key": "tab"
               }
             ]
           },
@@ -489,12 +491,14 @@
                   "outer_sku"
                 ],
                 "multi_value": true,
+                "commit_key": "tab",
                 "split_pattern": "\\s*(?:\\||,|，|;|；|\\n)+\\s*"
               },
               {
                 "label": "尺寸",
                 "source": "size",
-                "required": true
+                "required": true,
+                "commit_key": "tab"
               }
             ]
           }

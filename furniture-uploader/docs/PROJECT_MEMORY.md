@@ -225,7 +225,7 @@
 ## 2026-07-28 CTG0286 Draft Integrity Update
 
 - The executor draft `6a635fcee4b0eda6ebbdf340` exposed an invalid forced-save path: title, main image, color, size, and logistics fields were cleared even though the draft request returned HTTP 200.
-- Live read-only evidence confirmed that the 1688 color specification accepts direct Chinese text entry followed by Enter. It does not require an exact match in the standard color suggestion list.
+- Live read-only evidence confirmed that the 1688 color specification accepts direct Chinese text entry followed by Tab. It does not require an exact match in the standard color suggestion list.
 - Development now blocks draft save before dispatch when title, main image, required detail images, color, or size is missing. Post-save refresh verification remains required.
 - Development validation: listing tests `371/371`; title engine `89 passed, 3 subtests passed`.
 - This is not executor or business acceptance. Deploy the clean commit without preserving the executor's temporary forced-save implementation, then repair only the existing CTG0286 draft and independently inspect it.
@@ -235,3 +235,9 @@
 - Independent saved-draft inspection now requires exact persisted specification values, not merely non-empty fields.
 - For CTG028601N1416V01, the acceptance contract is color `胡桃色` and size `48/40/50`; stale values such as `红色100` fail review.
 - Development validation after this change: listing tests `373/373`; doctor `status: ok` with the two pre-existing empty-selector warnings only.
+
+## 2026-07-28 CTG0286 Specification Commit Correction
+
+- Enter was disproved on the real publish page: it left `胡桃色` in the resident input and did not create a committed specification item.
+- Tab creates the non-resident item, exposes the image-plus/delete controls, and creates the next empty resident input.
+- The implementation now uses Tab for both color and size and verifies only committed non-resident values. Full listing regression is `375/375`.

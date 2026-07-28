@@ -183,7 +183,7 @@
 5. 用测试店铺验证 `1688_sku_offline` 提交闭环
 ## 2026-07-28 Development Update: Required Draft Fields
 
-- Replaced exact dropdown color matching with direct Chinese text entry plus Enter and immediate read-back verification.
+- Replaced exact dropdown color matching with direct Chinese text entry plus Tab and committed-item verification.
 - Color and size are both required and are checked before draft save and after refresh.
 - Draft save is also blocked before dispatch when title, main image, or the configured minimum detail-image count is missing.
 - Current development verification: listing `371/371`; title engine `89 passed, 3 subtests passed`; compile and JSON checks passed.
@@ -194,3 +194,9 @@
 - `inspect_1688_saved_draft.py` now compares persisted color and size with the payload's exact expected values.
 - A non-empty but wrong color or size no longer passes the post-save independent review.
 - Local regression is `373/373`; live draft repair and real-page inspection remain required before business acceptance.
+
+## 2026-07-28 Live Specification Commit Correction
+
+- A real CTG0286 page probe proved that Enter leaves text in the resident input and does not create a SKU specification item.
+- Direct Chinese color and size values must be committed with Tab; verification now ignores resident input text and accepts only non-resident committed items.
+- Full listing regression after the correction is `375/375`. Real draft repair and refreshed-page inspection remain required.

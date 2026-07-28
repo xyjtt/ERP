@@ -2810,6 +2810,58 @@ class BrowserRPAHelperTests(unittest.TestCase):
         self.assertEqual(verified["value"], "胡桃色")
         self.assertIn('.value-select-container[aria-haspopup="true"]', driver.scripts[0])
 
+    def test_fill_spec_text_value_uses_tab_when_configured(self) -> None:
+        class FakeSpecInput:
+            def __init__(self) -> None:
+                self.value = ""
+                self.keys: list[object] = []
+
+            def send_keys(self, *args: object) -> None:
+                self.keys.extend(args)
+
+        class FakeSpecDriver:
+            def execute_script(self, script: str, *args: object) -> object:
+                return None
+
+        input_element = FakeSpecInput()
+        self.browser.driver = FakeSpecDriver()
+        self.browser._pause = lambda _seconds: None  # type: ignore[assignment]
+        self.browser._fill_text_field = (  # type: ignore[assignment]
+            lambda element, value, clear=True: setattr(element, "value", value)
+        )
+        self.browser._verify_spec_text_value = lambda *args, **kwargs: None  # type: ignore[assignment]
+
+        self.browser._fill_spec_text_value(
+            input_element,
+            "颜色",
+            "胡桃色",
+            {"commit_key": "tab"},
+        )
+
+        self.assertIn(Keys.TAB, input_element.keys)
+        self.assertNotIn(Keys.ENTER, input_element.keys)
+
+    def test_read_spec_text_state_only_accepts_committed_values(self) -> None:
+        class FakeSpecDriver:
+            def __init__(self) -> None:
+                self.script = ""
+
+            def execute_script(self, script: str, *args: object) -> object:
+                self.script = script
+                return {
+                    "values": ["胡桃色"],
+                    "exact_match": True,
+                    "required_warning": False,
+                }
+
+        driver = FakeSpecDriver()
+        self.browser.driver = driver
+
+        state = self.browser._read_spec_text_state(object(), "胡桃色")
+
+        self.assertTrue(state["exact_match"])
+        self.assertIn(".value-select-item:not(.resident) input", driver.script)
+
     def test_verify_spec_text_value_rejects_required_warning(self) -> None:
         self.browser._wait_for_spec_container = lambda label: object()  # type: ignore[assignment]
         self.browser._read_spec_text_state = lambda container, value: {  # type: ignore[assignment]
@@ -2861,12 +2913,14 @@ class BrowserRPAHelperTests(unittest.TestCase):
             )
             self.assertEqual(color_rule["source_candidates"][0], "color")
             self.assertTrue(color_rule["required"])
+            self.assertEqual(color_rule["commit_key"], "tab")
             size_rule = next(
                 rule
                 for rule in spec_step["profiles"][profile_name]["rules"]
                 if rule.get("label") == "尺寸"
             )
             self.assertTrue(size_rule["required"])
+            self.assertEqual(size_rule["commit_key"], "tab")
 
         verification = config["publish"]["draft_verification"]
         self.assertEqual(verification["required_spec_labels"], ["颜色", "尺寸"])

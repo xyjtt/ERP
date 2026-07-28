@@ -147,14 +147,14 @@
 ## 2026-07-28 Live Finding: 1688 SKU Specification Entry
 
 - Scope: `#guid-saleProp .module-spec-decorator` on the current 1688 publish page.
-- Color accepts direct Chinese text. The verified sequence is: scroll the input into view, click the nearest `.value-select-container[aria-haspopup="true"]`, focus the input, clear and type the Chinese value, then press Enter.
+- Color accepts direct Chinese text. The verified sequence is: scroll the input into view, click the nearest `.value-select-container[aria-haspopup="true"]`, focus the input, clear and type the Chinese value, then press Tab.
 - Do not require an exact suggestion option and do not choose the first standard color. The standard color-family overlay is optional UI assistance.
-- Acceptance requires the expected input value to be present after Enter and the local required-field warning to be absent.
+- Acceptance requires the expected value in `.value-select-item:not(.resident)` and the local required-field warning to be absent. Text left only in the resident input is not committed.
 - Apply the same direct-entry and read-back rule to size.
 - Never click a direct-save confirmation when the modal states that incomplete specification data will be cleared.
 
 ## 2026-07-28 Required Specification Review Rule
 
 - A required 1688 specification must be checked for exact persisted text after refresh; non-empty alone is insufficient.
-- Direct Chinese input plus Enter is valid for color, but review must compare the resulting value with the payload.
+- Direct Chinese input plus Tab is valid for color, but review must compare the committed value with the payload.
 - For CTG028601N1416V01, expected persisted values are color `胡桃色` and size `48/40/50`.
