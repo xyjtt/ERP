@@ -1,5 +1,12 @@
 # Project Evolution
 
+## 2026-07-28 - Draft Save Convergence Gate
+
+- The 1688 direct path moved from presence-only pre-save checks to payload-exact checks for title and committed specifications.
+- Dynamic page reloads are treated as a normal loss-of-state condition: the save path reapplies only nonpersistent main-image/spec/title fields and does not repeat completed detail uploads.
+- The resident specification editor is no longer considered persisted data; only committed non-resident SKU specification items pass verification.
+- This change does not enable Offer submission. The completion boundary remains repaired draft review plus independent audit.
+
 更新时间：2026-03-24
 
 ## 目的

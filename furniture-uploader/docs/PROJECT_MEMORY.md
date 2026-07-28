@@ -1,5 +1,13 @@
 # Project Memory
 
+## 2026-07-28 Managed Update (CTG0286 Pre-Save Field Convergence)
+
+- Scope remains the existing draft `6a635fcee4b0eda6ebbdf340` for SKU `CTG028601N1416V01`; creating a second draft and submitting an Offer remain prohibited.
+- Live evidence showed that detail-image batch reloads can clear the title, main image, committed color/size specs, and logistics fields after their original publish steps complete.
+- Draft save now converges nonpersistent fields before the request: restore a missing/non-square main image, reset and reapply mismatched committed specs, then reapply the exact payload title before patching price, quantity, and description.
+- The pre-save gate now requires the exact payload title, exact committed spec values, a square first main image when configured, and all uploaded detail-image URLs represented in the description.
+- Validation: `379/379` unit tests passed; Python compile, all 11 JSON config files, `doctor`, and `git diff --check` passed. Live draft repair and formal audit are still required for business acceptance.
+
 ## 2026-03-31 Managed Update (T-005 Draft System-Error Isolation Round-2)
 
 - 主线仍为 `T-005`（仅 `draft`），`T-001` 冻结未动。

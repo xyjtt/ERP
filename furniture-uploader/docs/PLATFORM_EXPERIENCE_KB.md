@@ -1,5 +1,13 @@
 # Platform Experience Knowledge Base
 
+## 2026-07-28 Managed Update (1688 Draft Re-Render)
+
+- Live finding: reloading between image-picker batches can leave later steps successful in the run log while title, primary picture, sale specs, and logistics are empty in the final React state.
+- A text value left in `.value-select-item.resident input` is not a committed SKU specification. Pressing Tab creates a `.value-select-item:not(.resident)` item; Enter did not commit on the observed page.
+- Before draft save, repair fields in this order: square main image, committed specs, title, then core price/inventory/description state. Do not re-upload completed detail batches.
+- Verify the exact payload title and exact committed spec set immediately before save. Presence-only checks can accept stale or wrong values.
+- Keep the pre-save guard fail-closed. A failed guard is evidence that no draft save was attempted, not evidence that the draft is repaired.
+
 ## 2026-03-26 Managed Update
 
 - New live-page finding:

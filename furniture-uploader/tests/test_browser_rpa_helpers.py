@@ -1558,6 +1558,168 @@ class BrowserRPAHelperTests(unittest.TestCase):
         self.assertIn("descriptionHandleNode.handleChange", driver.script)
         self.assertTrue((context.get("draft_core_fields_pre_save") or {}).get("ok"))
 
+    def test_pre_save_reapplies_main_image_specs_and_title_before_core_patch(self) -> None:
+        events: list[str] = []
+        state: dict[str, object] = {
+            "main_image": False,
+            "title": "stale title",
+            "specs": {"color": "old", "size": ""},
+        }
+
+        class CoreFieldsDriver(FakeDriver):
+            def execute_script(self, script: str, *args: object) -> object:
+                events.append("core")
+                return {"ok": True, "applied": {"description": True}}
+
+        self.browser.driver = CoreFieldsDriver()
+        self.browser._pause = lambda _seconds: None  # type: ignore[assignment]
+        self.browser._draft_main_image_state = lambda: {  # type: ignore[assignment]
+            "present": bool(state["main_image"]),
+            "square": bool(state["main_image"]),
+        }
+        self.browser._draft_main_image_present = lambda: bool(state["main_image"])  # type: ignore[assignment]
+        self.browser._draft_title_value = lambda: str(state["title"])  # type: ignore[assignment]
+        self.browser._collect_spec_values = lambda: dict(state["specs"])  # type: ignore[assignment]
+        self.browser._draft_description_image_count = lambda: 2  # type: ignore[assignment]
+
+        def clear_spec(label: str) -> None:
+            events.append(f"clear:{label}")
+            current_specs = dict(state["specs"])
+            current_specs[label] = ""
+            state["specs"] = current_specs
+
+        def run_steps(steps: list[dict[str, object]], _context: dict[str, object]) -> None:
+            step_name = str(steps[0]["name"])
+            events.append(step_name)
+            if step_name == "main_image":
+                state["main_image"] = True
+            elif step_name == "spec_values":
+                state["specs"] = {"color": "walnut", "size": "48/40/50"}
+            elif step_name == "title":
+                state["title"] = "Bedside cabinet walnut 48x40x50"
+
+        self.browser._clear_committed_spec_values = clear_spec  # type: ignore[assignment]
+        self.browser._run_publish_steps = run_steps  # type: ignore[assignment]
+        context: dict[str, object] = {
+            "title": "Bedside cabinet walnut 48x40x50",
+            "color": "walnut",
+            "size": "48/40/50",
+            "price": "745.0",
+            "quantity": "999",
+            "detail_images_uploaded_urls": [
+                "https://cbu01.alicdn.com/detail-1.jpg",
+                "https://cbu01.alicdn.com/detail-2.jpg",
+            ],
+        }
+        publish_config = {
+            "steps": [
+                {"name": "main_image", "action": "picker_upload"},
+                {
+                    "name": "spec_values",
+                    "action": "spec_values",
+                    "profiles": {
+                        "*": {
+                            "rules": [
+                                {"label": "color", "source": "color"},
+                                {"label": "size", "source": "size"},
+                            ]
+                        }
+                    },
+                },
+                {"name": "title", "action": "input", "source": "title"},
+            ],
+            "draft_verification": {
+                "enabled": True,
+                "require_title": True,
+                "require_main_image": True,
+                "require_square_main_image": True,
+                "minimum_description_image_count": 1,
+                "require_specs": True,
+                "required_spec_labels": ["color", "size"],
+            },
+        }
+
+        self.browser._ensure_core_publish_fields_before_draft_save(publish_config, context)
+
+        self.assertEqual(
+            events,
+            ["main_image", "clear:color", "clear:size", "spec_values", "title", "core"],
+        )
+        self.assertTrue(context["draft_main_image_reapplied_pre_save"])
+        self.assertEqual(context["draft_specs_reapplied_pre_save"], ["color", "size"])
+        self.assertTrue(context["draft_title_reapplied_pre_save"])
+        self.assertEqual(context["draft_description_image_count_expected_pre_save"], 2)
+
+    def test_pre_save_core_guard_rejects_nonmatching_title(self) -> None:
+        self.browser.driver = FakeDriver()
+        self.browser._draft_title_value = lambda: "wrong title"  # type: ignore[assignment]
+
+        with self.assertRaisesRegex(PublishValidationError, "title does not match"):
+            self.browser._verify_core_fields_before_draft_save(
+                {
+                    "draft_verification": {
+                        "enabled": True,
+                        "require_title": True,
+                        "require_main_image": False,
+                        "require_specs": False,
+                    }
+                },
+                {"title": "expected title"},
+            )
+
+    def test_pre_save_core_guard_rejects_nonmatching_committed_specs(self) -> None:
+        self.browser.driver = FakeDriver()
+        self.browser._collect_spec_values = lambda: {  # type: ignore[assignment]
+            "color": "oak",
+            "size": "48/40/50",
+        }
+
+        with self.assertRaisesRegex(PublishValidationError, "committed specs do not match"):
+            self.browser._verify_core_fields_before_draft_save(
+                {
+                    "steps": [
+                        {
+                            "name": "spec_values",
+                            "action": "spec_values",
+                            "profiles": {
+                                "*": {
+                                    "rules": [
+                                        {"label": "color", "source": "color"},
+                                        {"label": "size", "source": "size"},
+                                    ]
+                                }
+                            },
+                        }
+                    ],
+                    "draft_verification": {
+                        "enabled": True,
+                        "require_title": False,
+                        "require_main_image": False,
+                        "require_specs": True,
+                        "required_spec_labels": ["color", "size"],
+                    },
+                },
+                {"color": "walnut", "size": "48/40/50"},
+            )
+
+    def test_collect_spec_values_reads_only_committed_inputs(self) -> None:
+        class SpecDriver(FakeDriver):
+            def __init__(self) -> None:
+                super().__init__()
+                self.script = ""
+
+            def execute_script(self, script: str, *args: object) -> object:
+                self.script = script
+                return {"color": "walnut", "size": "48/40/50"}
+
+        driver = SpecDriver()
+        self.browser.driver = driver
+
+        values = self.browser._collect_spec_values()
+
+        self.assertEqual(values, {"color": "walnut", "size": "48/40/50"})
+        self.assertIn(".value-select-item:not(.resident) input", driver.script)
+
     def test_pre_save_core_guard_rejects_missing_required_size(self) -> None:
         self.browser.driver = FakeDriver()
         self.browser._draft_title_value = lambda: "胡桃色床头柜"  # type: ignore[assignment]

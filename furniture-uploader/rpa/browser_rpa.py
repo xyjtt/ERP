@@ -3234,6 +3234,10 @@ class BrowserRPA:
             print(f"[WARN] Skip spec rule '{label}' because the spec input is not present on current page.")
             return
         for item in spec_values:
+            if self.driver:
+                current_state = self._read_spec_text_state(container, item)
+                if bool(current_state.get("exact_match")) and not bool(current_state.get("required_warning")):
+                    continue
             input_element = self._find_preferred_spec_input(container)
             if not input_element:
                 if required:
@@ -3297,7 +3301,7 @@ class BrowserRPA:
                 f"Spec rule '{label}' still shows a required-field warning after entering '{expected_value}'."
             )
         raise PublishValidationError(
-            f"Spec rule '{label}' did not retain '{expected_value}' after Enter; current values: {values}."
+            f"Spec rule '{label}' did not retain '{expected_value}' after commit; current values: {values}."
         )
 
     def _read_spec_text_state(self, container: WebElement, expected_value: str) -> dict[str, Any]:
@@ -8228,6 +8232,7 @@ class BrowserRPA:
         if not self.driver:
             raise RuntimeError("Browser has not been opened.")
 
+        self._reapply_nonpersistent_draft_fields(publish_config, context)
         begin_amount = self._resolve_context_preferred_value(
             context=context,
             source="price_begin_amount",
@@ -8432,6 +8437,104 @@ class BrowserRPA:
         context["draft_core_fields_pre_save"] = state if isinstance(state, dict) else {"ok": False}
         self._verify_core_fields_before_draft_save(publish_config, context)
 
+    def _reapply_nonpersistent_draft_fields(
+        self,
+        publish_config: dict[str, Any],
+        context: dict[str, Any],
+    ) -> None:
+        verification = publish_config.get("draft_verification", {})
+        if not verification or not verification.get("enabled", True):
+            return
+
+        steps = [item for item in list(publish_config.get("steps", []) or []) if isinstance(item, dict)]
+        main_image_step = next(
+            (item for item in steps if str(item.get("name", "")).strip() == "main_image"),
+            None,
+        )
+        spec_step = next(
+            (item for item in steps if str(item.get("action", "")).strip() == "spec_values"),
+            None,
+        )
+        title_step = next(
+            (item for item in steps if str(item.get("name", "")).strip() == "title"),
+            None,
+        )
+
+        require_square_main_image = bool(verification.get("require_square_main_image", False))
+        main_image_state = self._draft_main_image_state()
+        main_image_needs_reapply = not bool(main_image_state.get("present")) or (
+            require_square_main_image and not bool(main_image_state.get("square"))
+        )
+        if main_image_needs_reapply and main_image_step:
+            self._run_publish_steps([main_image_step], context)
+            context["draft_main_image_reapplied_pre_save"] = True
+
+        expected_specs = self._resolve_expected_spec_values(spec_step, context) if spec_step else {}
+        current_specs = self._collect_spec_values() if expected_specs else {}
+        mismatched_spec_labels = [
+            label
+            for label, expected_values in expected_specs.items()
+            if not self._spec_value_lists_match(current_specs.get(label, ""), expected_values)
+        ]
+        if mismatched_spec_labels and spec_step:
+            for label in mismatched_spec_labels:
+                self._clear_committed_spec_values(label)
+            self._run_publish_steps([spec_step], context)
+            context["draft_specs_reapplied_pre_save"] = mismatched_spec_labels
+
+        expected_title = str(context.get("title", "")).strip()
+        if expected_title and self._draft_title_value() != expected_title and title_step:
+            self._run_publish_steps([title_step], context)
+            context["draft_title_reapplied_pre_save"] = True
+
+    def _resolve_expected_spec_values(
+        self,
+        spec_step: dict[str, Any] | None,
+        context: dict[str, Any],
+    ) -> dict[str, list[str]]:
+        if not spec_step:
+            return {}
+        expected: dict[str, list[str]] = {}
+        for rule in self._resolve_profile_rules(spec_step, context):
+            label = str(rule.get("label", "")).strip()
+            raw_value = self._resolve_profile_rule_value(rule, context)
+            values = self._split_spec_rule_values(raw_value, rule)
+            if label and values:
+                expected[label] = values
+        return expected
+
+    def _spec_value_lists_match(self, actual: Any, expected: list[str]) -> bool:
+        actual_values = [str(item).strip() for item in str(actual or "").split("|") if str(item).strip()]
+        expected_values = [str(item).strip() for item in expected if str(item).strip()]
+        return len(actual_values) == len(expected_values) and set(actual_values) == set(expected_values)
+
+    def _clear_committed_spec_values(self, label: str) -> None:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+
+        max_removals = 50
+        for _ in range(max_removals):
+            container = self._wait_for_spec_container(label)
+            committed_items = container.find_elements(
+                By.CSS_SELECTOR,
+                ".value-select-item:not(.resident)",
+            )
+            if not committed_items:
+                return
+            remove_controls = committed_items[-1].find_elements(
+                By.CSS_SELECTOR,
+                ".value-select-remove, .action-btn",
+            )
+            if not remove_controls:
+                raise PublishValidationError(
+                    f"Cannot reset mismatched committed values for spec '{label}'."
+                )
+            self.driver.execute_script("arguments[0].click();", remove_controls[-1])
+            self._pause(0.2)
+        raise PublishValidationError(
+            f"Too many committed values while resetting spec '{label}'."
+        )
+
     def _verify_core_fields_before_draft_save(
         self,
         publish_config: dict[str, Any],
@@ -8446,17 +8549,42 @@ class BrowserRPA:
             context["draft_title_pre_save"] = actual_title
             if not actual_title:
                 raise PublishValidationError("draft save blocked: title is empty before save.")
+            expected_title = str(context.get("title", "")).strip()
+            if expected_title and actual_title != expected_title:
+                raise PublishValidationError(
+                    "draft save blocked: title does not match the task payload before save "
+                    f"(expected={expected_title!r}, actual={actual_title!r})."
+                )
 
         if verification.get("require_main_image", True):
             main_image_present = self._draft_main_image_present()
+            main_image_state = {"present": main_image_present}
+            if verification.get("require_square_main_image", False):
+                main_image_state = self._draft_main_image_state()
+                main_image_present = bool(main_image_state.get("present"))
+            context["draft_main_image_state_pre_save"] = main_image_state
             context["draft_main_image_pre_save"] = main_image_present
             if not main_image_present:
                 raise PublishValidationError("draft save blocked: main image is empty before save.")
+            if verification.get("require_square_main_image", False) and not bool(main_image_state.get("square")):
+                raise PublishValidationError("draft save blocked: first main image is not square before save.")
 
         minimum_description_image_count = max(
             0,
             int(verification.get("minimum_description_image_count", 0) or 0),
         )
+        expected_description_image_count = len(
+            [
+                item
+                for item in list(context.get("detail_images_uploaded_urls", []) or [])
+                if str(item).strip()
+            ]
+        )
+        minimum_description_image_count = max(
+            minimum_description_image_count,
+            expected_description_image_count,
+        )
+        context["draft_description_image_count_expected_pre_save"] = minimum_description_image_count
         if minimum_description_image_count > 0:
             description_image_count = self._draft_description_image_count()
             context["draft_description_image_count_pre_save"] = description_image_count
@@ -8474,6 +8602,15 @@ class BrowserRPA:
             ]
             spec_values = self._collect_spec_values()
             context["draft_spec_values_pre_save"] = spec_values
+            spec_step = next(
+                (
+                    item
+                    for item in list(publish_config.get("steps", []) or [])
+                    if isinstance(item, dict) and str(item.get("action", "")).strip() == "spec_values"
+                ),
+                None,
+            )
+            expected_specs = self._resolve_expected_spec_values(spec_step, context)
             missing_labels = [
                 label
                 for label in required_spec_labels
@@ -8483,6 +8620,20 @@ class BrowserRPA:
                 raise PublishValidationError(
                     "draft save blocked: required specs are empty before save: "
                     + ", ".join(missing_labels)
+                )
+            mismatched_labels = [
+                label
+                for label, expected_values in expected_specs.items()
+                if not self._spec_value_lists_match(spec_values.get(label, ""), expected_values)
+            ]
+            if mismatched_labels:
+                details = ", ".join(
+                    f"{label}={spec_values.get(label, '')!r} expected {'|'.join(expected_specs[label])!r}"
+                    for label in mismatched_labels
+                )
+                raise PublishValidationError(
+                    "draft save blocked: committed specs do not match the task payload before save: "
+                    + details
                 )
 
     def _ensure_required_cat_props_before_draft_save(
@@ -10745,7 +10896,7 @@ class BrowserRPA:
             const result = {};
             sections.forEach((section) => {
               const label = (section.querySelector('.nak-label')?.innerText || '').replace(/\\s+/g, ' ').trim();
-              const values = Array.from(section.querySelectorAll('input'))
+              const values = Array.from(section.querySelectorAll('.value-select-item:not(.resident) input'))
                 .map((node) => (node.value || '').replace(/\\s+/g, ' ').trim())
                 .filter(Boolean);
               if (label) {
