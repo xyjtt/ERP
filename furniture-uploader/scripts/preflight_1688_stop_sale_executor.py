@@ -115,6 +115,10 @@ def load_account_identity_flags(accounts_path: Path) -> dict[str, bool]:
             continue
         account_key = str(row.get("account_key") or "").strip()
         member_id = str(row.get("expected_member_id") or "").strip()
+        if not member_id:
+            shop_id = str(row.get("shop_id") or "").strip()
+            if shop_id.startswith("1688-member:"):
+                member_id = shop_id.removeprefix("1688-member:").strip()
         if account_key:
             result[account_key] = bool(MEMBER_ID_PATTERN.fullmatch(member_id))
     return result

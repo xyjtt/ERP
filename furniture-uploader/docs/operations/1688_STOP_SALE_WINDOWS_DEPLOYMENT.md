@@ -167,7 +167,7 @@ python rpa\sku_offline_main.py `
   --shared-runtime-root E:\1688\1688-script-new
 ```
 
-执行器只把 `account_key`、期望店铺名和非敏感恢复开关传给 `src.cli login`，密码仍由共享项目从 Credential Manager 读取。preflight 还要求四店 `expected_member_id` 已配置。真实交付前必须在执行机完成一次过期 Profile canary；本地测试通过不等于线上登录验收通过。
+执行器只把 `account_key`、期望店铺名和非敏感恢复开关传给 `src.cli login`，密码仍由共享项目从 Credential Manager 读取。preflight 还要求四店 `expected_member_id` 或同值稳定 member `shop_id` 已配置。真实交付前必须在执行机完成一次过期 Profile canary；本地测试通过不等于线上登录验收通过。
 
 ## 共机 Worker 门禁
 

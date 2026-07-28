@@ -5,7 +5,7 @@
 - 下架和替换仍先复用账号独立真实 Edge/Profile；登录失效时调用共享 1688 `src.cli login`，仅该调用显式启用既有滑块 RPA，最多 4 次，不处理短信、扫码、处罚页或未知风控。
 - 滑块消失不作为成功证据。登录后必须从外置 `accounts.json` 读取 `expected_member_id`，并与目标店铺共同核验；真实 `member_id`/店铺不匹配返回店铺安全终态。
 - 默认停店范围收窄为 `store_mismatch`。商品管理搜索超时、Edge 窗口/renderer 异常先重建当前店铺 Profile 会话重试一次；仍失败以及登录未恢复、身份信息缺失等逐批记录、写审计并钉钉通知，随后继续其他店铺；业务终态仍不自动整商品下架。
-- preflight 新增 `all_account_identities_configured`，四店缺少合法 `expected_member_id` 时不得进入 execute。
+- preflight 新增 `all_account_identities_configured`，四店缺少合法 `expected_member_id` 或同值稳定 `shop_id=1688-member:<member_id>` 时不得进入 execute。
 - 开发回归：ERP `325 passed, 5 subtests passed`；聚水潭 `check`、`18/18`、`build` 通过。共享 1688 仓库本次相关测试全过，全量为 `726 passed, 2 skipped, 75 subtests passed, 9` 个与 `origin/main` 一致的既有工单/文档测试失败。开发机没有正式四店 Profile，真实滑块、真实登录、1688 页面、聚水潭、审计和钉钉仍必须由执行机单条 Canary 验收。
 
 ## 2026-07-27 Managed Update (Daily Stop-Sale Recovery Hardening)

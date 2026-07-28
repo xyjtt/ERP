@@ -62,14 +62,18 @@ class ExecutorPreflightTests(unittest.TestCase):
                 '{"accounts": ['
                 '{"account_key": "matched", "expected_member_id": "b2b-member_1"},'
                 '{"account_key": "missing", "expected_member_id": ""},'
-                '{"account_key": "invalid", "expected_member_id": "contains space"}'
+                '{"account_key": "invalid", "expected_member_id": "contains space"},'
+                '{"account_key": "legacy", "shop_id": "1688-member:legacy-member"}'
                 "]}",
                 encoding="utf-8",
             )
 
             flags = load_account_identity_flags(accounts_path)
 
-        self.assertEqual(flags, {"matched": True, "missing": False, "invalid": False})
+        self.assertEqual(
+            flags,
+            {"matched": True, "missing": False, "invalid": False, "legacy": True},
+        )
 
 
 if __name__ == "__main__":

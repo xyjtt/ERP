@@ -3,7 +3,7 @@
 ## 2026-07-28 Automatic Login Handover
 
 - 下架/替换登录恢复调用共享 1688 CLI 时必须显式开启受限滑块 RPA 和身份核验；普通爬虫登录默认不变。
-- 执行机外置 `accounts.json` 的四店条目必须有真实探测并审核后的 `expected_member_id`；preflight 的 `all_account_identities_configured` 必须为 `true`。
+- 执行机外置 `accounts.json` 的四店条目必须有真实探测并审核后的 `expected_member_id`，或同值稳定 `shop_id=1688-member:<member_id>`；preflight 的 `all_account_identities_configured` 必须为 `true`。
 - 退出码 2 表示滑块/风控未解决，退出码 3 表示真实店铺或 `member_id` 不匹配，退出码 4 表示身份无法证明。只有退出码 3 映射为停店安全终态，其余异常记录、通知并继续其他店铺。
 - 部署后只允许替换 Preview 和一条合法旧 SKU -> 新 SKU Canary；核对 1688、聚水潭、正式审计、Summary 和钉钉后再决定是否扩大批量。
 
