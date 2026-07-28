@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
 import sys
 from typing import Any
@@ -38,6 +39,7 @@ REQUIRED_PYTHON_MODULES = (
     "webdriver_manager",
     "pyodbc",
 )
+MEMBER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.:@-]{2,160}$")
 
 
 def parse_args() -> argparse.Namespace:
@@ -97,12 +99,41 @@ def check_python_runtime_dependencies(
     return {name: importlib.util.find_spec(name) is not None for name in module_names}
 
 
+def load_account_identity_flags(accounts_path: Path) -> dict[str, bool]:
+    if not accounts_path.is_file():
+        return {}
+    try:
+        payload = json.loads(accounts_path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return {}
+    rows = payload.get("accounts") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        return {}
+    result: dict[str, bool] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        account_key = str(row.get("account_key") or "").strip()
+        member_id = str(row.get("expected_member_id") or "").strip()
+        if account_key:
+            result[account_key] = bool(MEMBER_ID_PATTERN.fullmatch(member_id))
+    return result
+
+
 def build_report(args: argparse.Namespace) -> dict[str, Any]:
     script_1688_root = Path(args.script_1688_root).resolve()
     config_dir = Path(args.config_dir).resolve()
     jushuitan_root = Path(args.jushuitan_root).resolve()
     system_config = load_json_with_local_override(config_dir / "systems" / "1688_sku_offline.json")
     store_accounts = list(system_config.get("execution", {}).get("store_accounts", []))
+    external_config_root = Path(
+        os.getenv(
+            "YYDD_1688_CONFIG_ROOT",
+            str(Path(os.getenv("PROGRAMDATA", r"C:\ProgramData")) / "YYDD" / "1688-crawler" / "config"),
+        )
+    ).resolve()
+    accounts_path = external_config_root / "accounts.json"
+    identity_flags = load_account_identity_flags(accounts_path)
     profile_checks = []
     for binding in store_accounts:
         profile_dir = Path(str(binding.get("browser_profile_dir", ""))).resolve()
@@ -112,6 +143,10 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
                 "store_name": str(binding.get("store_name", "")),
                 "profile_exists": profile_dir.exists(),
                 "default_profile_exists": (profile_dir / "Default").exists(),
+                "expected_member_id_configured": identity_flags.get(
+                    str(binding.get("account_key", "")).strip(),
+                    False,
+                ),
             }
         )
 
@@ -194,6 +229,8 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             and app_audit_config is not None
         ),
         "all_profiles_exist": bool(profile_checks) and all(item["profile_exists"] for item in profile_checks),
+        "all_account_identities_configured": bool(profile_checks)
+        and all(item["expected_member_id_configured"] for item in profile_checks),
         "no_plaintext_jushuitan_secrets": not plaintext_keys,
     }
     return {
@@ -217,6 +254,11 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             "error_type": app_audit_error,
         },
         "profile_checks": profile_checks,
+        "account_identity": {
+            "accounts_path": str(accounts_path),
+            "all_configured": bool(profile_checks)
+            and all(item["expected_member_id_configured"] for item in profile_checks),
+        },
         "shared_lock": {
             "path": str(lock_path),
             "currently_present": lock_path.exists(),

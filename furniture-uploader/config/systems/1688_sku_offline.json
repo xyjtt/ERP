@@ -41,13 +41,7 @@
       "max_attempts_per_store": 1
     },
     "stop_store_on_error_categories": [
-      "login_required",
-      "risk_control",
-      "store_mismatch",
-      "identity_mismatch",
-      "account_mapping",
-      "browser_window_closed",
-      "management_tab_mismatch"
+      "store_mismatch"
     ],
     "non_retryable_error_categories": [
       "task_not_found",

@@ -12,7 +12,11 @@ RPA_ROOT = PROJECT_ROOT / "rpa"
 if str(RPA_ROOT) not in sys.path:
     sys.path.insert(0, str(RPA_ROOT))
 
-from exceptions import OfflineLoginRequiredError, OfflineRiskControlError  # noqa: E402
+from exceptions import (  # noqa: E402
+    OfflineLoginRequiredError,
+    OfflineRiskControlError,
+    OfflineStoreMismatchError,
+)
 from sku_offline_auth import (  # noqa: E402
     ensure_1688_authenticated_session,
     extract_login_failure_diagnostic,
@@ -52,6 +56,9 @@ class SkuOfflineAuthTests(unittest.TestCase):
         self.assertEqual(command[1:4], ["-m", "src.cli", "login"])
         self.assertEqual(command[command.index("--account-key") + 1], "gonglai")
         self.assertEqual(command[command.index("--shop-name") + 1], "阿里巴巴-常州工莱家具")
+        self.assertIn("--auto-solve-slider", command)
+        self.assertEqual(command[command.index("--slider-max-attempts") + 1], "4")
+        self.assertIn("--verify-account-identity", command)
         self.assertNotIn("username", " ".join(command).lower())
         self.assertNotIn("password", " ".join(command).lower())
         self.assertEqual(result["status"], "success")
@@ -83,6 +90,42 @@ class SkuOfflineAuthTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             runtime_root = self.create_runtime(Path(temp_dir))
             with self.assertRaises(OfflineRiskControlError):
+                ensure_1688_authenticated_session(
+                    runtime_root,
+                    "gonglai",
+                    "常州工莱家具",
+                    command_runner=runner,
+                )
+
+    def test_identity_mismatch_exit_code_stops_only_the_mismatched_store(self) -> None:
+        def runner(command, **_kwargs):
+            return subprocess.CompletedProcess(
+                command,
+                3,
+                stdout='LOGIN_IDENTITY_RESULT:{"status":"member_id_mismatch"}',
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_root = self.create_runtime(Path(temp_dir))
+            with self.assertRaises(OfflineStoreMismatchError):
+                ensure_1688_authenticated_session(
+                    runtime_root,
+                    "gonglai",
+                    "常州工莱家具",
+                    command_runner=runner,
+                )
+
+    def test_unproven_identity_is_retryable_login_failure_not_store_mismatch(self) -> None:
+        def runner(command, **_kwargs):
+            return subprocess.CompletedProcess(
+                command,
+                4,
+                stdout='LOGIN_IDENTITY_RESULT:{"status":"member_id_missing"}',
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_root = self.create_runtime(Path(temp_dir))
+            with self.assertRaises(OfflineLoginRequiredError):
                 ensure_1688_authenticated_session(
                     runtime_root,
                     "gonglai",

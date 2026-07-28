@@ -472,6 +472,16 @@ def execute_preview(
             except OfflineLoginRequiredError:
                 if not recover_store_session():
                     raise
+            except Exception as exc:
+                error_category = classify_offline_error(exc, browser.last_result_context)
+                if (
+                    max_attempts > 1
+                    and should_retry_offline_error(error_category, execution_config)
+                    and requires_browser_recovery(error_category)
+                ):
+                    recreate_store_browser()
+                else:
+                    raise
             for _, product_tasks in group_tasks_by_product(store_tasks).items():
                 pending_tasks = list(product_tasks)
                 attempts = 0
@@ -546,7 +556,7 @@ def execute_preview(
                                 retry_tasks.append(task)
                                 retry_requires_browser_recovery = (
                                     retry_requires_browser_recovery
-                                    or error_category == "automation_error"
+                                    or requires_browser_recovery(error_category)
                                 )
                                 continue
 
@@ -606,7 +616,7 @@ def execute_preview(
                             != "browser_recovery"
                         ):
                             try:
-                                if error_category == "automation_error":
+                                if requires_browser_recovery(error_category):
                                     recreate_store_browser()
                             except Exception as recovery_exc:
                                 exc = recovery_exc
@@ -647,15 +657,14 @@ def execute_preview(
                     break
         except Exception as exc:
             error_category = classify_offline_error(exc, browser.last_result_context)
-            if not should_stop_store_on_error(error_category, execution_config):
-                raise
-
             remaining_tasks = [
                 task for task in store_tasks if task.dedupe_key not in finished_task_keys
             ]
             summary["failed"] += len(remaining_tasks)
-            summary["stopped_stores"] += 1
-            summary["stopped_store_names"].append(store_name)
+            stop_store = should_stop_store_on_error(error_category, execution_config)
+            if stop_store:
+                summary["stopped_stores"] += 1
+                summary["stopped_store_names"].append(store_name)
             result_context = dict(browser.last_result_context or {})
             result_context.setdefault("page_error_category", error_category)
             result_context.setdefault("page_error_stage", "pre_execution_session")
@@ -674,9 +683,15 @@ def execute_preview(
                 finished_task_keys.add(task.dedupe_key)
                 if index == 0:
                     send_failure_notification(system_config, payload, disabled=no_notify)
-            safe_console_print(
-                f"[ERROR] Stop store batch for {store_name}: safety category={error_category}; {exc}"
-            )
+            if stop_store:
+                safe_console_print(
+                    f"[ERROR] Stop store batch for {store_name}: safety category={error_category}; {exc}"
+                )
+            else:
+                safe_console_print(
+                    f"[ERROR] Store session failed for {store_name}; recorded and continuing: "
+                    f"category={error_category}; {exc}"
+                )
         finally:
             browser.close()
 
@@ -891,15 +906,7 @@ def build_store_operator_config(
 def should_stop_store_on_error(error_category: str, execution_config: dict[str, Any]) -> bool:
     configured = execution_config.get(
         "stop_store_on_error_categories",
-        [
-            "login_required",
-            "risk_control",
-            "store_mismatch",
-            "identity_mismatch",
-            "account_mapping",
-            "browser_window_closed",
-            "management_tab_mismatch",
-        ],
+        ["store_mismatch"],
     )
     categories = {str(item).strip() for item in configured if str(item).strip()}
     return str(error_category or "").strip() in categories
@@ -920,6 +927,14 @@ def should_retry_offline_error(error_category: str, execution_config: dict[str, 
     )
     categories = {str(item).strip() for item in configured if str(item).strip()}
     return str(error_category or "").strip() not in categories
+
+
+def requires_browser_recovery(error_category: str) -> bool:
+    return str(error_category or "").strip() in {
+        "automation_error",
+        "browser_window_closed",
+        "management_search_timeout",
+    }
 
 
 def process_scan_mode(

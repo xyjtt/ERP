@@ -1,12 +1,20 @@
 # Platform Experience Knowledge Base
 
+## 2026-07-28 Bounded Slider and Identity Findings
+
+- 账号独立 Profile 登录恢复必须由业务调用方显式开启，不能改变普通爬虫登录的默认行为。现行命令同时携带 `--auto-solve-slider`、`--slider-max-attempts 4` 和 `--verify-account-identity`。
+- 现有 `SliderCaptchaHandler` 只在确认滑块容器后使用；最多 4 次。短信、扫码、处罚页和未知风控不做坐标兜底或无限重试。
+- 滑块消失不是登录成功。必须等待真实登录成功，再从工作台链接和页面上下文取得唯一 `member_id`，与外置 `accounts.json.expected_member_id` 和目标店铺一起核对。
+- `shop_mismatch`/`member_id_mismatch` 是安全停店条件；`member_id_missing`、`member_id_ambiguous`、登录超时、页面超时和 renderer 异常属于可观测技术失败，应写明细、审计、钉钉并继续其他店铺。
+- `browser_window_closed`、`management_search_timeout` 和通用 `automation_error` 在重试前都要关闭当前代码拥有的浏览器并重开相同 Profile，不能继续复用可能损坏的 renderer；重建仍失败后再落异常终态。
+
 ## 2026-07-27 Long-Running Stop-Sale Recovery Findings
 
 - 长时间每日下架不能假设 Crawler Worker 在外层上下文中一直保持 Disabled。其他计划任务或人工操作可能在中途重新启用它，因此每个浏览器批次尝试前都要重新检查计划任务状态、Worker 进程和 Profile Edge 进程。
 - 重申暂停时只允许操作指定的 `YYDD-1688-Crawler-Worker` 任务并等待其拥有的进程自然退出；未知 Profile Edge 必须等待或安全失败，不能通过全局结束 Python/Edge/Node 兜底。
 - Worker 或活动爬虫保护失败属于“批次已创建但未执行”的终态，应写 `not_attempted`、Pipeline Summary、审计结束状态和钉钉通知。仅打印异常或只发管理器总通知不足以追踪单批次。
 - `Timed out receiving message from renderer`、通用 selector 超时等 `automation_error` 可能表示当前 Edge renderer 已损坏。继续在同一个浏览器对象内重试价值很低；应关闭当前代码拥有的店铺浏览器、重新打开相同 Profile、校验会话后再重试。
-- 浏览器重建仅适用于可重试自动化异常。`login_required` 使用账户级自动登录恢复，`risk_control` 必须停止，`sole_sku_requires_product_offline`、`product_unavailable` 等业务终态只记录和通知。
+- 浏览器重建仅适用于可重试自动化异常。`login_required` 使用账户级自动登录恢复；受限滑块未解决和其他风控记录并通知，只有真实店铺/账号不匹配停止对应店铺。`sole_sku_requires_product_offline`、`product_unavailable` 等业务终态只记录和通知。
 - 2026-07-27 现场排查已明确：`1688-Watchdog` 只上报 CDP/爬虫状态，不会启动 Crawler Worker，不能把它写成事故根因。
 
 ## 2026-07-23 SKU Replacement Findings
@@ -176,7 +184,7 @@
 2. 仅在登录失效且没有检测到风控时关闭 ERP 浏览器，调用 `python -m src.cli login`。
 3. 自动登录成功后重新创建 ERP 浏览器，再次检查管理页和店铺身份。
 
-自动登录最多每店一次。返回验证码、滑块或风控必须停止该店并告警，不得自动拖动或重试刷验证。
+自动登录最多每店一次。自 2026-07-28 起，仅下架/替换恢复可调用既有滑块 RPA，单次最多 4 次；其他验证码或风控记录并告警，不做无限重试。
 
 ### 坑 8：显式 Edge 路径不能和系统其他安装目录混合选版本
 

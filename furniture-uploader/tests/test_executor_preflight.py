@@ -16,6 +16,7 @@ from preflight_1688_stop_sale_executor import (
     check_jushuitan_storage_state,
     check_plaintext_env_file,
     check_python_runtime_dependencies,
+    load_account_identity_flags,
 )
 
 
@@ -53,6 +54,22 @@ class ExecutorPreflightTests(unittest.TestCase):
             result = check_python_runtime_dependencies(("selenium", "pyodbc"))
 
         self.assertEqual(result, {"selenium": True, "pyodbc": False})
+
+    def test_account_identity_flags_require_valid_expected_member_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            accounts_path = Path(temp_dir) / "accounts.json"
+            accounts_path.write_text(
+                '{"accounts": ['
+                '{"account_key": "matched", "expected_member_id": "b2b-member_1"},'
+                '{"account_key": "missing", "expected_member_id": ""},'
+                '{"account_key": "invalid", "expected_member_id": "contains space"}'
+                "]}",
+                encoding="utf-8",
+            )
+
+            flags = load_account_identity_flags(accounts_path)
+
+        self.assertEqual(flags, {"matched": True, "missing": False, "invalid": False})
 
 
 if __name__ == "__main__":

@@ -8,7 +8,11 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlsplit, urlunsplit
 
-from exceptions import OfflineLoginRequiredError, OfflineRiskControlError
+from exceptions import (
+    OfflineLoginRequiredError,
+    OfflineRiskControlError,
+    OfflineStoreMismatchError,
+)
 
 
 CommandRunner = Callable[..., subprocess.CompletedProcess[Any]]
@@ -118,6 +122,10 @@ def ensure_1688_authenticated_session(
         normalized_account_key,
         "--shop-name",
         normalized_store_name,
+        "--auto-solve-slider",
+        "--slider-max-attempts",
+        "4",
+        "--verify-account-identity",
     ]
 
     try:
@@ -149,6 +157,18 @@ def ensure_1688_authenticated_session(
         diagnostic = extract_login_failure_diagnostic(result.stdout, result.stderr)
         raise OfflineRiskControlError(
             "1688 automatic login reached captcha, slider, or platform risk verification."
+            + (f" Diagnostic: {diagnostic}" if diagnostic else "")
+        )
+    if return_code == 3:
+        diagnostic = extract_login_failure_diagnostic(result.stdout, result.stderr)
+        raise OfflineStoreMismatchError(
+            "1688 automatic login succeeded but the member_id or store identity did not match."
+            + (f" Diagnostic: {diagnostic}" if diagnostic else "")
+        )
+    if return_code == 4:
+        diagnostic = extract_login_failure_diagnostic(result.stdout, result.stderr)
+        raise OfflineLoginRequiredError(
+            "1688 automatic login could not prove the configured member_id and store identity."
             + (f" Diagnostic: {diagnostic}" if diagnostic else "")
         )
     diagnostic = extract_login_failure_diagnostic(result.stdout, result.stderr)

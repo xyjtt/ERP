@@ -1,5 +1,12 @@
 # Delivery Handover 2026-03-24
 
+## 2026-07-28 Automatic Login Handover
+
+- 下架/替换登录恢复调用共享 1688 CLI 时必须显式开启受限滑块 RPA 和身份核验；普通爬虫登录默认不变。
+- 执行机外置 `accounts.json` 的四店条目必须有真实探测并审核后的 `expected_member_id`；preflight 的 `all_account_identities_configured` 必须为 `true`。
+- 退出码 2 表示滑块/风控未解决，退出码 3 表示真实店铺或 `member_id` 不匹配，退出码 4 表示身份无法证明。只有退出码 3 映射为停店安全终态，其余异常记录、通知并继续其他店铺。
+- 部署后只允许替换 Preview 和一条合法旧 SKU -> 新 SKU Canary；核对 1688、聚水潭、正式审计、Summary 和钉钉后再决定是否扩大批量。
+
 ## 2026-07-27 Stop-Sale Runtime Recovery Handover
 
 - 开发分支：`codex/1688-sku-replacement-20260723`。本次修复提交部署前必须先确认执行机没有正在运行的下架、替换或爬虫业务。
@@ -175,5 +182,5 @@
 - 新增 `rpa/sku_offline_auth.py`，下架和替换共用。
 - 执行机必须通过 `--shared-runtime-root` 指向真实 `E:\1688\1688-script-new`，该目录需要包含 `src\cli.py` 和账号 Profile/Credential Manager 配置。
 - 生产默认自动恢复过期登录态；人工调试可使用 `--require-manual-login`。
-- 预期钉钉结果：自动登录成功继续执行；退出码 1 或超时记录 `login_required` 并停止店铺；退出码 2 记录 `risk_control` 并停止店铺。
+- 预期钉钉结果：自动登录成功且身份匹配后继续执行；退出码 1/2/4 记录对应技术或认证异常并继续隔离后的业务范围；退出码 3 才因真实店铺/`member_id` 不匹配停止店铺。
 - 交付验证缺口：需要执行机关闭或使一个测试店铺 Profile 失效，确认自动登录命令、店铺身份复核和后续 SKU 操作真实完成。不能用单元测试代替该 canary。

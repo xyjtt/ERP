@@ -78,7 +78,7 @@ powershell -NoProfile -ExecutionPolicy Bypass `
   -BatchSize 10
 ```
 
-`run` 使用 `--skip-login` 复用已登录 Profile，不会出现要求人工按回车的登录流程。若 Profile 登录态失效、出现滑块或风控，任务会记录并通知，不能由脚本自动处理验证码。
+`run` 使用 `--skip-login` 复用已登录 Profile，不会出现要求人工按回车的登录流程。若 Profile 登录态失效，会执行一次账号恢复；只有已识别滑块可受限自动处理最多 4 次。未解决验证或页面异常记录、审计并通知，只有真实店铺/`member_id` 不匹配停止对应店铺。
 
 ## 查看任务状态
 

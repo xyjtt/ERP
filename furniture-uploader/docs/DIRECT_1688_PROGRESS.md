@@ -1,5 +1,12 @@
 # DIRECT 1688 Progress
 
+## 2026-07-28 Managed Update (Automatic Login Identity Gate)
+
+- 下架/替换账号恢复改为显式 `--auto-solve-slider --slider-max-attempts 4 --verify-account-identity`，普通爬虫登录默认行为不变。
+- 登录后新增 `expected_member_id + 店铺名` 双重核验；真实不匹配 fail closed，缺少/无法读取身份按技术失败记录，不伪造成功。
+- `stop_store_on_error_categories` 默认仅保留 `store_mismatch`；页面超时、登录恢复失败、滑块未解决和浏览器异常均形成明细、审计和钉钉结果，并继续其他店铺。
+- 开发验证已完成；下一节点是执行机 preflight 确认四店 `expected_member_id`，然后只执行替换 Preview 和一条合法旧 SKU -> 新 SKU Canary。Canary 通过前不执行全量替换。
+
 ## 2026-07-27 Managed Update (Stop-Sale Runtime Recovery Fixes)
 
 - 已完成三项开发修复：每个 Pipeline 尝试前重申 Worker 暂停、启动保护失败形成审计/Summary/钉钉闭环、`automation_error` 重试前重建当前店铺浏览器。
@@ -206,6 +213,6 @@
 
 - 下架和 SKU 替换的生产 pipeline 已透传 `--shared-runtime-root`。
 - 1688 登录失效不再要求运营手动登录：默认执行一次账号级自动登录，成功后重新创建浏览器会话并复核店铺。
-- 验证码、滑块、风控、店铺不匹配仍然 fail-closed，只停止对应店铺并通知钉钉。
+- 该 2026-07-24 边界已由 2026-07-28 更新：仅已识别滑块允许受限自动处理；未知验证和技术异常记录通知，真实店铺/`member_id` 不匹配才停止对应店铺。
 - 人工调试仍可显式使用 `--require-manual-login`。
 - 本地验证：ERP `293 passed, 5 subtests passed`；真实执行机过期 Profile canary 尚未完成，不把本地结果视为线上验收。

@@ -1,5 +1,13 @@
 # Project Memory
 
+## 2026-07-28 Managed Update (Bounded Slider Login Recovery)
+
+- 下架和替换仍先复用账号独立真实 Edge/Profile；登录失效时调用共享 1688 `src.cli login`，仅该调用显式启用既有滑块 RPA，最多 4 次，不处理短信、扫码、处罚页或未知风控。
+- 滑块消失不作为成功证据。登录后必须从外置 `accounts.json` 读取 `expected_member_id`，并与目标店铺共同核验；真实 `member_id`/店铺不匹配返回店铺安全终态。
+- 默认停店范围收窄为 `store_mismatch`。商品管理搜索超时、Edge 窗口/renderer 异常先重建当前店铺 Profile 会话重试一次；仍失败以及登录未恢复、身份信息缺失等逐批记录、写审计并钉钉通知，随后继续其他店铺；业务终态仍不自动整商品下架。
+- preflight 新增 `all_account_identities_configured`，四店缺少合法 `expected_member_id` 时不得进入 execute。
+- 开发回归：ERP `325 passed, 5 subtests passed`；聚水潭 `check`、`18/18`、`build` 通过。共享 1688 仓库本次相关测试全过，全量为 `726 passed, 2 skipped, 75 subtests passed, 9` 个与 `origin/main` 一致的既有工单/文档测试失败。开发机没有正式四店 Profile，真实滑块、真实登录、1688 页面、聚水潭、审计和钉钉仍必须由执行机单条 Canary 验收。
+
 ## 2026-07-27 Managed Update (Daily Stop-Sale Recovery Hardening)
 
 - 执行机批次 `daily_20260727_123002_977385` 于 12:30:02 至 16:58:59 运行：加载 116 条、选中 104 条、重复 12 条；1688 成功 13 条、已下架 10 条、失败 64 条、未尝试 17 条；聚水潭成功 23 条，最终状态为 `failed`。
@@ -249,7 +257,7 @@
 ## 2026-07-24 当前事实：下架/替换自动登录
 
 - `1688_sku_offline` 和继承它配置的 `1688_sku_replace` 默认复用店铺 Profile；检测到登录失效后，会关闭 ERP Selenium 会话，调用共享 1688 项目的 `python -m src.cli login --account-key ... --shop-name ...`，再重新打开并校验管理页。
-- 每个店铺每次执行最多自动登录 1 次。`src.cli login` 返回验证码、滑块或风控结果时，不自动处理，当前店铺停止并通过钉钉告警；其他店铺可以继续。
+- 每个店铺每次执行最多自动登录 1 次。自 2026-07-28 起，该显式登录允许既有滑块 RPA 最多 4 次；未解决滑块、未知风控或技术异常记录并通知，只有真实店铺/`member_id` 不匹配停止对应店铺。
 - 自动登录只使用共享 1688 项目的账号凭据引用和 Profile，不在 ERP 代码、命令输出、报告或通知中写入密码、Cookie、Token。
 - 自动登录统计写入执行汇总：`auto_login_attempts`、`auto_login_success`、`auto_login_failed`。
 - 该能力已完成本地代码和测试验证，尚未替代执行机上的真实过期 Profile canary；交付前必须验证“过期态 -> 自动登录 -> 店铺身份复核 -> 继续执行”。

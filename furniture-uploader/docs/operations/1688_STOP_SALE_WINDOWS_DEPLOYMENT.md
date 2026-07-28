@@ -69,7 +69,7 @@ preview 只读取旧业务源，不写任何数据库。execute 在打开浏览�
 
 在执行机创建 `furniture-uploader/config/systems/1688_sku_offline.local.json`，只覆盖 `execution.store_accounts` 中的 Profile 路径和必要账号键。路径必须指向执行机已登录的独立账号 Profile。
 
-同一账号已登录时优先复用 Profile。登录态失效时，执行器会释放 ERP 浏览器并调用共享 1688 项目的账号级登录一次，再重新打开管理页和校验店铺身份。出现滑块、验证码、风控时不自动处理，脚本停止对应店铺并发运营告警。
+同一账号已登录时优先复用 Profile。登录态失效时，执行器会释放 ERP 浏览器并调用共享 1688 项目的账号级登录一次；仅已识别滑块允许受限自动处理最多 4 次。随后重新打开管理页并核对 `expected_member_id` 和店铺；未知验证和技术异常记录告警，真实身份不匹配才停止对应店铺。
 
 ## 共享锁
 
@@ -155,7 +155,7 @@ execute 使用统一 `run_id` 关联 1688 JSONL、聚水潭 JSONL 和新库两�
 
 补偿执行必须只包含未完成项。已经完成 1688 与聚水潭闭环的商品不得重新加入补偿 CSV；1688 已完成但聚水潭失败的任务允许通过完整 pipeline 幂等重放，预期结果为 `already_offline + success/already_cleared`。
 
-正式 pipeline 默认复用店铺映射中的已登录 Profile，相当于 `--skip-login`。登录态失效时每店自动调用一次共享运行时的账号级登录，成功后重建浏览器并复核当前店铺、商品 ID 和 SKU 身份；仍然不自动处理验证码/滑块/风控。只有人工调试时才显式使用 `--require-manual-login` 恢复旧的回车确认流程。执行摘要会记录 `auto_login_attempts`、`auto_login_success`、`auto_login_failed`。
+正式 pipeline 默认复用店铺映射中的已登录 Profile，相当于 `--skip-login`。登录态失效时每店自动调用一次共享运行时的账号级登录；该显式恢复允许既有滑块 RPA 最多 4 次，成功后重建浏览器并复核 `expected_member_id`、当前店铺、商品 ID 和 SKU 身份。未解决滑块或其他风控写审计并通知，只有真实身份不匹配停止店铺。只有人工调试时才显式使用 `--require-manual-login` 恢复旧的回车确认流程。执行摘要会记录 `auto_login_attempts`、`auto_login_success`、`auto_login_failed`。
 
 自动登录调用约束：
 
@@ -167,7 +167,7 @@ python rpa\sku_offline_main.py `
   --shared-runtime-root E:\1688\1688-script-new
 ```
 
-执行器只把 `account_key` 和期望店铺名传给 `src.cli login`，密码仍由共享项目从 Credential Manager 读取。真实交付前必须在执行机完成一次过期 Profile canary；本地测试通过不等于线上登录验收通过。
+执行器只把 `account_key`、期望店铺名和非敏感恢复开关传给 `src.cli login`，密码仍由共享项目从 Credential Manager 读取。preflight 还要求四店 `expected_member_id` 已配置。真实交付前必须在执行机完成一次过期 Profile canary；本地测试通过不等于线上登录验收通过。
 
 ## 共机 Worker 门禁
 

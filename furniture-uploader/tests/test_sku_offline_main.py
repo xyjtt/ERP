@@ -28,6 +28,7 @@ from sku_offline_main import (
     build_summary_notification_content,
     classify_offline_error,
     localize_error_category,
+    requires_browser_recovery,
     resolve_store_account_binding,
     should_retry_offline_error,
     should_stop_store_on_error,
@@ -51,6 +52,18 @@ class FakeRunReport:
 
 
 class SkuOfflineMainTests(unittest.TestCase):
+    def test_default_store_stop_scope_is_only_true_store_mismatch(self) -> None:
+        self.assertTrue(should_stop_store_on_error("store_mismatch", {}))
+        self.assertFalse(should_stop_store_on_error("login_required", {}))
+        self.assertFalse(should_stop_store_on_error("risk_control", {}))
+        self.assertFalse(should_stop_store_on_error("browser_window_closed", {}))
+
+    def test_browser_recovery_covers_renderer_window_and_management_timeouts(self) -> None:
+        self.assertTrue(requires_browser_recovery("automation_error"))
+        self.assertTrue(requires_browser_recovery("browser_window_closed"))
+        self.assertTrue(requires_browser_recovery("management_search_timeout"))
+        self.assertFalse(requires_browser_recovery("store_mismatch"))
+
     def test_replacement_builds_sync_by_link_handoff(self) -> None:
         task = OfflineTask(
             source_file="replace.csv",
@@ -605,6 +618,71 @@ class SkuOfflineMainTests(unittest.TestCase):
         self.assertEqual(len(run_report.rows), 2)
         self.assertEqual({row["error_category"] for row in run_report.rows}, {"login_required"})
         self.assertEqual(run_report.rows[0]["page_error_stage"], "pre_execution_session")
+        notify_failure.assert_called_once()
+
+    def test_login_failure_is_recorded_without_stopping_store_when_only_mismatch_stops(self) -> None:
+        tasks = [
+            OfflineTask(
+                source_file="demo.csv",
+                source_sheet="CSV",
+                source_row_number=index + 2,
+                store_name="STORE-A",
+                platform="Alibaba",
+                product_id=str(1000 + index),
+                online_sku=f"SKU-{index}",
+                handling="all-channel-offline",
+                replacement_sku="",
+                change_image="",
+                platform_store_item_code=f"CODE-{index}",
+                raw={},
+            )
+            for index in range(2)
+        ]
+
+        class FakeBrowser:
+            def __init__(self, *_args, **_kwargs) -> None:
+                self.last_result_context: dict[str, str] = {}
+                self.last_screenshot_path = ""
+                self.last_html_snapshot_path = ""
+
+            def open(self) -> None:
+                return None
+
+            def prepare_session(self, *_args, **_kwargs) -> None:
+                raise OfflineLoginRequiredError("login expired")
+
+            def close(self) -> None:
+                return None
+
+        run_report = FakeRunReport()
+        system_config = {
+            "execution": {
+                "require_store_account_mapping": True,
+                "store_accounts": [{"store_name": "STORE-A", "account_key": "store_a"}],
+                "stop_store_on_error_categories": ["store_mismatch"],
+                "auto_login_fallback": {"enabled": False},
+            },
+            "notifications": {"dingtalk": {"enabled": True}},
+        }
+
+        with (
+            patch("sku_offline_main.SkuOfflineBrowser", FakeBrowser),
+            patch("sku_offline_main.send_failure_notification") as notify_failure,
+            patch("sku_offline_main.send_summary_notification"),
+        ):
+            summary = execute_preview(
+                project_root=PROJECT_ROOT,
+                operator_config={"browser": {}},
+                system_config=system_config,
+                preview={"selected_tasks": tasks},
+                skip_login=True,
+                no_notify=False,
+                run_report=run_report,  # type: ignore[arg-type]
+            )
+
+        self.assertEqual(summary["failed"], 2)
+        self.assertEqual(summary["stopped_stores"], 0)
+        self.assertEqual({row["error_category"] for row in run_report.rows}, {"login_required"})
         notify_failure.assert_called_once()
 
     def test_expired_profile_auto_login_reopens_browser_and_continues(self) -> None:
