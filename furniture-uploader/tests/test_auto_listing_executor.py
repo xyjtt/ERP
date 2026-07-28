@@ -325,6 +325,30 @@ class AutoListingExecutorTests(unittest.TestCase):
         self.assertEqual(evidence["completed_count"], 6)
         self.assertEqual(evidence["next_batch_number"], 3)
         self.assertEqual(evidence["excluded_album_values"], ["album-full"])
+        self.assertFalse(evidence["complete"])
+
+    def test_extract_detail_upload_resume_accepts_full_contiguous_checkpoint(self) -> None:
+        failure_payload = {
+            "task_id": "task-1",
+            "result_context": {
+                "detail_images_list": [f"detail-{index}" for index in range(6)],
+                "detail_images_batch_01_uploaded_urls": ["u1", "u2", "u3"],
+                "detail_images_batch_02_uploaded_urls": ["u4", "u5", "u6"],
+            },
+        }
+
+        evidence = extract_detail_upload_resume_evidence(
+            failure_payload,
+            expected_task_id="task-1",
+            expected_detail_count=6,
+            batch_size=3,
+        )
+
+        self.assertEqual(evidence["uploaded_urls"], ["u1", "u2", "u3", "u4", "u5", "u6"])
+        self.assertEqual(evidence["completed_count"], 6)
+        self.assertEqual(evidence["next_batch_number"], 3)
+        self.assertEqual(evidence["excluded_album_values"], [])
+        self.assertTrue(evidence["complete"])
 
     def test_submit_reconciliation_requires_success_page_and_exact_reapplied_fields(self) -> None:
         draft = advance_listing_state(

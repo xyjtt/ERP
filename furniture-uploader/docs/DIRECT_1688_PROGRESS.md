@@ -6,7 +6,8 @@
 - Added an idempotent pre-save repair order: main image, committed specs, title, then price/inventory/description state patch.
 - Specification reads now ignore the resident editor input and accept only `.value-select-item:not(.resident) input` values; Tab remains the confirmed commit key.
 - Save is blocked unless title/specs exactly match the task payload, the configured square-main-image requirement passes, and the description contains every uploaded detail URL.
-- Development verification passed `379/379`. Executor deployment, one guarded reuse of draft `6a635fcee4b0eda6ebbdf340`, read-only inspection, and formal audit remain pending.
+- Complete contiguous detail-upload checkpoints are reusable, so the next repair can rebuild the description from all 48 recorded CDN URLs without uploading them again.
+- Development verification passed `380/380`. Executor deployment, one guarded reuse of draft `6a635fcee4b0eda6ebbdf340`, read-only inspection, and formal audit remain pending.
 
 ## 2026-03-31 Managed Update (T-005 Draft System-Error Isolation Round-2)
 

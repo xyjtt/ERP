@@ -65,7 +65,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--detail-upload-resume-context",
         default="",
-        help="failure-context JSON containing contiguous completed picker batches",
+        help="failure-context JSON containing contiguous completed picker batches, including a full checkpoint",
     )
     parser.add_argument("--offer-url", default="", help="verified offer URL for writeback")
     parser.add_argument(

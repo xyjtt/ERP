@@ -341,8 +341,8 @@ def extract_detail_upload_resume_evidence(
         uploaded_urls.extend(batch_urls)
         batch_number += 1
 
-    if not uploaded_urls or len(uploaded_urls) >= expected_detail_count:
-        raise ListingContractError("detail upload resume context has no partial contiguous upload checkpoint")
+    if not uploaded_urls or len(uploaded_urls) > expected_detail_count:
+        raise ListingContractError("detail upload resume context has no contiguous upload checkpoint")
     failed_batch_name = f"detail_images_batch_{batch_number:02d}"
     excluded_album_values = [
         str(item).strip()
@@ -352,6 +352,7 @@ def extract_detail_upload_resume_evidence(
     return {
         "uploaded_urls": uploaded_urls,
         "completed_count": len(uploaded_urls),
+        "complete": len(uploaded_urls) == expected_detail_count,
         "next_batch_number": batch_number,
         "excluded_album_values": excluded_album_values,
     }

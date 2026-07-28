@@ -6,7 +6,8 @@
 - Live evidence showed that detail-image batch reloads can clear the title, main image, committed color/size specs, and logistics fields after their original publish steps complete.
 - Draft save now converges nonpersistent fields before the request: restore a missing/non-square main image, reset and reapply mismatched committed specs, then reapply the exact payload title before patching price, quantity, and description.
 - The pre-save gate now requires the exact payload title, exact committed spec values, a square first main image when configured, and all uploaded detail-image URLs represented in the description.
-- Validation: `379/379` unit tests passed; Python compile, all 11 JSON config files, `doctor`, and `git diff --check` passed. Live draft repair and formal audit are still required for business acceptance.
+- A fully uploaded contiguous detail-image checkpoint can now be resumed without uploading the same 48 assets again; the save path only rewrites the description HTML from the recorded CDN URLs.
+- Validation: `380/380` unit tests passed; Python compile, all 11 JSON config files, `doctor`, and `git diff --check` passed. Live draft repair and formal audit are still required for business acceptance.
 
 ## 2026-03-31 Managed Update (T-005 Draft System-Error Isolation Round-2)
 
