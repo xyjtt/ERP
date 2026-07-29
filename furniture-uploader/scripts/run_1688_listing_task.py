@@ -52,6 +52,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--skip-login", action="store_true")
     parser.add_argument("--operator", default="", help="operator recorded for resume evidence")
     parser.add_argument(
+        "--draft-id",
+        default="",
+        help="known historical draft ID to rebind during an explicitly authorized review repair",
+    )
+    parser.add_argument(
         "--capacity-evidence",
         default="",
         help="fresh passed output from probe_1688_image_picker.py; required for resume",
@@ -154,7 +159,9 @@ def main() -> int:
         )
         workflow = payload.get("workflow") or {}
         resume_draft_id = str(
-            workflow.get("pending_draft_id") or ((workflow.get("draft") or {}).get("draft_id") or "")
+            args.draft_id
+            or workflow.get("pending_draft_id")
+            or ((workflow.get("draft") or {}).get("draft_id") or "")
         ).strip()
         updated = advance_listing_state(
             payload,

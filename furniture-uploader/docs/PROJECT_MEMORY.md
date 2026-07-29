@@ -1,5 +1,15 @@
 # Project Memory
 
+## 2026-07-29 Managed Update (CTG0286 Draft Identity Recovery)
+
+- CTG0286 recovery is limited to the two historical draft IDs already present in workflow evidence: `6a635fcee4b0eda6ebbdf340` and `6a6976c1e4b09c827f2edbc9`. Do not create a third draft and do not delete either draft automatically.
+- Draft repair now opens the platform's `fillProductInfo.htm?operator=draft2offer&offerDraftId=...` entry and verifies the expected draft ID before save. The `draftSubmit` request and response must carry the same ID; a missing or different ID fails closed.
+- The product-management draft box currently contains 5 rows and proves both target IDs still exist. It exposes the exact formal `offerDraftId` edit link for each row; old-draft title text is `--`, while the newer row shows the target title.
+- A real click on the old draft's row link opened the correct ID and still rendered 1688 `SYS_ERROR` with a complete page and `SellPublishSdk` present. This is platform-unavailable evidence, not proof that the draft was deleted.
+- The product-management draft probe records every visible draft row, every row/page link and `href`, related `data-*` attributes, and extracted `draftId/offerDraftId` values. Independent inspection supports the same real management-link click path and fails fast on explicit platform error pages.
+- The fresh source lifecycle gate passed at `2026-07-29 13:42 +08:00`. Development verification is `400/400` listing tests plus `89 passed, 3 subtests passed` for the title engine; doctor, Python compile, and 12 JSON files also pass.
+- Real draft repair, refreshed field acceptance, approval, one submit, Offer ID verification, audit, and Offer writeback remain blocked by the 1688 error page. Do not create a third draft or delete either historical draft; recovery now requires platform availability or an explicit human decision to change that policy.
+
 ## 2026-07-28 Managed Update (CTG0286 Pre-Save Field Convergence)
 
 - Scope remains the existing draft `6a635fcee4b0eda6ebbdf340` for SKU `CTG028601N1416V01`; creating a second draft and submitting an Offer remain prohibited.

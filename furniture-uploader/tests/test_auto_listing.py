@@ -217,6 +217,94 @@ class AutoListingContractTests(unittest.TestCase):
         self.assertEqual(resumed["workflow"]["pending_draft_id"], "draft-1")
         self.assertEqual(resumed["workflow"]["last_event"], "review_repair_resumed")
 
+    def test_review_repair_can_rebind_a_known_historical_draft(self) -> None:
+        first_draft = advance_listing_state(
+            sample_payload(),
+            "draft_saved",
+            evidence={"draft_id": "draft-old", "draft_url": "https://draft.invalid/old"},
+        )
+        first_rejected = advance_listing_state(
+            first_draft,
+            "review_rejected",
+            evidence={"rejected_by": "reviewer"},
+        )
+        first_resumed = advance_listing_state(
+            first_rejected,
+            "review_repair_resumed",
+            evidence={
+                "resumed_by": "authorized-operator",
+                "reason": "review_required_fields_repair",
+                "draft_id": "draft-old",
+                "capacity_probe": {
+                    "status": "passed",
+                    "probe_count": 2,
+                    "uploaded_count": 2,
+                    "remote_hosts": ["cbu01.alicdn.com"],
+                    "draft_id": "draft-old",
+                    "checked_at": datetime.now(timezone.utc).isoformat(),
+                    "draft_saved": False,
+                    "offer_submitted": False,
+                },
+            },
+        )
+        replacement_draft = advance_listing_state(
+            first_resumed,
+            "draft_saved",
+            evidence={"draft_id": "draft-new", "draft_url": "https://draft.invalid/new"},
+        )
+        replacement_rejected = advance_listing_state(
+            replacement_draft,
+            "review_rejected",
+            evidence={"rejected_by": "reviewer"},
+        )
+
+        rebound = advance_listing_state(
+            replacement_rejected,
+            "review_repair_resumed",
+            evidence={
+                "resumed_by": "authorized-operator",
+                "reason": "review_required_fields_repair",
+                "draft_id": "draft-old",
+                "capacity_probe": {
+                    "status": "passed",
+                    "probe_count": 2,
+                    "uploaded_count": 2,
+                    "remote_hosts": ["cbu01.alicdn.com"],
+                    "draft_id": "draft-old",
+                    "checked_at": datetime.now(timezone.utc).isoformat(),
+                    "draft_saved": False,
+                    "offer_submitted": False,
+                },
+            },
+        )
+
+        self.assertEqual(rebound["workflow"]["pending_draft_id"], "draft-old")
+        self.assertEqual(rebound["workflow"]["draft"]["draft_id"], "draft-new")
+
+    def test_review_repair_rejects_an_unknown_draft_id(self) -> None:
+        draft = advance_listing_state(
+            sample_payload(),
+            "draft_saved",
+            evidence={"draft_id": "draft-known", "draft_url": "https://draft.invalid/known"},
+        )
+        rejected = advance_listing_state(
+            draft,
+            "review_rejected",
+            evidence={"rejected_by": "reviewer"},
+        )
+
+        with self.assertRaisesRegex(ListingContractError, "not present in workflow history"):
+            advance_listing_state(
+                rejected,
+                "review_repair_resumed",
+                evidence={
+                    "resumed_by": "authorized-operator",
+                    "reason": "review_required_fields_repair",
+                    "draft_id": "draft-unknown",
+                    "capacity_probe": {},
+                },
+            )
+
     def test_execution_blocked_records_image_album_capacity_gate(self) -> None:
         blocked = advance_listing_state(
             sample_payload(),

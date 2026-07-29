@@ -1,5 +1,16 @@
 # DIRECT 1688 Progress
 
+## 2026-07-29 Managed Update (Existing-Draft Recovery Guard)
+
+- Replaced the synthetic `offer-new ... draftId=` repair URL with the platform's formal `fillProductInfo ... offerDraftId=` entry.
+- Added three identity gates: verify the loaded page ID, require the outgoing `draftSubmit` request to carry the expected ID, and reject a response with a missing or different draft ID.
+- Explicit review repair may rebind only to a draft ID already recorded by a historical `draft_saved` event. CTG0286 therefore permits the two known IDs only and prohibits a third draft.
+- Independent inspection can target a specified historical draft and now emits a structured `unavailable` report plus screenshot when the publish runtime does not load.
+- The management-page probe now preserves row text, links, `href` values, `data-*` attributes, and extracted draft identifiers from the draft tab.
+- Current live finding: the draft box has 5 rows and contains both historical IDs. The old row's real “继续发布商品” click opens the correct ID but still renders `SYS_ERROR`, so the form cannot be inspected or repaired.
+- Development gates pass: listing `400/400`; title engine `89 passed, 3 subtests passed`; doctor `ok`; Python compile and 12 JSON files valid. No real save, approval, submit, Offer, or writeback was completed by this result.
+- Current blocker requires platform recovery or an explicit human policy decision. Creating a third draft, deleting either historical draft, approving without refreshed field evidence, and blind submit remain prohibited.
+
 ## 2026-07-28 Managed Update (CTG0286 Pre-Save Repair)
 
 - Reproduced a real draft-save blocker after all image batches completed: the page had re-rendered with an empty title, empty committed specs, no visible main image, and empty logistics inputs.

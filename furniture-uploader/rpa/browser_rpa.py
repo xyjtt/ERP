@@ -6142,6 +6142,7 @@ class BrowserRPA:
         detail_text_html = self._build_tinymce_html(str(context.get("description", "")).strip())
         config_payload = {
             "captureBodyChars": max(256, int(patch_config.get("capture_body_chars", 4000) or 4000)),
+            "expectedDraftId": str(publish_config.get("expected_draft_id", "")).strip(),
             "buyerProtectionServiceName": buyer_protection_value,
             "buyerProtectionServiceCode": buyer_protection_code,
             "buyerProtectionStepTemplate": buyer_protection_steps,
@@ -6222,6 +6223,78 @@ class BrowserRPA:
               } catch (error) {
                 return String(value).slice(0, window.__codexDraftPatchConfig.captureBodyChars || 4000);
               }
+            };
+
+            const requestCarriesExpectedDraftId = (rawUrl, body) => {
+              const expected = String(window.__codexDraftPatchConfig.expectedDraftId || '').trim();
+              if (!expected) {
+                return true;
+              }
+              const identityKeys = new Set(['draftid', 'offerdraftid', 'draft_id']);
+              const keyMatches = (key, value) =>
+                identityKeys.has(String(key || '').toLowerCase()) && String(value || '').trim() === expected;
+              const visited = new WeakSet();
+              const inspectValue = (value) => {
+                if (value == null) return false;
+                if (typeof value === 'string') {
+                  const text = value.trim();
+                  if (!text) return false;
+                  if (text.startsWith('{') || text.startsWith('[')) {
+                    try {
+                      return inspectValue(JSON.parse(text));
+                    } catch (error) {
+                      return false;
+                    }
+                  }
+                  try {
+                    const params = new URLSearchParams(text);
+                    return Array.from(params.entries()).some(
+                      ([key, entryValue]) => keyMatches(key, entryValue) || inspectValue(entryValue)
+                    );
+                  } catch (error) {
+                    return false;
+                  }
+                }
+                if (typeof URLSearchParams !== 'undefined' && value instanceof URLSearchParams) {
+                  return Array.from(value.entries()).some(
+                    ([key, entryValue]) => keyMatches(key, entryValue) || inspectValue(entryValue)
+                  );
+                }
+                if (typeof FormData !== 'undefined' && value instanceof FormData) {
+                  return Array.from(value.entries()).some(
+                    ([key, entryValue]) =>
+                      typeof entryValue === 'string' &&
+                      (keyMatches(key, entryValue) || inspectValue(entryValue))
+                  );
+                }
+                if (typeof value !== 'object' || visited.has(value)) return false;
+                visited.add(value);
+                return Object.entries(value).some(
+                  ([key, entryValue]) => keyMatches(key, entryValue) || inspectValue(entryValue)
+                );
+              };
+              try {
+                const parsedUrl = new URL(String(rawUrl || ''), window.location.href);
+                if (
+                  Array.from(parsedUrl.searchParams.entries()).some(([key, value]) => keyMatches(key, value))
+                ) {
+                  return true;
+                }
+              } catch (error) {
+                // The body remains authoritative when the request URL is relative or malformed.
+              }
+              return inspectValue(body);
+            };
+
+            const markMissingDraftIdentity = (record) => {
+              const expected = String(window.__codexDraftPatchConfig.expectedDraftId || '').trim();
+              const message = `blocked draftSubmit without expected draft identity: ${expected}`;
+              record.requestDraftIdentityPresent = false;
+              record.blockedBeforeSend = true;
+              record.status = 0;
+              record.responseText = message;
+              record.responseJson = { success: false, message };
+              return message;
             };
 
             const normalizeIbankUrl = (rawValue) => {
@@ -7497,6 +7570,13 @@ class BrowserRPA:
                 const rewritten = rewriteRequestBody(body);
                 record.patch = rewritten.meta;
                 record.patchedBodyPreview = previewValue(rewritten.body);
+                record.expectedDraftId = String(window.__codexDraftPatchConfig.expectedDraftId || '').trim();
+                record.requestDraftIdentityPresent = requestCarriesExpectedDraftId(url, rewritten.body);
+                if (!record.requestDraftIdentityPresent) {
+                  const message = markMissingDraftIdentity(record);
+                  window.__codexDraftSubmitRecords.push(record);
+                  throw new Error(message);
+                }
                 this.addEventListener('loadend', function() {
                   record.status = this.status;
                   record.responseText = String(this.responseText || '');
@@ -7534,6 +7614,13 @@ class BrowserRPA:
                 const rewritten = rewriteRequestBody(requestInit.body);
                 record.patch = rewritten.meta;
                 record.patchedBodyPreview = previewValue(rewritten.body);
+                record.expectedDraftId = String(window.__codexDraftPatchConfig.expectedDraftId || '').trim();
+                record.requestDraftIdentityPresent = requestCarriesExpectedDraftId(url, rewritten.body);
+                if (!record.requestDraftIdentityPresent) {
+                  const message = markMissingDraftIdentity(record);
+                  window.__codexDraftSubmitRecords.push(record);
+                  return Promise.reject(new Error(message));
+                }
                 args[1] = {
                   ...requestInit,
                   body: rewritten.body,
@@ -7645,6 +7732,32 @@ class BrowserRPA:
             ).strip()
             context["draft_submit_backend_message"] = message
             raise PublishSubmitError(f"draft_submit backend rejected request: {message}")
+
+        expected_draft_id = str(publish_config.get("expected_draft_id") or "").strip()
+        if expected_draft_id and isinstance(response_json, dict):
+            def find_draft_id(value: Any) -> str:
+                if isinstance(value, dict):
+                    for key, item in value.items():
+                        if str(key).lower() in {"draftid", "offerdraftid", "draft_id"} and str(item or "").strip():
+                            return str(item).strip()
+                    for item in value.values():
+                        found = find_draft_id(item)
+                        if found:
+                            return found
+                elif isinstance(value, list):
+                    for item in value:
+                        found = find_draft_id(item)
+                        if found:
+                            return found
+                return ""
+
+            response_draft_id = find_draft_id(response_json)
+            context["draft_submit_response_draft_id"] = response_draft_id
+            if response_draft_id != expected_draft_id:
+                raise PublishSubmitError(
+                    "draft_submit returned a different draft identity: "
+                    f"expected {expected_draft_id}, got {response_draft_id or 'unavailable'}"
+                )
 
         failure_keywords = [
             str(item).strip()
@@ -9830,6 +9943,7 @@ class BrowserRPA:
         draft_selector = publish_config.get("draft_selector", {})
         if not self._selector_is_configured(draft_selector):
             raise ValueError("Auto save draft is enabled but draft_selector is not configured.")
+        self._assert_expected_publish_draft(publish_config, context)
         self._install_draft_request_patch(publish_config, context)
         if self.driver:
             start_index = self.driver.execute_script(

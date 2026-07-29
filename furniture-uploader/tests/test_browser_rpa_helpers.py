@@ -2505,6 +2505,34 @@ class BrowserRPAHelperTests(unittest.TestCase):
         self.assertEqual(payload.get("unitText"), "件")
         self.assertEqual(payload.get("minBeginAmount"), "1")
 
+    def test_install_draft_request_patch_includes_expected_draft_identity(self) -> None:
+        class PatchDriver(FakeDriver):
+            def __init__(self) -> None:
+                super().__init__()
+                self.last_script = ""
+                self.last_args: tuple[object, ...] = ()
+
+            def execute_script(self, script: str, *args: object) -> object:
+                self.last_script = script
+                self.last_args = args
+                return None
+
+        driver = PatchDriver()
+        self.browser.driver = driver
+        self.browser._install_draft_request_patch(
+            {
+                "expected_draft_id": "draft-existing-1",
+                "draft_request_patch": {"enabled": True},
+            },
+            {},
+        )
+
+        payload = driver.last_args[0]
+        self.assertEqual(payload.get("expectedDraftId"), "draft-existing-1")
+        self.assertIn("requestCarriesExpectedDraftId", driver.last_script)
+        self.assertIn("identityKeys", driver.last_script)
+        self.assertIn("blocked draftSubmit without expected draft identity", driver.last_script)
+
     def test_install_draft_request_patch_prefers_uploaded_primary_url(self) -> None:
         class PatchDriver(FakeDriver):
             def __init__(self) -> None:
@@ -3178,6 +3206,84 @@ class BrowserRPAHelperTests(unittest.TestCase):
             {},
         )
         self.assertTrue(detected)
+
+    def test_assert_draft_request_trace_rejects_changed_existing_draft_id(self) -> None:
+        class TraceDriver(FakeDriver):
+            def execute_script(self, script: str, *args: object) -> object:
+                if "window.__codexDraftSubmitRecords" in script:
+                    return [
+                        {
+                            "status": 200,
+                            "responseText": '{"success":true,"data":{"draftId":"replacement"}}',
+                            "responseJson": {"success": True, "data": {"draftId": "replacement"}},
+                        }
+                    ]
+                return None
+
+        self.browser.driver = TraceDriver()
+        with self.assertRaisesRegex(PublishSubmitError, "expected existing, got replacement"):
+            self.browser._assert_draft_request_trace(
+                {
+                    "expected_draft_id": "existing",
+                    "draft_request_patch": {"enabled": True, "timeout_seconds": 0},
+                },
+                {},
+            )
+
+    def test_assert_draft_request_trace_accepts_matching_existing_draft_id(self) -> None:
+        class TraceDriver(FakeDriver):
+            def execute_script(self, script: str, *args: object) -> object:
+                if "window.__codexDraftSubmitRecords" in script:
+                    return [
+                        {
+                            "status": 200,
+                            "responseText": '{"success":true,"data":{"draftId":"existing"}}',
+                            "responseJson": {"success": True, "data": {"draftId": "existing"}},
+                        }
+                    ]
+                return None
+
+        self.browser.driver = TraceDriver()
+        context: dict[str, object] = {}
+        detected = self.browser._assert_draft_request_trace(
+            {
+                "expected_draft_id": "existing",
+                "draft_request_patch": {"enabled": True, "timeout_seconds": 0},
+            },
+            context,
+        )
+
+        self.assertTrue(detected)
+        self.assertEqual(context["draft_submit_response_draft_id"], "existing")
+
+    def test_assert_draft_request_trace_accepts_matching_offer_draft_id(self) -> None:
+        class TraceDriver(FakeDriver):
+            def execute_script(self, script: str, *args: object) -> object:
+                if "window.__codexDraftSubmitRecords" in script:
+                    return [
+                        {
+                            "status": 200,
+                            "responseText": '{"success":true,"data":{"offerDraftId":"existing"}}',
+                            "responseJson": {
+                                "success": True,
+                                "data": {"offerDraftId": "existing"},
+                            },
+                        }
+                    ]
+                return None
+
+        self.browser.driver = TraceDriver()
+        context: dict[str, object] = {}
+        detected = self.browser._assert_draft_request_trace(
+            {
+                "expected_draft_id": "existing",
+                "draft_request_patch": {"enabled": True, "timeout_seconds": 0},
+            },
+            context,
+        )
+
+        self.assertTrue(detected)
+        self.assertEqual(context["draft_submit_response_draft_id"], "existing")
 
     def test_assert_submit_request_trace_returns_false_when_no_record(self) -> None:
         class TraceDriver(FakeDriver):

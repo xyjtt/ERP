@@ -403,7 +403,17 @@ def advance_listing_state(payload: dict[str, Any], event: str, *, evidence: dict
         if event == "review_repair_resumed":
             if str(workflow.get("last_event") or "").strip() != "review_rejected":
                 raise ListingContractError("review repair requires the latest event to be review_rejected")
-            review_repair_draft_id = str(((workflow.get("draft") or {}).get("draft_id") or "")).strip()
+            current_draft_id = str(((workflow.get("draft") or {}).get("draft_id") or "")).strip()
+            requested_draft_id = str(evidence.get("draft_id") or "").strip()
+            known_draft_ids = {
+                str(((item.get("evidence") or {}).get("draft_id") or "")).strip()
+                for item in list(workflow.get("event_history") or [])
+                if isinstance(item, dict) and str(item.get("event") or "").strip() == "draft_saved"
+            }
+            known_draft_ids.discard("")
+            if requested_draft_id and requested_draft_id not in known_draft_ids:
+                raise ListingContractError("review repair draft_id is not present in workflow history")
+            review_repair_draft_id = requested_draft_id or current_draft_id
             pending_draft_id = review_repair_draft_id
             if str(evidence.get("reason") or "").strip() != "review_required_fields_repair":
                 raise ListingContractError("review repair requires an explicit required-fields repair reason")

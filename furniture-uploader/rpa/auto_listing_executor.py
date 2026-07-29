@@ -161,15 +161,8 @@ def resolve_1688_publish_url(payload: dict[str, Any], *, mode: str = "draft") ->
     if pending_draft_id:
         if not re.fullmatch(r"[A-Za-z0-9_-]+", pending_draft_id):
             raise ListingContractError("draft repair requires a valid pending_draft_id")
-        query = urlencode(
-            {
-                "catId": category_id,
-                "saleChannel": "default",
-                "operator": "draft2offer",
-                "draftId": pending_draft_id,
-            }
-        )
-        return f"https://offer-new.1688.com/popular/publish.htm?{query}", category_id
+        query = urlencode({"operator": "draft2offer", "offerDraftId": pending_draft_id})
+        return f"https://offer.1688.com/offer/post/fillProductInfo.htm?{query}", category_id
     query = urlencode(
         {
             "catId": category_id,
@@ -199,7 +192,10 @@ def _nested_identifier(value: Any, names: set[str]) -> str:
 
 def extract_draft_id(context: dict[str, Any]) -> str:
     trace = context.get("draft_submit_trace") or {}
-    draft_id = _nested_identifier((trace or {}).get("responseJson"), {"draftid", "draft_id"})
+    draft_id = _nested_identifier(
+        (trace or {}).get("responseJson"),
+        {"draftid", "offerdraftid", "draft_id"},
+    )
     if draft_id:
         return draft_id
     for key in ("current_url", "publish_url"):
@@ -208,6 +204,17 @@ def extract_draft_id(context: dict[str, Any]) -> str:
         if draft_id:
             return draft_id
     return ""
+
+
+def assert_repaired_draft_id(payload: dict[str, Any], actual_draft_id: str) -> None:
+    pending_draft_id = str(
+        ((payload.get("workflow") or {}).get("pending_draft_id") or "")
+    ).strip()
+    if pending_draft_id and str(actual_draft_id or "").strip() != pending_draft_id:
+        raise ListingContractError(
+            "draft repair returned a different draft_id: "
+            f"expected {pending_draft_id}, got {str(actual_draft_id or '').strip() or 'unavailable'}"
+        )
 
 
 def extract_offer_id(context: dict[str, Any]) -> str:
@@ -433,7 +440,10 @@ def extract_draft_reconciliation_evidence(
     response_json = trace.get("responseJson") or {}
     if not isinstance(response_json, dict) or response_json.get("success") is not True:
         raise ListingContractError("draft reconciliation evidence has no successful save response")
-    response_draft_id = _nested_identifier(response_json, {"draftid", "draft_id"})
+    response_draft_id = _nested_identifier(
+        response_json,
+        {"draftid", "offerdraftid", "draft_id"},
+    )
     if not re.fullmatch(r"[A-Za-z0-9_-]+", response_draft_id):
         raise ListingContractError("draft reconciliation evidence has no valid response draft_id")
 
@@ -587,6 +597,7 @@ def execute_browser_task(
         draft_id = extract_draft_id(context)
         if not draft_id:
             raise ListingContractError("draft save completed without an extractable draft_id")
+        assert_repaired_draft_id(payload, draft_id)
         evidence = {
             "draft_id": draft_id,
             "draft_url": (

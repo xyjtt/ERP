@@ -19,6 +19,7 @@ from auto_listing_executor import (
     _configure_draft_repair_steps,
     _configure_submit_steps,
     _has_image_album_capacity_block,
+    assert_repaired_draft_id,
     assert_execution_allowed,
     build_execution_payload,
     build_release_variant_payload,
@@ -205,7 +206,8 @@ class AutoListingExecutorTests(unittest.TestCase):
 
         self.assertEqual(category_id, "122942001")
         self.assertIn("operator=draft2offer", url)
-        self.assertIn("draftId=draft-repair-123", url)
+        self.assertIn("offerDraftId=draft-repair-123", url)
+        self.assertTrue(url.startswith("https://offer.1688.com/offer/post/fillProductInfo.htm?"))
 
     def test_draft_repair_steps_skip_existing_specs_and_core_fields(self) -> None:
         publish = {
@@ -447,6 +449,27 @@ class AutoListingExecutorTests(unittest.TestCase):
             "draft_submit_trace": {"responseJson": {"success": True, "data": {"draftId": "response-draft"}}},
         }
         self.assertEqual(extract_draft_id(context), "response-draft")
+
+    def test_extract_draft_id_supports_offer_draft_id_response(self) -> None:
+        context = {
+            "draft_submit_trace": {
+                "responseJson": {"success": True, "data": {"offerDraftId": "existing-draft"}}
+            },
+        }
+        self.assertEqual(extract_draft_id(context), "existing-draft")
+
+    def test_draft_repair_rejects_a_different_save_response_draft_id(self) -> None:
+        payload = sample_payload()
+        payload["workflow"]["pending_draft_id"] = "existing-draft"
+
+        with self.assertRaisesRegex(
+            ListingContractError,
+            "expected existing-draft, got replacement-draft",
+        ):
+            assert_repaired_draft_id(payload, "replacement-draft")
+
+    def test_new_draft_allows_the_save_response_draft_id(self) -> None:
+        assert_repaired_draft_id(sample_payload(), "new-draft")
 
     def test_extract_offer_id_supports_submit_response_and_url(self) -> None:
         self.assertEqual(

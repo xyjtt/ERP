@@ -32,6 +32,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--expected-shop", default="木刻理想")
     parser.add_argument("--shop-alias", action="append", default=["广州淘淘家居"])
     parser.add_argument("--draft-limit", type=int, default=20)
+    parser.add_argument(
+        "--expected-draft-id",
+        action="append",
+        default=[],
+        help="require this existing draft ID to be present in draft-box row/link evidence",
+    )
     parser.add_argument("--output", required=True)
     return parser
 
@@ -50,6 +56,7 @@ def main() -> int:
             expected_shop=args.expected_shop,
             expected_shop_aliases=args.shop_alias,
             draft_limit=args.draft_limit,
+            expected_draft_ids=args.expected_draft_id,
         )
         report = probe.run(args.candidate)
     finally:

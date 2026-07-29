@@ -1,5 +1,15 @@
 # Platform Experience Knowledge Base
 
+## 2026-07-29 Managed Update (1688 Draft Identity and Recovery Links)
+
+- Existing-draft editing should start from `https://offer.1688.com/offer/post/fillProductInfo.htm?operator=draft2offer&offerDraftId=<id>`, then verify the final URL and `SellPublishSdk` state expose the same ID.
+- Do not trust a successful click or HTTP 200 alone. A repair save must prove the expected ID in the outgoing `draftSubmit` URL/body and in the successful JSON response.
+- The current platform may redirect the formal entry to `offer-new.1688.com/popular/publish.htm`. If the page is complete but shows `SYS_ERROR`, preserve the error code and screenshot and classify the draft as unavailable.
+- The product-management draft box is the authoritative recovery source when a direct URL fails. Preserve each visible row's full text, all links and `href` values, row/link/descendant `data-*` attributes, and extracted `draftId/offerDraftId` values before choosing an edit action.
+- A `SYS_ERROR` does not prove that a draft is absent. Never create a replacement draft until the draft-box evidence and management entry establish that no recoverable historical draft exists and the workflow policy is explicitly changed.
+- CTG0286 live evidence confirmed both draft IDs in a 5-row draft box. Clicking the old row's actual “继续发布商品” link still opened the matching ID and returned `SYS_ERROR`; direct navigation versus management-page click therefore does not explain the failure.
+- Store identity elements can go stale or temporarily disappear during management-page React re-render. Retry identity observation briefly and retain the body-text fallback instead of treating one empty read as a wrong account.
+
 ## 2026-07-28 Managed Update (1688 Draft Re-Render)
 
 - Live finding: reloading between image-picker batches can leave later steps successful in the run log while title, primary picture, sale specs, and logistics are empty in the final React state.

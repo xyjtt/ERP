@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
+import time
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+
+from selenium.common.exceptions import StaleElementReferenceException, TimeoutException
+from selenium.webdriver.common.by import By
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -18,12 +23,21 @@ if str(RPA_ROOT) not in sys.path:
 from auto_listing_executor import resolve_1688_publish_url
 from browser_rpa import BrowserRPA
 from config_loader import load_json_with_local_override
+from listing_duplicate_probe import ListingCandidate, LiveListingDuplicateProbe
+from sku_offline_browser import SkuOfflineBrowser
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Read-only independent refresh check for one 1688 draft.")
     parser.add_argument("--payload", required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--draft-id", default="", help="override the payload draft ID for read-only inspection")
+    parser.add_argument(
+        "--open-from-management",
+        action="store_true",
+        help="open the draft by clicking its real product-management draft-box link",
+    )
+    parser.add_argument("--expected-shop", default="木刻理想")
     return parser
 
 
@@ -39,12 +53,133 @@ def _spec_equal(actual: object, expected: object) -> bool:
     return bool(expected_value) and str(actual or "").strip() == expected_value
 
 
+def _assert_management_inspection_gate(report: dict[str, object]) -> None:
+    identity = report.get("shop_identity") or {}
+    draft_identity = report.get("draft_identity_evidence") or {}
+    if (
+        report.get("tab_all") is not True
+        or identity.get("matched") is not True
+        or draft_identity.get("status") != "passed"
+    ):
+        raise ValueError(
+            "management draft identity gate did not pass: "
+            + json.dumps(
+                {
+                    "tab_all": report.get("tab_all"),
+                    "shop_identity": identity,
+                    "draft_identity_evidence": draft_identity,
+                },
+                ensure_ascii=False,
+            )
+        )
+
+
+def _open_draft_from_management(
+    browser: BrowserRPA,
+    system_config: dict[str, object],
+    payload: dict[str, object],
+    *,
+    expected_draft_id: str,
+    expected_shop: str,
+) -> dict[str, object]:
+    product = payload.get("product") or {}
+    sku = str(product.get("sku_code") or "").strip()
+    spu = str(product.get("spu_code") or "").strip()
+    if not sku or not spu:
+        raise ValueError("management draft inspection requires product sku_code and spu_code")
+    probe = LiveListingDuplicateProbe(
+        browser,
+        system_config,
+        expected_shop=expected_shop,
+        draft_limit=20,
+        expected_draft_ids=[expected_draft_id],
+    )
+    report = probe.run([ListingCandidate(sku=sku, spu=spu)])
+    _assert_management_inspection_gate(report)
+
+    driver = browser.driver
+    if driver is None:
+        raise RuntimeError("Browser has not been opened.")
+    row_selector = f'tr[data-row-key="{expected_draft_id}"]'
+    link_selector = 'a[data-click="btn-继续发布商品"]'
+
+    def find_link():
+        row = driver.find_element(By.CSS_SELECTOR, row_selector)
+        return row.find_element(By.CSS_SELECTOR, link_selector)
+
+    link = find_link()
+    href = str(link.get_attribute("href") or "").strip()
+    if expected_draft_id not in href:
+        raise ValueError("management draft link does not carry the expected draft ID")
+    existing_handles = set(driver.window_handles)
+    try:
+        driver.execute_script("arguments[0].click();", link)
+    except StaleElementReferenceException:
+        driver.execute_script("arguments[0].click();", find_link())
+
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
+        new_handles = [handle for handle in driver.window_handles if handle not in existing_handles]
+        candidate_handles = [*new_handles, *list(driver.window_handles)]
+        for handle in candidate_handles:
+            try:
+                driver.switch_to.window(handle)
+                if expected_draft_id in str(driver.current_url or ""):
+                    return {
+                        "entry_mode": "management_draft_link_click",
+                        "management_url": str(report.get("management_url") or ""),
+                        "draft_count": report.get("draft_count"),
+                        "draft_identity_evidence": report.get("draft_identity_evidence") or {},
+                        "clicked_href": href,
+                    }
+            except Exception:
+                continue
+        time.sleep(0.25)
+    raise TimeoutException("management draft link did not open the expected draft page")
+
+
+def _raise_for_fatal_runtime_page(browser: BrowserRPA) -> None:
+    driver = browser.driver
+    if driver is None:
+        raise RuntimeError("Browser has not been opened.")
+    diagnostic = driver.execute_script(
+        """
+        return {
+          ready_state: String(document.readyState || ''),
+          body_text: String((document.body && document.body.innerText) || '').slice(0, 4000),
+        };
+        """
+    )
+    body_text = str((diagnostic or {}).get("body_text") or "")
+    fatal_error = "SYS_ERROR" in body_text or (
+        "出错啦" in body_text and "系统错误" in body_text
+    )
+    if str((diagnostic or {}).get("ready_state") or "") == "complete" and fatal_error:
+        raise TimeoutException("platform returned SYS_ERROR before the publish runtime became available")
+
+
+def _wait_for_inspection_runtime(browser: BrowserRPA, *, timeout_seconds: float) -> None:
+    readiness_check = getattr(browser, "_is_publish_form_ready", None)
+    for _attempt in range(20):
+        _raise_for_fatal_runtime_page(browser)
+        if callable(readiness_check) and readiness_check():
+            return
+        browser._pause(0.5)
+    browser._wait_for_publish_runtime_ready(timeout_seconds=timeout_seconds)
+
+
 def main() -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     args = build_parser().parse_args()
     payload = json.loads(Path(args.payload).read_text(encoding="utf-8-sig"))
-    expected_draft_id = str(((payload.get("workflow") or {}).get("draft") or {}).get("draft_id") or "").strip()
+    expected_draft_id = str(
+        args.draft_id
+        or ((payload.get("workflow") or {}).get("draft") or {}).get("draft_id")
+        or ""
+    ).strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", expected_draft_id):
+        raise ValueError("read-only draft inspection requires a valid draft ID")
     expected_detail_count = len(list(((payload.get("images") or {}).get("detail_urls") or [])))
     expected_title = str((payload.get("product") or {}).get("selected_title") or "").strip()
     expected_price = str((payload.get("pricing") or {}).get("publish_price") or "").strip()
@@ -65,25 +200,81 @@ def main() -> int:
 
     config_dir = PROJECT_ROOT / "config"
     operator_config = load_json_with_local_override(config_dir / "operator_config.json")
-    browser = BrowserRPA(operator_config.get("browser", {}), PROJECT_ROOT)
-    browser.open()
-    try:
-        publish_url, _category_id = resolve_1688_publish_url(
-            {
-                **payload,
-                "workflow": {
-                    **(payload.get("workflow") or {}),
-                    "pending_draft_id": expected_draft_id,
-                },
+    system_config = load_json_with_local_override(config_dir / "systems" / "1688_sku_offline.json")
+    output_path = Path(args.output)
+    publish_url, _category_id = resolve_1688_publish_url(
+        {
+            **payload,
+            "workflow": {
+                **(payload.get("workflow") or {}),
+                "pending_draft_id": expected_draft_id,
             },
-            mode="draft",
-        )
-        if expected_draft_id not in str(browser.driver.current_url or ""):
+        },
+        mode="draft",
+    )
+    browser_class = SkuOfflineBrowser if args.open_from_management else BrowserRPA
+    browser = browser_class(operator_config.get("browser", {}), PROJECT_ROOT)
+    browser.open()
+    entry_evidence: dict[str, object] = {"entry_mode": "direct_draft_url"}
+    try:
+        if args.open_from_management:
+            entry_evidence = _open_draft_from_management(
+                browser,
+                system_config,
+                payload,
+                expected_draft_id=expected_draft_id,
+                expected_shop=args.expected_shop,
+            )
+            publish_url = str(entry_evidence.get("clicked_href") or publish_url)
+        elif expected_draft_id not in str(browser.driver.current_url or ""):
             browser.driver.get(publish_url)
         else:
             browser.driver.refresh()
-        browser._wait_for_publish_runtime_ready(timeout_seconds=180)
+        try:
+            _wait_for_inspection_runtime(browser, timeout_seconds=180)
+        except TimeoutException as exc:
+            diagnostic = browser.driver.execute_script(
+                """
+                return {
+                  current_url: String(window.location.href || ''),
+                  page_title: String(document.title || ''),
+                  ready_state: String(document.readyState || ''),
+                  sell_publish_sdk_present: Boolean(window.SellPublishSdk),
+                  body_text: String((document.body && document.body.innerText) || '').slice(0, 4000),
+                };
+                """
+            )
+            screenshot_path = output_path.with_suffix(".load-failure.png")
+            screenshot_saved = bool(browser.driver.save_screenshot(str(screenshot_path)))
+            evidence = {
+                "status": "unavailable",
+                "checked_at": datetime.now(timezone.utc).isoformat(),
+                "task_id": str(payload.get("task_id") or ""),
+                "draft_id": expected_draft_id,
+                "entry": entry_evidence,
+                "requested_url": publish_url,
+                "current_url": str((diagnostic or {}).get("current_url") or ""),
+                "page_title": str((diagnostic or {}).get("page_title") or ""),
+                "ready_state": str((diagnostic or {}).get("ready_state") or ""),
+                "sell_publish_sdk_present": bool(
+                    (diagnostic or {}).get("sell_publish_sdk_present")
+                ),
+                "body_text": str((diagnostic or {}).get("body_text") or ""),
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+                "screenshot_path": str(screenshot_path) if screenshot_saved else "",
+                "draft_saved": False,
+                "offer_submitted": False,
+            }
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(
+                json.dumps(evidence, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            print(json.dumps(evidence, ensure_ascii=False, indent=2))
+            return 3
         browser._pause(2.0)
+        current_url = str(browser.driver.current_url or "").strip()
         core = browser.driver.execute_script(
             """
             const sdk = window.SellPublishSdk;
@@ -93,16 +284,28 @@ def main() -> int:
             const value = (name) => props(name).value;
             const priceRange = Array.isArray(value('priceRange')) ? value('priceRange') : [];
             const skuTable = Array.isArray(value('skuTable')) ? value('skuTable') : [];
+            const totalSales = value('totalSales');
+            const titleValue = value('subject') || value('title');
             const draftId = String(
               new URL(window.location.href).searchParams.get('draftId') ||
+              new URL(window.location.href).searchParams.get('offerDraftId') ||
               (((state || {}).global || {}).renderData || {}).draftId ||
+              (((state || {}).global || {}).systemParam || {}).draftId ||
               ''
             ).trim();
             return {
               draft_id: draftId,
-              title: String(value('title') || '').trim(),
+              title: String(
+                titleValue && typeof titleValue === 'object'
+                  ? (titleValue.value || titleValue.text || titleValue.title || '')
+                  : (titleValue || '')
+              ).trim(),
               price: String(((priceRange[0] || {}).pricerange_price) || ((skuTable[0] || {}).sku_price) || '').trim(),
-              quantity: Number(((skuTable[0] || {}).sku_amountOnSale) || 0),
+              quantity: Number(
+                ((skuTable[0] || {}).sku_amountOnSale) ||
+                (totalSales && typeof totalSales === 'object' ? totalSales.value : totalSales) ||
+                0
+              ),
             };
             """
         )
@@ -136,6 +339,9 @@ def main() -> int:
         "checked_at": datetime.now(timezone.utc).isoformat(),
         "task_id": str(payload.get("task_id") or ""),
         "draft_id": str(core.get("draft_id") or ""),
+        "entry": entry_evidence,
+        "requested_url": publish_url,
+        "current_url": current_url,
         "checks": checks,
         "actual": {
             "title": str(core.get("title") or ""),
@@ -163,9 +369,8 @@ def main() -> int:
         "offer_submitted": False,
     }
     rendered = json.dumps(evidence, ensure_ascii=False, indent=2)
-    target = Path(args.output)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(rendered + "\n", encoding="utf-8")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(rendered + "\n", encoding="utf-8")
     print(rendered)
     return 0 if evidence["status"] == "passed" else 2
 

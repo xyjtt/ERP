@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Iterable
 
-from selenium.common.exceptions import TimeoutException
+from selenium.common.exceptions import StaleElementReferenceException, TimeoutException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 
@@ -19,6 +19,11 @@ NO_DATA_MARKERS = (
     "没有找到商品",
     "未找到相关商品",
     "没有符合条件的商品",
+)
+
+DRAFT_ID_PATTERN = re.compile(r"(?<![0-9a-f])([0-9a-f]{24})(?![0-9a-f])", re.IGNORECASE)
+DRAFT_ID_KEY_PATTERN = re.compile(
+    r"(?i)(offerDraftId|draftId|draft_id)(?:%3[dD]|[\s\"'=:?&/])+([0-9a-f]{24})"
 )
 
 
@@ -52,6 +57,110 @@ def parse_pagination_total(text: Any) -> int | None:
         if match:
             return int(match.group(1))
     return None
+
+
+def extract_draft_identifiers(value: Any) -> dict[str, Any]:
+    """Extract draft identifiers while retaining how a named ID was exposed."""
+
+    all_ids: list[str] = []
+    named_ids: dict[str, list[str]] = {
+        "offerDraftId": [],
+        "draftId": [],
+        "draft_id": [],
+    }
+
+    def append_unique(target: list[str], candidate: str) -> None:
+        normalized = str(candidate or "").strip().lower()
+        if normalized and normalized not in target:
+            target.append(normalized)
+
+    def visit(item: Any, key_hint: str = "") -> None:
+        if isinstance(item, dict):
+            for key, child in item.items():
+                visit(child, str(key or ""))
+            return
+        if isinstance(item, (list, tuple, set)):
+            for child in item:
+                visit(child, key_hint)
+            return
+        text = str(item or "")
+        if not text:
+            return
+        for match in DRAFT_ID_PATTERN.finditer(text):
+            append_unique(all_ids, match.group(1))
+        normalized_key = re.sub(r"[^a-z0-9_]", "", key_hint.lower())
+        key_name = {
+            "offerdraftid": "offerDraftId",
+            "draftid": "draftId",
+            "draft_id": "draft_id",
+        }.get(normalized_key)
+        if key_name:
+            for match in DRAFT_ID_PATTERN.finditer(text):
+                append_unique(named_ids[key_name], match.group(1))
+        for match in DRAFT_ID_KEY_PATTERN.finditer(text):
+            matched_key = match.group(1)
+            canonical_key = {
+                "offerdraftid": "offerDraftId",
+                "draftid": "draftId",
+                "draft_id": "draft_id",
+            }[matched_key.lower()]
+            append_unique(named_ids[canonical_key], match.group(2))
+
+    visit(value)
+    return {
+        "draft_ids": all_ids,
+        "named_draft_ids": {
+            key: identifiers
+            for key, identifiers in named_ids.items()
+            if identifiers
+        },
+    }
+
+
+def summarize_draft_identity_evidence(
+    expected_draft_ids: Iterable[str],
+    draft_evidence: dict[str, Any],
+) -> dict[str, Any]:
+    expected: list[str] = []
+    for value in expected_draft_ids:
+        draft_id = str(value or "").strip().lower()
+        if draft_id and draft_id not in expected:
+            expected.append(draft_id)
+    observed = [
+        str(value or "").strip().lower()
+        for value in list(draft_evidence.get("draft_ids") or [])
+        if str(value or "").strip()
+    ]
+    found = [draft_id for draft_id in expected if draft_id in observed]
+    missing = [draft_id for draft_id in expected if draft_id not in observed]
+    link_matches: dict[str, list[dict[str, str]]] = {}
+    all_links: list[dict[str, Any]] = list(draft_evidence.get("links") or [])
+    for row in list(draft_evidence.get("rows") or []):
+        if isinstance(row, dict):
+            all_links.extend(
+                link for link in list(row.get("links") or []) if isinstance(link, dict)
+            )
+    for draft_id in expected:
+        matches: list[dict[str, str]] = []
+        for link in all_links:
+            identifiers = extract_draft_identifiers(link).get("draft_ids") or []
+            if draft_id not in identifiers:
+                continue
+            candidate = {
+                "text": str(link.get("text") or "").strip(),
+                "href": str(link.get("href") or "").strip(),
+            }
+            if candidate not in matches:
+                matches.append(candidate)
+        link_matches[draft_id] = matches
+    return {
+        "status": "not_requested" if not expected else ("passed" if not missing else "blocked"),
+        "expected_draft_ids": expected,
+        "observed_draft_ids": observed,
+        "found_draft_ids": found,
+        "missing_draft_ids": missing,
+        "link_matches": link_matches,
+    }
 
 
 def summarize_search_result(
@@ -138,6 +247,7 @@ class LiveListingDuplicateProbe:
         expected_shop: str,
         expected_shop_aliases: Iterable[str] = (),
         draft_limit: int = 20,
+        expected_draft_ids: Iterable[str] = (),
     ) -> None:
         self.browser = browser
         self.system_config = system_config
@@ -148,6 +258,11 @@ class LiveListingDuplicateProbe:
             if str(value or "").strip()
         }
         self.draft_limit = int(draft_limit)
+        self.expected_draft_ids = tuple(
+            str(value or "").strip()
+            for value in expected_draft_ids
+            if str(value or "").strip()
+        )
 
     def run(self, candidates: Iterable[ListingCandidate]) -> dict[str, Any]:
         driver = self.browser.driver
@@ -184,6 +299,14 @@ class LiveListingDuplicateProbe:
             )
 
         draft_evidence = self._inspect_draft_count(selectors)
+        draft_identity_evidence = summarize_draft_identity_evidence(
+            self.expected_draft_ids,
+            {
+                "rows": draft_evidence.get("draft_rows") or [],
+                "links": draft_evidence.get("draft_page_links") or [],
+                "draft_ids": draft_evidence.get("draft_ids") or [],
+            },
+        )
         draft_count = draft_evidence["draft_count"]
         if draft_count is None:
             draft_count = parse_draft_count(
@@ -203,8 +326,10 @@ class LiveListingDuplicateProbe:
                 draft_limit=self.draft_limit,
             )
 
-        passed = bool(tab_all and identity["matched"] and results) and all(
-            item["duplicate_check"]["status"] == "clear" for item in results
+        passed = (
+            bool(tab_all and identity["matched"] and results)
+            and draft_identity_evidence["status"] in {"not_requested", "passed"}
+            and all(item["duplicate_check"]["status"] == "clear" for item in results)
         )
         return {
             "status": "passed" if passed else "blocked",
@@ -217,6 +342,7 @@ class LiveListingDuplicateProbe:
             "draft_count": draft_count,
             "draft_limit": self.draft_limit,
             "draft_count_evidence": draft_evidence,
+            "draft_identity_evidence": draft_identity_evidence,
             "draft_hints": {
                 "top_level": top_level_draft_hints,
                 "management_frame": frame_draft_hints,
@@ -227,28 +353,49 @@ class LiveListingDuplicateProbe:
     def _shop_identity(self) -> dict[str, Any]:
         driver = self.browser.driver
         assert driver is not None
-        body_text = self._body_text()
-        visible_names: list[str] = []
         selector = (
             ((self.system_config.get("workflow") or {}).get("selectors") or {}).get(
                 "current_store_name", {}
             )
         )
         resolved = self.browser._resolve_selector(selector, {})
-        if self.browser._selector_is_configured(resolved):
-            by = BY_MAPPING.get(
-                str(resolved.get("by") or "css").strip().lower(),
-                By.CSS_SELECTOR,
+        by = BY_MAPPING.get(
+            str(resolved.get("by") or "css").strip().lower(),
+            By.CSS_SELECTOR,
+        )
+        deadline = time.monotonic() + min(
+            5.0,
+            float(self.browser.browser_config.get("explicit_wait_seconds", 20)),
+        )
+        body_text = ""
+        visible_names: list[str] = []
+        matched_alias = ""
+        while True:
+            try:
+                body_text = self._body_text()
+            except StaleElementReferenceException:
+                body_text = ""
+            visible_names = []
+            elements = (
+                driver.find_elements(by, str(resolved.get("value") or ""))
+                if self.browser._selector_is_configured(resolved)
+                else []
             )
-            for element in driver.find_elements(by, str(resolved.get("value") or "")):
-                text = str(element.text or "").strip()
+            for element in elements:
+                try:
+                    text = str(element.text or "").strip()
+                except StaleElementReferenceException:
+                    continue
                 if text:
                     visible_names.append(text)
-        haystack = normalize_search_text(" ".join([*visible_names, body_text]))
-        matched_alias = next(
-            (alias for alias in self.expected_shop_aliases if alias and alias in haystack),
-            "",
-        )
+            haystack = normalize_search_text(" ".join([*visible_names, body_text]))
+            matched_alias = next(
+                (alias for alias in self.expected_shop_aliases if alias and alias in haystack),
+                "",
+            )
+            if matched_alias or time.monotonic() >= deadline:
+                break
+            time.sleep(0.25)
         return {
             "matched": bool(matched_alias),
             "visible_names": visible_names,
@@ -453,6 +600,7 @@ class LiveListingDuplicateProbe:
                 stable_count = 0
             previous_rows = rows
             if active and stable_count >= 2:
+                page_evidence = self._draft_page_evidence()
                 if pagination_total is not None:
                     draft_count = pagination_total
                     source = "pagination_total"
@@ -473,10 +621,88 @@ class LiveListingDuplicateProbe:
                     "visible_row_count": len(rows),
                     "pagination_texts": pagination_texts,
                     "no_data_marker": no_data_marker,
+                    "draft_rows": page_evidence["rows"],
+                    "draft_page_links": page_evidence["links"],
+                    "draft_ids": page_evidence["draft_ids"],
+                    "named_draft_ids": page_evidence["named_draft_ids"],
                 }
             time.sleep(0.5)
+        page_evidence = self._draft_page_evidence()
         return {
             "draft_count": None,
             "status": "inconclusive",
             "reason": "draft tab did not settle",
+            "draft_rows": page_evidence["rows"],
+            "draft_page_links": page_evidence["links"],
+            "draft_ids": page_evidence["draft_ids"],
+            "named_draft_ids": page_evidence["named_draft_ids"],
+        }
+
+    def _draft_page_evidence(self) -> dict[str, Any]:
+        driver = self.browser.driver
+        assert driver is not None
+        raw = driver.execute_script(
+            """
+            const visible = (node) => Boolean(
+              node && (node.offsetWidth || node.offsetHeight || node.getClientRects().length)
+            );
+            const dataAttributes = (node) => {
+              const result = {};
+              for (const attribute of Array.from((node && node.attributes) || [])) {
+                if (String(attribute.name || '').toLowerCase().startsWith('data-')) {
+                  result[String(attribute.name)] = String(attribute.value || '');
+                }
+              }
+              return result;
+            };
+            const linkEvidence = (node) => ({
+              text: String(node.innerText || node.textContent || '').trim(),
+              href: String(node.href || node.getAttribute('href') || ''),
+              title: String(node.getAttribute('title') || ''),
+              target: String(node.getAttribute('target') || ''),
+              data_attributes: dataAttributes(node),
+            });
+            const rows = Array.from(document.querySelectorAll('table tbody tr'))
+              .filter(visible)
+              .map((row, index) => ({
+                index,
+                text: String(row.innerText || row.textContent || '').trim(),
+                data_attributes: dataAttributes(row),
+                links: Array.from(row.querySelectorAll('a')).map(linkEvidence),
+                descendant_data_attributes: Array.from(row.querySelectorAll('*'))
+                  .map((node) => ({
+                    tag: String(node.tagName || '').toLowerCase(),
+                    text: String(node.innerText || node.textContent || '').trim().slice(0, 300),
+                    data_attributes: dataAttributes(node),
+                  }))
+                  .filter((item) => Object.keys(item.data_attributes).length > 0)
+                  .slice(0, 100),
+              }));
+            const links = Array.from(document.querySelectorAll('a'))
+              .filter(visible)
+              .map(linkEvidence)
+              .slice(0, 200);
+            return {rows, links};
+            """
+        )
+        raw_evidence = raw if isinstance(raw, dict) else {}
+        rows: list[dict[str, Any]] = []
+        for raw_row in list(raw_evidence.get("rows") or []):
+            if not isinstance(raw_row, dict):
+                continue
+            row = dict(raw_row)
+            row.update(extract_draft_identifiers(row))
+            rows.append(row)
+        links: list[dict[str, Any]] = []
+        for raw_link in list(raw_evidence.get("links") or []):
+            if not isinstance(raw_link, dict):
+                continue
+            link = dict(raw_link)
+            link.update(extract_draft_identifiers(link))
+            links.append(link)
+        identifiers = extract_draft_identifiers({"rows": rows, "links": links})
+        return {
+            "rows": rows,
+            "links": links,
+            **identifiers,
         }

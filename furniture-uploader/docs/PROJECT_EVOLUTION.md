@@ -1,5 +1,14 @@
 # Project Evolution
 
+## 2026-07-29 - Draft Recovery Became Identity-Bound
+
+- Draft repair moved from reconstructing a publish URL to using the platform's own `offerDraftId` edit entry.
+- Recovery is now bound end to end: workflow history authorizes the draft ID, the loaded page must expose it, the save request must carry it, and the successful response must return it.
+- A known historical draft can be explicitly rebound after review rejection, but an unknown ID cannot enter the state machine.
+- A platform `SYS_ERROR` is now reported as `unavailable` with URL, title, runtime flags, body text, and screenshot. It never authorizes a new draft or a blind retry.
+- Product-management evidence was expanded from draft count only to row-level link and identifier evidence so recovery can follow the exact edit URL rendered by 1688.
+- Live recovery proved that both historical IDs remain in the draft box. Clicking the old row's exact platform link still returns `SYS_ERROR`, which moves the remaining CTG0286 work from selector uncertainty to a confirmed platform-availability blocker.
+
 ## 2026-07-28 - Draft Save Convergence Gate
 
 - The 1688 direct path moved from presence-only pre-save checks to payload-exact checks for title and committed specifications.
