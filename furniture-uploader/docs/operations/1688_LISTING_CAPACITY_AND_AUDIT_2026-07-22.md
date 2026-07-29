@@ -76,6 +76,19 @@ python scripts\apply_1688_listing_audit_ddl.py `
 
 The first command validates and rolls back. Use `--apply` only after validation succeeds.
 
+## Source lifecycle gate
+
+Refresh the source row immediately before any browser action. The command is read-only, resolves the database account from Windows Credential Manager, and selects an installed SQL Server driver when the requested driver is unavailable.
+
+```powershell
+python scripts\query_1688_listing_source.py `
+  --shared-runtime-root <shared-runtime-root> `
+  --sku <company-sku> `
+  --output <source-state-json>
+```
+
+Require `gate=passed`, a fresh `checked_at`, and the exact current values `enabled=1`, `stock_disabled=0`, `other_5=销售`, and `item_type=成品`. Do not reuse a stale source-state file, and do not treat this database gate as browser, draft, or Offer acceptance.
+
 ## Execution machine deployment
 
 Recommended repository path: `E:\1688\ERP-auto-listing`. Project path: `E:\1688\ERP-auto-listing\furniture-uploader`. Shared crawler runtime: `E:\1688\1688-script-new`.

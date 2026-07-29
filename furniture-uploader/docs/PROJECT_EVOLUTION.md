@@ -84,3 +84,9 @@
 - Live probing showed that Enter can leave an apparently populated resident input without creating a SKU specification item.
 - Specification entry now uses Tab and verifies the non-resident committed item before continuing.
 - Listing regression increased to `375/375` after adding the commit-state coverage.
+
+## 2026-07-29 Portable Source-Gate Execution
+
+- The listing source lifecycle check moved from an executor artifact into a version-controlled read-only script.
+- SQL Server driver selection now follows the installed-driver preference used by the rest of the project.
+- Source eligibility remains a fail-closed browser prerequisite and is kept separate from draft, submission, and business acceptance.

@@ -245,6 +245,13 @@
 - For CTG028601N1416V01, the acceptance contract is color `胡桃色` and size `48/40/50`; stale values such as `红色100` fail review.
 - Development validation after this change: listing tests `373/373`; doctor `status: ok` with the two pre-existing empty-selector warnings only.
 
+## 2026-07-29 Source Lifecycle Gate
+
+- Use `scripts/query_1688_listing_source.py` for the fresh pre-browser source check.
+- Credentials stay in Windows Credential Manager under `YYDD/1688/database/stop-sale-source`; never persist them in code, payloads, or evidence files.
+- The script must resolve an installed SQL Server driver rather than assuming ODBC Driver 17 exists.
+- A passed source row is only a prerequisite. It does not authorize a second CTG0286 draft or prove draft/Offer acceptance.
+
 ## 2026-07-28 CTG0286 Specification Commit Correction
 
 - Enter was disproved on the real publish page: it left `胡桃色` in the resident input and did not create a committed specification item.

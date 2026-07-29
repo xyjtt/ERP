@@ -209,3 +209,10 @@
 - A real CTG0286 page probe proved that Enter leaves text in the resident input and does not create a SKU specification item.
 - Direct Chinese color and size values must be committed with Tab; verification now ignores resident input text and accepts only non-resident committed items.
 - Full listing regression after the correction is `375/375`. Real draft repair and refreshed-page inspection remain required.
+
+## 2026-07-29 Listing Source Gate Compatibility
+
+- Added the version-controlled read-only source gate `scripts/query_1688_listing_source.py`.
+- The gate uses Windows Credential Manager and selects an installed SQL Server driver, so both executor ODBC 17 and development Native Client 10 are supported.
+- Real CTG028601N1416V01 source checks passed on both machines with `enabled=1`, `stock_disabled=0`, `other_5=销售`, and `item_type=成品`.
+- Listing regression is `382/382`; title engine remains `89 passed, 3 subtests passed`. CTG0286 draft repair and independent page inspection are still pending browser-mutex clearance.

@@ -161,6 +161,12 @@
 - Apply the same direct-entry and read-back rule to size.
 - Never click a direct-save confirmation when the modal states that incomplete specification data will be cleared.
 
+## 2026-07-29 SQL Server Driver Finding
+
+- The executor has ODBC Driver 17, while the development machine currently exposes SQL Server Native Client 10.0.
+- Read-only lifecycle probes must resolve an installed SQL Server driver; a hard-coded ODBC 17 dependency can fail before any query is issued.
+- Driver compatibility does not relax the data gate: the current row must still match all four lifecycle fields exactly.
+
 ## 2026-07-28 Required Specification Review Rule
 
 - A required 1688 specification must be checked for exact persisted text after refresh; non-empty alone is insufficient.
