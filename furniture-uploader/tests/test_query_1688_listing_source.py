@@ -10,7 +10,11 @@ SCRIPTS_ROOT = PROJECT_ROOT / "scripts"
 if str(SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_ROOT))
 
-from query_1688_listing_source import load_source_rows, source_gate_passed
+from query_1688_listing_source import (
+    DEFAULT_CREDENTIAL_REF,
+    load_source_rows,
+    source_gate_passed,
+)
 
 
 class FakeCursor:
@@ -49,6 +53,9 @@ class FakeConnection:
 
 
 class ListingSourceQueryTests(unittest.TestCase):
+    def test_listing_source_uses_module_owned_credential_reference(self) -> None:
+        self.assertEqual(DEFAULT_CREDENTIAL_REF, "YYDD/1688/database/listing-source")
+
     def test_query_is_parameterized_and_current_row_passes_gate(self) -> None:
         connection = FakeConnection(
             (611035, "CTG0286", "款式一", "住宅家具", "2026-06-30", "SKU-1", 1, 0, "销售", "成品")

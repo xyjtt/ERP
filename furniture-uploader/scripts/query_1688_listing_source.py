@@ -27,7 +27,7 @@ from stop_sale_audit import (
 DEFAULT_SERVER = "218.93.191.16"
 DEFAULT_PORT = 1433
 DEFAULT_DATABASE = "JSDataMiddlePlatform"
-DEFAULT_CREDENTIAL_REF = "YYDD/1688/database/stop-sale-source"
+DEFAULT_CREDENTIAL_REF = "YYDD/1688/database/listing-source"
 
 
 def build_parser() -> argparse.ArgumentParser:

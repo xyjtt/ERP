@@ -248,7 +248,7 @@
 ## 2026-07-29 Source Lifecycle Gate
 
 - Use `scripts/query_1688_listing_source.py` for the fresh pre-browser source check.
-- Credentials stay in Windows Credential Manager under `YYDD/1688/database/stop-sale-source`; never persist them in code, payloads, or evidence files.
+- Credentials stay in Windows Credential Manager under the listing-owned reference `YYDD/1688/database/listing-source`; never persist them in code, payloads, or evidence files.
 - The script must resolve an installed SQL Server driver rather than assuming ODBC Driver 17 exists.
 - A passed source row is only a prerequisite. It does not authorize a second CTG0286 draft or prove draft/Offer acceptance.
 
