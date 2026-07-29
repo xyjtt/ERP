@@ -128,23 +128,30 @@ def ensure_1688_authenticated_session(
         "--verify-account-identity",
     ]
 
-    try:
-        result = command_runner(
-            command,
-            cwd=str(runtime_root),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise OfflineLoginRequiredError(
-            f"1688 automatic login timed out after {timeout} seconds."
-        ) from exc
-    except OSError as exc:
-        raise OfflineLoginRequiredError("1688 automatic login process could not be started.") from exc
+    result: subprocess.CompletedProcess[Any] | None = None
+    for identity_attempt in range(2):
+        try:
+            result = command_runner(
+                command,
+                cwd=str(runtime_root),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise OfflineLoginRequiredError(
+                f"1688 automatic login timed out after {timeout} seconds."
+            ) from exc
+        except OSError as exc:
+            raise OfflineLoginRequiredError("1688 automatic login process could not be started.") from exc
+        if int(result.returncode) != 4 or identity_attempt > 0:
+            break
+
+    if result is None:
+        raise OfflineLoginRequiredError("1688 automatic login returned no result.")
 
     return_code = int(result.returncode)
     if return_code == 0:

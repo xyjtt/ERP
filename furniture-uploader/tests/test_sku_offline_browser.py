@@ -310,6 +310,60 @@ class SkuOfflineBrowserTests(unittest.TestCase):
 
         self.assertEqual(outcome["status"], "already_replaced")
 
+    def test_dom_replacement_uses_keyboard_input_and_commits_on_tab(self) -> None:
+        class InputElement:
+            def __init__(self, value: str) -> None:
+                self.value = value
+                self.selected = False
+                self.keys: list[tuple[object, ...]] = []
+
+            def click(self) -> None:
+                return None
+
+            def get_attribute(self, name: str) -> str:
+                return self.value if name == "value" else ""
+
+            def send_keys(self, *keys: object) -> None:
+                self.keys.append(keys)
+                if keys == (Keys.CONTROL, "a"):
+                    self.selected = True
+                elif keys == (Keys.DELETE,) and self.selected:
+                    self.value = ""
+                elif keys == (Keys.TAB,):
+                    self.selected = False
+                elif keys and isinstance(keys[0], str):
+                    self.value = str(keys[0])
+
+        class RowElement:
+            def __init__(self, cargo_input: InputElement) -> None:
+                self.cargo_input = cargo_input
+
+            def find_elements(self, _by: str, _value: str) -> list[InputElement]:
+                return [self.cargo_input]
+
+        class DomDriver(FakeSuccessDriver):
+            def __init__(self, cargo_input: InputElement) -> None:
+                super().__init__()
+                self.row = RowElement(cargo_input)
+
+            def find_elements(self, _by: str, _value: str) -> list[RowElement]:
+                return [self.row]
+
+        cargo_input = InputElement("OLD-SKU")
+        browser = SkuOfflineBrowser({}, PROJECT_ROOT)
+        browser.driver = DomDriver(cargo_input)
+        browser._pause = lambda _seconds: None  # type: ignore[method-assign]
+
+        result = browser._replace_sku_codes_in_dom(
+            [{"online_sku": "OLD-SKU", "replacement_sku": "NEW-SKU"}]
+        )
+
+        self.assertTrue(result["supported"])
+        self.assertEqual(result["changed_count"], 1)
+        self.assertEqual(result["results"][0]["status"], "changed")
+        self.assertEqual(cargo_input.value, "NEW-SKU")
+        self.assertIn((Keys.TAB,), cargo_input.keys)
+
     def test_open_management_page_reuses_unfiltered_all_tab(self) -> None:
         browser = SkuOfflineBrowser({}, PROJECT_ROOT)
         management_url = (
@@ -379,6 +433,9 @@ class SkuOfflineBrowserTests(unittest.TestCase):
         state = {"active": False}
 
         class TabElement:
+            def click(self) -> None:
+                state["active"] = True
+
             def get_attribute(self, name: str) -> str:
                 if name == "class":
                     return "tabs-tab tabs-tab-active" if state["active"] else "tabs-tab"
@@ -394,8 +451,7 @@ class SkuOfflineBrowserTests(unittest.TestCase):
                 return [TabElement()]
 
             def execute_script(self, script: str, *args: object) -> None:
-                if "arguments[0].click" in script:
-                    state["active"] = True
+                return None
 
         browser = SkuOfflineBrowser(
             {"management_tab_timeout_seconds": 0.1},
@@ -408,8 +464,246 @@ class SkuOfflineBrowserTests(unittest.TestCase):
         browser._ensure_all_products_tab_active({}, context)
 
         self.assertTrue(state["active"])
+        self.assertEqual(context["management_products_tab_click_mode"], "native")
         self.assertEqual(context["management_products_tab"], "all")
         self.assertTrue(context["management_products_tab_verified"])
+
+    def test_management_frame_accepts_all_tab_with_count_suffix(self) -> None:
+        observed_xpaths: list[str] = []
+
+        class TabElement:
+            def get_attribute(self, name: str) -> str:
+                if name == "class":
+                    return "ant-tabs-tab ant-tabs-tab-active"
+                if name == "aria-selected":
+                    return "true"
+                return ""
+
+            def is_displayed(self) -> bool:
+                return True
+
+        class TabDriver(FakeSuccessDriver):
+            def find_elements(self, by: str, value: str) -> list[TabElement]:
+                observed_xpaths.append(value)
+                if '" ant-tabs-tab "' in value and "starts-with" in value:
+                    return [TabElement()]
+                return []
+
+        browser = SkuOfflineBrowser(
+            {"management_tab_timeout_seconds": 0},
+            PROJECT_ROOT,
+        )
+        browser.driver = TabDriver()
+        context: dict[str, object] = {}
+
+        browser._ensure_all_products_tab_active({}, context)
+
+        self.assertTrue(any("starts-with" in xpath for xpath in observed_xpaths))
+        self.assertTrue(any("全部商品" in xpath for xpath in observed_xpaths))
+        self.assertEqual(context["management_products_tab"], "all")
+        self.assertTrue(context["management_products_tab_verified"])
+
+    def test_new_window_timeout_keeps_original_management_window(self) -> None:
+        class SwitchTo:
+            def __init__(self, driver: object) -> None:
+                self.driver = driver
+
+            def window(self, handle: str) -> None:
+                self.driver.current_window_handle = handle
+
+        class WindowDriver:
+            def __init__(self) -> None:
+                self.window_handles = ["management", "preexisting-new-tab"]
+                self.current_window_handle = "management"
+                self.switch_to = SwitchTo(self)
+
+        browser = SkuOfflineBrowser(
+            {"explicit_wait_seconds": 0},
+            PROJECT_ROOT,
+        )
+        driver = WindowDriver()
+        browser.driver = driver
+
+        browser._switch_to_newest_window(list(driver.window_handles))
+
+        self.assertEqual(driver.current_window_handle, "management")
+
+    def test_management_edit_uses_row_href_when_popup_does_not_open(self) -> None:
+        product_id = "1058226583685"
+        edit_url = (
+            "https://offer-new.1688.com/popular/publish.htm"
+            f"?id={product_id}&operator=edit"
+        )
+
+        class EditButton:
+            def click(self) -> None:
+                return
+
+            def get_attribute(self, name: str) -> str:
+                return edit_url if name == "href" else ""
+
+        class ResultRow:
+            def find_element(self, by: str, value: str) -> EditButton:
+                return EditButton()
+
+        class SwitchTo:
+            def __init__(self, driver: object) -> None:
+                self.driver = driver
+
+            def default_content(self) -> None:
+                return
+
+            def window(self, handle: str) -> None:
+                self.driver.current_window_handle = handle
+
+        class EditDriver(FakeSuccessDriver):
+            def __init__(self) -> None:
+                super().__init__(current_url="https://work.1688.com/?_path_=sellerPro")
+                self.window_handles = ["management"]
+                self.current_window_handle = "management"
+                self.switch_to = SwitchTo(self)
+
+        browser = SkuOfflineBrowser({"explicit_wait_seconds": 0}, PROJECT_ROOT)
+        browser.driver = EditDriver()
+        browser._wait_for_management_result_row = (  # type: ignore[method-assign]
+            lambda selector, context: ResultRow()
+        )
+        browser._raise_if_edit_page_unavailable = lambda context: None  # type: ignore[method-assign]
+        browser._activate_sales_info_section = lambda selectors, context: None  # type: ignore[method-assign]
+        browser._pause = lambda seconds: None  # type: ignore[method-assign]
+        context: dict[str, object] = {"product_id": product_id}
+
+        browser._open_edit_page(
+            {
+                "product_result_row": {"by": "xpath", "value": "//tr"},
+                "edit_button_in_row": {"by": "xpath", "value": ".//a"},
+            },
+            context,
+        )
+
+        self.assertEqual(browser.driver.current_url, edit_url)
+        self.assertEqual(context["management_edit_click_mode"], "native")
+        self.assertEqual(context["management_edit_navigation"], "row_href_fallback")
+        self.assertEqual(context["edit_entry_stage"], "edit_page_ready")
+
+    def test_management_edit_constructs_same_product_fallback_without_row_href(self) -> None:
+        product_id = "1065419644989"
+
+        class EditButton:
+            def click(self) -> None:
+                return
+
+            def get_attribute(self, name: str) -> str:
+                return ""
+
+        class ResultRow:
+            def find_element(self, by: str, value: str) -> EditButton:
+                return EditButton()
+
+        class SwitchTo:
+            def __init__(self, driver: object) -> None:
+                self.driver = driver
+
+            def default_content(self) -> None:
+                return
+
+            def window(self, handle: str) -> None:
+                self.driver.current_window_handle = handle
+
+        class EditDriver(FakeSuccessDriver):
+            def __init__(self) -> None:
+                super().__init__(current_url="https://work.1688.com/?_path_=sellerPro")
+                self.window_handles = ["management"]
+                self.current_window_handle = "management"
+                self.switch_to = SwitchTo(self)
+
+        browser = SkuOfflineBrowser({"explicit_wait_seconds": 0}, PROJECT_ROOT)
+        browser.driver = EditDriver()
+        browser._wait_for_management_result_row = (  # type: ignore[method-assign]
+            lambda selector, context: ResultRow()
+        )
+        browser._raise_if_edit_page_unavailable = lambda context: None  # type: ignore[method-assign]
+        browser._activate_sales_info_section = lambda selectors, context: None  # type: ignore[method-assign]
+        browser._pause = lambda seconds: None  # type: ignore[method-assign]
+        context: dict[str, object] = {"product_id": product_id}
+
+        browser._open_edit_page(
+            {
+                "product_result_row": {"by": "xpath", "value": "//tr"},
+                "edit_button_in_row": {"by": "xpath", "value": ".//a"},
+            },
+            context,
+        )
+
+        fallback_url = str(context["management_edit_fallback_url"])
+        self.assertEqual(browser.driver.current_url, fallback_url)
+        self.assertEqual(parse_qs(urlparse(fallback_url).query)["id"], [product_id])
+        self.assertEqual(context["management_edit_navigation"], "constructed_url_fallback")
+        self.assertEqual(context["edit_entry_stage"], "edit_page_ready")
+
+    def test_management_edit_rejects_unsafe_row_href(self) -> None:
+        browser = SkuOfflineBrowser({}, PROJECT_ROOT)
+        browser.driver = FakeSuccessDriver(current_url="https://work.1688.com/")
+
+        class EditButton:
+            def get_attribute(self, name: str) -> str:
+                return "https://example.com/publish.htm?id=1001" if name == "href" else ""
+
+        self.assertEqual(browser._resolve_management_edit_href(EditButton(), "1001"), "")
+        self.assertFalse(
+            browser._is_expected_edit_page_url(
+                "https://offer-new.1688.com/popular/publish.htm?id=1002&operator=edit",
+                "1001",
+            )
+        )
+
+    def test_management_frame_reloads_once_when_iframe_is_missing(self) -> None:
+        calls: list[str] = []
+        iframe = object()
+
+        class SwitchTo:
+            def default_content(self) -> None:
+                calls.append("default_content")
+
+            def frame(self, value: object) -> None:
+                self.frame_value = value
+                calls.append("frame")
+
+        class FrameDriver:
+            current_url = "https://work.1688.com/?_path_=sellerPro"
+            switch_to = SwitchTo()
+
+        browser = SkuOfflineBrowser(
+            {"management_frame_reload_wait_seconds": 0},
+            PROJECT_ROOT,
+        )
+        browser.driver = FrameDriver()
+        attempts = iter((TimeoutException("missing iframe"), iframe))
+
+        def wait_for_element(selector: dict[str, object]) -> object:
+            result = next(attempts)
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        browser._wait_for_element = wait_for_element  # type: ignore[method-assign]
+        browser._navigate_with_timeout_recovery = (  # type: ignore[method-assign]
+            lambda url: calls.append(f"reload:{url}") or False
+        )
+        browser._assert_not_redirected_to_login = (  # type: ignore[method-assign]
+            lambda context: calls.append("auth_checked")
+        )
+        context: dict[str, object] = {}
+
+        browser._switch_into_management_frame(
+            {"management_iframe": {"by": "xpath", "value": "//iframe"}},
+            context,
+        )
+
+        self.assertEqual(context["management_frame_retry"], "reload")
+        self.assertEqual(context["edit_entry_stage"], "management_frame_entered")
+        self.assertIn("reload:https://work.1688.com/?_path_=sellerPro", calls)
+        self.assertEqual(browser.driver.switch_to.frame_value, iframe)
 
     def test_management_frame_missing_all_tab_fails_closed(self) -> None:
         class MissingTabDriver(FakeSuccessDriver):
@@ -1776,12 +2070,16 @@ class SkuOfflineBrowserTests(unittest.TestCase):
         browser.driver.switch_to = type("SwitchTo", (), {"default_content": lambda self: None})()
         browser._wait_for_element = lambda selector: (_ for _ in ()).throw(RuntimeError("missing"))  # type: ignore[method-assign]
 
-        with self.assertRaises(OfflineStoreMismatchError):
+        context = {"store_name": "阿里巴巴-常州工莱家具"}
+        with self.assertRaises(OfflineLoginRequiredError):
             browser._assert_store_context(
                 {"current_store_name": {"by": "css", "value": ".user-name"}},
-                {"store_name": "阿里巴巴-常州工莱家具"},
+                context,
                 required=True,
             )
+
+        self.assertEqual(context["page_error_category"], "login_required")
+        self.assertEqual(context["page_error_stage"], "store_context_check")
 
     def test_assert_store_context_accepts_configured_store_alias(self) -> None:
         browser = SkuOfflineBrowser({}, PROJECT_ROOT)

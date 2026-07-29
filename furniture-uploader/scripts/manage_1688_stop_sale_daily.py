@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 import re
@@ -18,7 +19,8 @@ import time
 from contextlib import contextmanager, nullcontext
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Iterator
+from threading import Lock
+from typing import Any, Callable, Iterator
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -29,6 +31,9 @@ DEFAULT_WORKER_TASK_NAME = "YYDD-1688-Crawler-Worker"
 DEFAULT_MANAGER_TASK_NAME = "YYDD-1688-Stop-Sale-Daily"
 DEFAULT_DAILY_TIME = "13:00"
 DEFAULT_MANAGER_LOCK_STALE_SECONDS = 36 * 60 * 60
+DEFAULT_SOURCE_DATABASE = os.environ.get("STOP_SALE_SOURCE_SQLSERVER_DATABASE", "JSReportReplica")
+DEFAULT_SOURCE_TABLE = os.environ.get("STOP_SALE_SOURCE_TABLE", "app.op_stop_sale")
+DEFAULT_SOURCE_DRIVER = os.environ.get("STOP_SALE_SOURCE_SQLSERVER_DRIVER", "SQL Server")
 TERMINAL_OFFLINE_STATUSES = {"success", "already_offline"}
 TERMINAL_JUSHUITAN_STATUSES = {"success", "already_cleared"}
 NON_RETRYABLE_OFFLINE_CATEGORIES = {
@@ -77,9 +82,15 @@ def build_argument_parser() -> argparse.ArgumentParser:
     run.add_argument("--shared-runtime-root", default=str(DEFAULT_SHARED_RUNTIME_ROOT))
     run.add_argument("--jushuitan-root", default=str(DEFAULT_JUSHUITAN_ROOT))
     run.add_argument("--worker-task-name", default=DEFAULT_WORKER_TASK_NAME)
+    run.add_argument("--source-database", default=DEFAULT_SOURCE_DATABASE)
+    run.add_argument("--source-table", default=DEFAULT_SOURCE_TABLE)
+    run.add_argument("--source-driver", default=DEFAULT_SOURCE_DRIVER)
     run.add_argument("--batch-size", type=int, default=10, help="Maximum input rows per recoverable store batch.")
     run.add_argument("--batch-max-attempts", type=int, default=2)
     run.add_argument("--batch-retry-backoff-seconds", type=int, default=60)
+    run.add_argument("--crawler-task-wait-seconds", type=int, default=80 * 60)
+    run.add_argument("--jushuitan-lock-wait-seconds", type=int, default=3600)
+    run.add_argument("--max-parallel-stores", type=int, default=1)
     run.add_argument("--1688-timeout-seconds", dest="timeout_1688_seconds", type=int, default=3600)
     run.add_argument("--jushuitan-timeout-seconds", dest="timeout_jushuitan_seconds", type=int, default=1800)
     run.add_argument("--no-notify", action="store_true")
@@ -215,7 +226,7 @@ def _run_logged(command: list[str], *, cwd: Path, log_path: Path) -> int:
 
 
 def build_preflight_command(args: argparse.Namespace) -> list[str]:
-    return [
+    command = [
         sys.executable,
         str(SCRIPTS_ROOT / "preflight_1688_stop_sale_executor.py"),
         "--script-1688-root",
@@ -223,6 +234,11 @@ def build_preflight_command(args: argparse.Namespace) -> list[str]:
         "--jushuitan-root",
         str(Path(args.jushuitan_root).resolve()),
     ]
+    source_database = str(args.source_database or "").strip().casefold()
+    source_table = str(args.source_table or "").strip().casefold()
+    if source_database == "jsreportreplica" and source_table.startswith("app."):
+        command.append("--existing-input")
+    return command
 
 
 def build_manager_lock(args: argparse.Namespace, manager_run_id: str):
@@ -258,6 +274,12 @@ def build_preview_command(args: argparse.Namespace, output_dir: Path) -> list[st
         str(output_dir.resolve()),
         "--limit",
         "0",
+        "--database",
+        str(args.source_database),
+        "--table",
+        str(args.source_table),
+        "--driver",
+        str(args.source_driver),
         "--shared-runtime-root",
         str(Path(args.shared_runtime_root).resolve()),
     ]
@@ -290,8 +312,16 @@ def build_pipeline_command(
         str(Path(args.jushuitan_root).resolve()),
         "--shared-runtime-root",
         str(Path(args.shared_runtime_root).resolve()),
+        "--source-database",
+        str(args.source_database),
+        "--source-table",
+        str(args.source_table),
         "--crawler-worker-task-name",
         str(args.worker_task_name),
+        "--crawler-task-wait-seconds",
+        str(args.crawler_task_wait_seconds),
+        "--jushuitan-lock-wait-seconds",
+        str(args.jushuitan_lock_wait_seconds),
     ]
 
 
@@ -313,7 +343,12 @@ def _powershell_task_action(action: str, task_name: str) -> None:
         raise DailyManagerError(f"Unable to {action.lower()} Worker scheduled task.")
 
 
-def _wait_for_worker_quiet(task_name: str, timeout_seconds: int = 180) -> dict[str, Any]:
+def _wait_for_worker_quiet(
+    task_name: str,
+    timeout_seconds: int = 180,
+    *,
+    allow_profile_edges: bool = False,
+) -> dict[str, Any]:
     deadline = time.time() + timeout_seconds
     last_state: dict[str, Any] = {}
     while time.time() < deadline:
@@ -321,17 +356,35 @@ def _wait_for_worker_quiet(task_name: str, timeout_seconds: int = 180) -> dict[s
         if (
             str(last_state.get("scheduled_task_state") or "").lower() != "running"
             and int(last_state.get("worker_process_count") or 0) == 0
-            and int(last_state.get("profile_edge_process_count") or 0) == 0
+            and (
+                allow_profile_edges
+                or int(last_state.get("profile_edge_process_count") or 0) == 0
+            )
         ):
             return last_state
         time.sleep(2)
     raise DailyManagerError(f"Worker did not become idle before timeout: {last_state}")
 
 
-def ensure_worker_paused(task_name: str, timeout_seconds: int = 180) -> dict[str, Any]:
+def ensure_worker_paused(
+    task_name: str,
+    timeout_seconds: int = 180,
+    *,
+    allow_profile_edges: bool = False,
+) -> dict[str, Any]:
     before = query_crawler_worker_state(task_name)
     if not before.get("scheduled_task_exists"):
-        raise DailyManagerError(f"Worker scheduled task does not exist: {task_name}")
+        if (
+            int(before.get("worker_process_count") or 0) > 0
+            or (
+                not allow_profile_edges
+                and int(before.get("profile_edge_process_count") or 0) > 0
+            )
+        ):
+            raise DailyManagerError(
+                f"Worker scheduled task is missing but owned processes are still active: {task_name}"
+            )
+        return {"before": before, "paused": before, "actions": []}
 
     actions: list[str] = []
     current_state = str(before.get("scheduled_task_state") or "").strip().lower()
@@ -344,7 +397,11 @@ def ensure_worker_paused(task_name: str, timeout_seconds: int = 180) -> dict[str
 
     return {
         "before": before,
-        "paused": _wait_for_worker_quiet(task_name, timeout_seconds),
+        "paused": _wait_for_worker_quiet(
+            task_name,
+            timeout_seconds,
+            allow_profile_edges=allow_profile_edges,
+        ),
         "actions": actions,
     }
 
@@ -353,6 +410,7 @@ def ensure_worker_paused(task_name: str, timeout_seconds: int = 180) -> dict[str
 def paused_worker(task_name: str) -> Iterator[dict[str, Any]]:
     initial_pause = ensure_worker_paused(task_name)
     before = initial_pause["before"]
+    task_exists = bool(before.get("scheduled_task_exists"))
     original_state = str(before.get("scheduled_task_state") or "").strip().lower()
     lifecycle = {
         "before": before,
@@ -366,9 +424,9 @@ def paused_worker(task_name: str) -> Iterator[dict[str, Any]]:
     finally:
         restore_error = None
         try:
-            if original_state != "disabled":
+            if task_exists and original_state != "disabled":
                 _powershell_task_action("Enable", task_name)
-            if original_state == "running":
+            if task_exists and original_state == "running":
                 _powershell_task_action("Start", task_name)
             lifecycle["restored"] = query_crawler_worker_state(task_name)
         except Exception as exc:
@@ -642,6 +700,136 @@ def send_manager_notification(summary: dict[str, Any], shared_runtime_root: Path
         return False
 
 
+def _run_store_batches(
+    *,
+    args: argparse.Namespace,
+    manager_run_id: str,
+    manager_dir: Path,
+    index: int,
+    item: dict[str, Any],
+    worker_guard: Callable[[], dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    store_name = str(item.get("store_name") or "").strip()
+    input_file = Path(str(item["path"])).resolve()
+    store_result: dict[str, Any] = {
+        "store_name": store_name,
+        "selected_count": int(item.get("count") or 0),
+        "state": "success",
+        "batch_count": 0,
+        "attempted_batch_count": 0,
+        "completed_batch_count": 0,
+        "safety_stopped": False,
+        "run_ids": [],
+        "batches": [],
+        "batch_attempts": [],
+    }
+    outcome: dict[str, Any] = {
+        "index": index,
+        "store": store_result,
+        "exhausted_retry_batch_count": 0,
+        "infrastructure_failed": False,
+    }
+    if not input_file.exists():
+        store_result.update({"state": "failed", "error": f"Preview CSV not found: {input_file}"})
+        outcome["infrastructure_failed"] = True
+        return outcome
+
+    try:
+        batches = split_store_input(
+            input_file,
+            manager_dir / "inputs" / f"store_{index:02d}_{_safe_id(store_name)}",
+            int(args.batch_size),
+        )
+        store_result["batch_count"] = len(batches)
+        for batch_index, batch_file in enumerate(batches, start=1):
+            attempt_results: list[dict[str, Any]] = []
+            current_input = batch_file
+            final_result: dict[str, Any] | None = None
+            for attempt_number in range(1, int(args.batch_max_attempts) + 1):
+                run_id = f"{manager_run_id}_s{index:02d}_b{batch_index:03d}"
+                if attempt_number > 1:
+                    run_id += f"_a{attempt_number:02d}"
+                if worker_guard is not None:
+                    worker_guard()
+                return_code = _run_logged(
+                    build_pipeline_command(args, current_input, run_id),
+                    cwd=PROJECT_ROOT,
+                    log_path=manager_dir / f"{_safe_id(store_name)}_{run_id}.log",
+                )
+                result = _load_pipeline_result(PROJECT_ROOT, run_id, return_code)
+                result.update(
+                    {
+                        "store_name": store_name,
+                        "input_file": str(current_input),
+                        "source_batch_file": str(batch_file),
+                        "batch_number": batch_index,
+                        "attempt_number": attempt_number,
+                    }
+                )
+                store_result["run_ids"].append(run_id)
+                store_result["batch_attempts"].append(result)
+                attempt_results.append(result)
+
+                retry_path = batch_file.parent / f"{batch_file.stem}.retry_{attempt_number:02d}{batch_file.suffix}"
+                retry_plan = build_batch_retry_input(batch_file, attempt_results, retry_path)
+                result["retry_plan"] = retry_plan
+                result["offline_counts"] = retry_plan["offline_counts"]
+                result["jushuitan_counts"] = retry_plan["jushuitan_counts"]
+
+                if result.get("safety_stop"):
+                    result["state"] = "completed_with_exceptions"
+                    final_result = result
+                    break
+                if int(retry_plan["retry_count"]) == 0:
+                    result["state"] = (
+                        "completed_with_exceptions"
+                        if int(retry_plan["business_terminal_count"]) > 0
+                        else "success"
+                    )
+                    final_result = result
+                    break
+                if attempt_number >= int(args.batch_max_attempts):
+                    result["state"] = "failed"
+                    outcome["exhausted_retry_batch_count"] += 1
+                    final_result = result
+                    break
+
+                result["state"] = "retrying"
+                current_input = Path(str(retry_plan["retry_input_file"]))
+                if int(args.batch_retry_backoff_seconds) > 0:
+                    time.sleep(int(args.batch_retry_backoff_seconds))
+
+            if final_result is None:
+                raise DailyManagerError(f"Batch did not produce a final result: {store_name} #{batch_index}")
+            store_result["attempted_batch_count"] = batch_index
+            store_result["batches"].append(final_result)
+
+            if final_result.get("state") == "failed":
+                store_result["state"] = "failed"
+            else:
+                store_result["completed_batch_count"] += 1
+                if (
+                    final_result.get("state") == "completed_with_exceptions"
+                    and store_result["state"] == "success"
+                ):
+                    store_result["state"] = "completed_with_exceptions"
+            if final_result.get("safety_stop"):
+                store_result["safety_stopped"] = True
+                if store_result["state"] != "failed":
+                    store_result["state"] = "completed_with_exceptions"
+                break
+    except Exception as exc:
+        store_result.update(
+            {
+                "state": "failed",
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            }
+        )
+        outcome["infrastructure_failed"] = True
+    return outcome
+
+
 def run_daily(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
     args.date = _validate_date(args.date)
     manager_run_id = "daily_" + datetime.now().strftime("%Y%m%d_%H%M%S_%f")
@@ -664,6 +852,9 @@ def run_daily(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         "batch_size": int(args.batch_size),
         "batch_max_attempts": int(args.batch_max_attempts),
         "batch_retry_backoff_seconds": int(args.batch_retry_backoff_seconds),
+        "max_parallel_stores": int(args.max_parallel_stores),
+        "crawler_task_wait_seconds": int(args.crawler_task_wait_seconds),
+        "jushuitan_lock_wait_seconds": int(args.jushuitan_lock_wait_seconds),
         "timeout_1688_seconds": int(args.timeout_1688_seconds),
         "timeout_jushuitan_seconds": int(args.timeout_jushuitan_seconds),
         "worker_status": "not_started",
@@ -722,144 +913,70 @@ def run_daily(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             if not args.yes:
                 raise DailyManagerError("execute mode requires --yes.")
             infrastructure_failed = False
+            indexed_store_files = list(enumerate(store_files, start=1))
+            worker_checks: list[dict[str, Any]] = []
+            worker_guard_lock = Lock()
+
             with paused_worker(str(args.worker_task_name)) as worker_info:
                 summary["worker_status"] = "paused"
                 summary["worker_before"] = worker_info["before"]
                 summary["worker_paused"] = worker_info["paused"]
-                for index, item in enumerate(store_files, start=1):
-                    store_name = str(item.get("store_name") or "").strip()
-                    input_file = Path(str(item["path"])).resolve()
-                    store_result: dict[str, Any] = {
-                        "store_name": store_name,
-                        "selected_count": int(item.get("count") or 0),
-                        "state": "success",
-                        "batch_count": 0,
-                        "attempted_batch_count": 0,
-                        "completed_batch_count": 0,
-                        "safety_stopped": False,
-                        "run_ids": [],
-                        "batches": [],
-                        "batch_attempts": [],
-                    }
-                    if not input_file.exists():
-                        store_result.update(
-                            {
-                                "state": "failed",
-                                "error": f"Preview CSV not found: {input_file}",
-                            }
+
+                def worker_guard() -> dict[str, Any]:
+                    with worker_guard_lock:
+                        checked_at = datetime.now().isoformat(timespec="seconds")
+                        check = ensure_worker_paused(
+                            str(args.worker_task_name),
+                            allow_profile_edges=True,
                         )
-                        summary["stores"].append(store_result)
-                        infrastructure_failed = True
-                        break
+                        event = {"checked_at": checked_at, **check}
+                        worker_checks.append(event)
+                        if check.get("actions"):
+                            worker_info.setdefault("reassertions", []).append(event)
+                        return check
 
-                    batches = split_store_input(
-                        input_file,
-                        manager_dir / "inputs" / f"store_{index:02d}_{_safe_id(store_name)}",
-                        int(args.batch_size),
+                def run_store(index: int, item: dict[str, Any]) -> dict[str, Any]:
+                    return _run_store_batches(
+                        args=args,
+                        manager_run_id=manager_run_id,
+                        manager_dir=manager_dir,
+                        index=index,
+                        item=item,
+                        worker_guard=worker_guard,
                     )
-                    store_result["batch_count"] = len(batches)
-                    for batch_index, batch_file in enumerate(batches, start=1):
-                        attempt_results: list[dict[str, Any]] = []
-                        current_input = batch_file
-                        final_result: dict[str, Any] | None = None
-                        for attempt_number in range(1, int(args.batch_max_attempts) + 1):
-                            run_id = f"{manager_run_id}_s{index:02d}_b{batch_index:03d}"
-                            if attempt_number > 1:
-                                run_id += f"_a{attempt_number:02d}"
-                            pause_check = ensure_worker_paused(str(args.worker_task_name))
-                            summary["worker_pause_check_count"] += 1
-                            if pause_check["actions"]:
-                                intervention = {
-                                    "checked_at": datetime.now().isoformat(timespec="seconds"),
-                                    "store_name": store_name,
-                                    "batch_number": batch_index,
-                                    "attempt_number": attempt_number,
-                                    "run_id": run_id,
-                                    **pause_check,
-                                }
-                                summary["worker_reassertions"].append(intervention)
-                                worker_info.setdefault("reassertions", []).append(intervention)
-                            return_code = _run_logged(
-                                build_pipeline_command(args, current_input, run_id),
-                                cwd=PROJECT_ROOT,
-                                log_path=manager_dir / f"{_safe_id(store_name)}_{run_id}.log",
-                            )
-                            result = _load_pipeline_result(PROJECT_ROOT, run_id, return_code)
-                            result["store_name"] = store_name
-                            result["input_file"] = str(current_input)
-                            result["source_batch_file"] = str(batch_file)
-                            result["batch_number"] = batch_index
-                            result["attempt_number"] = attempt_number
-                            store_result["run_ids"].append(run_id)
-                            store_result["batch_attempts"].append(result)
-                            summary["batch_attempts"].append(result)
-                            attempt_results.append(result)
 
-                            retry_path = (
-                                batch_file.parent
-                                / f"{batch_file.stem}.retry_{attempt_number:02d}{batch_file.suffix}"
-                            )
-                            retry_plan = build_batch_retry_input(
-                                batch_file,
-                                attempt_results,
-                                retry_path,
-                            )
-                            result["retry_plan"] = retry_plan
-                            result["offline_counts"] = retry_plan["offline_counts"]
-                            result["jushuitan_counts"] = retry_plan["jushuitan_counts"]
-
-                            if result.get("safety_stop"):
-                                result["state"] = "completed_with_exceptions"
-                                final_result = result
-                                break
-                            if int(retry_plan["retry_count"]) == 0:
-                                result["state"] = (
-                                    "completed_with_exceptions"
-                                    if int(retry_plan["business_terminal_count"]) > 0
-                                    else "success"
-                                )
-                                final_result = result
-                                break
-                            if attempt_number >= int(args.batch_max_attempts):
-                                result["state"] = "failed"
-                                summary["exhausted_retry_batch_count"] += 1
-                                final_result = result
-                                break
-
-                            result["state"] = "retrying"
-                            current_input = Path(str(retry_plan["retry_input_file"]))
-                            if int(args.batch_retry_backoff_seconds) > 0:
-                                time.sleep(int(args.batch_retry_backoff_seconds))
-
-                        if final_result is None:
-                            raise DailyManagerError(
-                                f"Batch did not produce a final result: {store_name} #{batch_index}"
-                            )
-                        store_result["attempted_batch_count"] = batch_index
-                        store_result["batches"].append(final_result)
-                        summary["batches"].append(final_result)
-
-                        if final_result.get("state") == "failed":
-                            store_result["state"] = "failed"
-                        else:
-                            store_result["completed_batch_count"] += 1
-                            if (
-                                final_result.get("state") == "completed_with_exceptions"
-                                and store_result["state"] == "success"
-                            ):
-                                store_result["state"] = "completed_with_exceptions"
-                        if final_result.get("safety_stop"):
-                            store_result["safety_stopped"] = True
-                            if store_result["state"] != "failed":
-                                store_result["state"] = "completed_with_exceptions"
-                            break
-
-                    summary["stores"].append(store_result)
-                    if infrastructure_failed:
-                        break
+                if int(args.max_parallel_stores) == 1 or len(indexed_store_files) <= 1:
+                    store_outcomes = [run_store(index, item) for index, item in indexed_store_files]
+                else:
+                    with ThreadPoolExecutor(
+                        max_workers=min(int(args.max_parallel_stores), len(indexed_store_files)),
+                        thread_name_prefix="stop-sale-store",
+                    ) as executor:
+                        futures = [
+                            executor.submit(run_store, index, item)
+                            for index, item in indexed_store_files
+                        ]
+                        store_outcomes = [future.result() for future in futures]
 
             summary["worker_status"] = "restored"
             summary["worker_restored"] = worker_info.get("restored", {})
+            summary["worker_pause_check_count"] = len(worker_checks)
+            summary["worker_reassertions"] = [
+                check for check in worker_checks if check.get("actions")
+            ]
+
+            for outcome in sorted(store_outcomes, key=lambda value: int(value["index"])):
+                store_result = outcome["store"]
+                summary["stores"].append(store_result)
+                summary["batches"].extend(store_result["batches"])
+                summary["batch_attempts"].extend(store_result["batch_attempts"])
+                summary["exhausted_retry_batch_count"] += int(
+                    outcome["exhausted_retry_batch_count"]
+                )
+                infrastructure_failed = infrastructure_failed or bool(
+                    outcome["infrastructure_failed"]
+                )
+
             summary["exception_store_count"] = sum(
                 1 for item in summary["stores"] if item.get("state") != "success"
             )
@@ -893,7 +1010,8 @@ def run_daily(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         )
         _write_json(manager_dir / "summary.json", summary)
         _write_json(Path(args.output_root).resolve() / "latest.summary.json", summary)
-        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        # Scheduled tasks may inherit a GBK console even when log files are UTF-8.
+        print(json.dumps(summary, ensure_ascii=True, indent=2))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -905,6 +1023,12 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("--batch-max-attempts must be positive")
         if args.batch_retry_backoff_seconds < 0:
             raise ValueError("--batch-retry-backoff-seconds must be non-negative")
+        if args.crawler_task_wait_seconds < 0:
+            raise ValueError("--crawler-task-wait-seconds must be non-negative")
+        if args.jushuitan_lock_wait_seconds < 0:
+            raise ValueError("--jushuitan-lock-wait-seconds must be non-negative")
+        if args.max_parallel_stores <= 0 or args.max_parallel_stores > 4:
+            raise ValueError("--max-parallel-stores must be between 1 and 4")
         if args.timeout_1688_seconds <= 0 or args.timeout_jushuitan_seconds <= 0:
             raise ValueError("Stage timeout values must be positive")
         if args.mode == "execute" and not args.yes:

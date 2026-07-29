@@ -52,12 +52,22 @@ class StopSalePipelineTests(unittest.TestCase):
         self.assertIn("--yes", command_jushuitan)
         self.assertIn("--no-notify", command_jushuitan)
 
-    def test_shared_lock_defaults_to_existing_1688_runtime_lock(self) -> None:
+    def test_shared_lock_is_scoped_to_1688_account(self) -> None:
         args = self.build_args("execute")
         self.assertEqual(
-            resolve_shared_lock_path(args),
-            Path("D:/script_1688/artifacts/locks/ali1688_full_cycle.lock").resolve(),
+            resolve_shared_lock_path(args, "gonglai"),
+            Path("D:/script_1688/artifacts/locks/ali1688_account_gonglai.lock").resolve(),
         )
+        self.assertNotEqual(
+            resolve_shared_lock_path(args, "gonglai"),
+            resolve_shared_lock_path(args, "lechang"),
+        )
+
+    def test_shared_lock_rejects_unsafe_account_key(self) -> None:
+        args = self.build_args("execute")
+
+        with self.assertRaisesRegex(ValueError, "account_key"):
+            resolve_shared_lock_path(args, "../shared")
 
     def test_pipeline_notification_can_be_disabled_without_credentials(self) -> None:
         self.assertFalse(send_pipeline_notification("demo", disabled=True))

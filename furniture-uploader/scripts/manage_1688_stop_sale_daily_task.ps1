@@ -13,6 +13,8 @@ param(
     [int]$BatchSize = 10,
     [ValidateRange(1, 5)]
     [int]$BatchMaxAttempts = 2,
+    [ValidateRange(1, 4)]
+    [int]$MaxParallelStores = 1,
     [ValidateRange(0, 3600)]
     [int]$BatchRetryBackoffSeconds = 60,
     [ValidateRange(60, 21600)]
@@ -113,6 +115,7 @@ function Invoke-DailyRun {
             "--worker-task-name", $WorkerTaskName,
             "--batch-size", [string]$BatchSize,
             "--batch-max-attempts", [string]$BatchMaxAttempts,
+            "--max-parallel-stores", [string]$MaxParallelStores,
             "--batch-retry-backoff-seconds", [string]$BatchRetryBackoffSeconds,
             "--1688-timeout-seconds", [string]$StopSale1688TimeoutSeconds,
             "--jushuitan-timeout-seconds", [string]$StopSaleJushuitanTimeoutSeconds
@@ -148,6 +151,7 @@ switch ($Action) {
             "-WorkerTaskName", ('"' + $WorkerTaskName + '"'),
             "-BatchSize", [string]$BatchSize,
             "-BatchMaxAttempts", [string]$BatchMaxAttempts,
+            "-MaxParallelStores", [string]$MaxParallelStores,
             "-BatchRetryBackoffSeconds", [string]$BatchRetryBackoffSeconds,
             "-StopSale1688TimeoutSeconds", [string]$StopSale1688TimeoutSeconds,
             "-StopSaleJushuitanTimeoutSeconds", [string]$StopSaleJushuitanTimeoutSeconds

@@ -6,6 +6,7 @@ from datetime import datetime
 import json
 import os
 from pathlib import Path
+import re
 import sys
 from typing import Any
 
@@ -17,11 +18,13 @@ RPA_ROOT = PROJECT_ROOT / "rpa"
 if str(RPA_ROOT) not in sys.path:
     sys.path.insert(0, str(RPA_ROOT))
 
+from stop_sale_audit import StopSaleAuditRepository
 from stop_sale_audit import load_jsonl_records
 from stop_sale_audit import hydrate_dingtalk_credentials
 from stop_sale_audit import resolve_stop_sale_app_config
 from sku_replace_audit import SkuReplaceAuditRepository
 from config_loader import load_json_with_local_override
+from sku_offline_main import resolve_store_account_binding
 from sku_offline_tasks import (
     dedupe_offline_tasks,
     filter_offline_tasks,
@@ -32,10 +35,13 @@ from run_1688_stop_sale_pipeline import (
     DEFAULT_JST_LOGIN_URL,
     DEFAULT_JST_PRODUCT_URL,
     assert_crawler_worker_paused,
+    build_jushuitan_lock,
     count_handoff_records,
     emit_pipeline_event,
+    run_audit_heartbeat_process,
     run_stage_command,
     send_pipeline_notification,
+    wait_for_active_crawler_tasks,
 )
 
 
@@ -55,6 +61,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--jushuitan-root", default=str(DEFAULT_JUSHUITAN_ROOT))
     parser.add_argument("--shared-runtime-root", default=str(DEFAULT_SHARED_RUNTIME_ROOT))
     parser.add_argument("--shared-lock-path", default="")
+    parser.add_argument("--account-key", default="")
     parser.add_argument(
         "--lock-wait-seconds",
         type=int,
@@ -63,9 +70,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--lock-stale-seconds", type=int, default=21600)
     parser.add_argument("--lock-poll-seconds", type=float, default=10.0)
+    parser.add_argument("--jushuitan-lock-wait-seconds", type=int, default=3600)
     parser.add_argument("--1688-timeout-seconds", dest="timeout_1688_seconds", type=int, default=2700)
     parser.add_argument("--jushuitan-timeout-seconds", dest="timeout_jushuitan_seconds", type=int, default=1200)
     parser.add_argument("--crawler-worker-task-name", default="YYDD-1688-Crawler-Worker")
+    parser.add_argument("--crawler-task-wait-seconds", type=int, default=80 * 60)
+    parser.add_argument("--crawler-task-poll-seconds", type=float, default=10.0)
     parser.add_argument("--active-run-max-age-minutes", type=int, default=240)
     parser.add_argument(
         "--source-database",
@@ -138,7 +148,40 @@ def build_jushuitan_environment(handoff_path: Path) -> dict[str, str]:
     return environment
 
 
-def build_shared_lock(args: argparse.Namespace, run_id: str):
+def resolve_pipeline_account(
+    args: argparse.Namespace,
+    tasks: list[Any],
+) -> tuple[str, str]:
+    store_names = sorted(
+        {str(task.store_name or "").strip() for task in tasks if str(task.store_name or "").strip()}
+    )
+    if len(store_names) != 1:
+        raise RuntimeError("Each execute replacement pipeline must contain exactly one 1688 store.")
+    system_config = load_json_with_local_override(
+        PROJECT_ROOT / "config" / "systems" / "1688_sku_replace.json"
+    )
+    binding = resolve_store_account_binding(system_config, store_names[0])
+    account_key = str(binding.get("account_key") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", account_key):
+        raise RuntimeError(f"Store '{store_names[0]}' has no valid account_key mapping.")
+    requested = str(args.account_key or "").strip()
+    if requested and requested != account_key:
+        raise RuntimeError(
+            f"Requested account_key '{requested}' does not match store mapping '{account_key}'."
+        )
+    return account_key, store_names[0]
+
+
+def resolve_shared_lock_path(args: argparse.Namespace, account_key: str) -> Path:
+    runtime_root = Path(args.shared_runtime_root).resolve()
+    return (
+        Path(args.shared_lock_path).resolve()
+        if str(args.shared_lock_path).strip()
+        else runtime_root / "artifacts" / "locks" / f"ali1688_account_{account_key}.lock"
+    )
+
+
+def build_shared_lock(args: argparse.Namespace, run_id: str, account_key: str):
     if args.mode != "execute" or args.no_shared_lock:
         return nullcontext(), ""
     runtime_root = Path(args.shared_runtime_root).resolve()
@@ -149,11 +192,7 @@ def build_shared_lock(args: argparse.Namespace, run_id: str):
         sys.path.insert(0, str(runtime_root))
     from src.runtime.global_lock import GlobalFileLock
 
-    lock_path = (
-        Path(args.shared_lock_path).resolve()
-        if str(args.shared_lock_path).strip()
-        else runtime_root / "artifacts" / "locks" / "ali1688_full_cycle.lock"
-    )
+    lock_path = resolve_shared_lock_path(args, account_key)
     lock = GlobalFileLock(
         lock_path,
         stale_after_seconds=args.lock_stale_seconds,
@@ -162,6 +201,7 @@ def build_shared_lock(args: argparse.Namespace, run_id: str):
         metadata={
             "cycle": "1688_sku_replace_pipeline",
             "run_id": run_id,
+            "account_key": account_key,
             "source": str(Path(args.file).resolve()),
         },
     )
@@ -205,6 +245,10 @@ def run(args: argparse.Namespace) -> int:
         raise ValueError("execute mode requires --yes")
     if args.limit < 0:
         raise ValueError("--limit must be non-negative")
+    if args.lock_wait_seconds < 0 or args.jushuitan_lock_wait_seconds < 0:
+        raise ValueError("lock wait values must be non-negative")
+    if args.crawler_task_wait_seconds < 0 or args.crawler_task_poll_seconds <= 0:
+        raise ValueError("crawler task wait must be non-negative and poll must be positive")
     if args.timeout_1688_seconds <= 0 or args.timeout_jushuitan_seconds <= 0:
         raise ValueError("stage timeouts must be positive")
     if args.mode == "execute" and not args.no_notify:
@@ -228,23 +272,32 @@ def run(args: argparse.Namespace) -> int:
     report_path = PROJECT_ROOT / "logs" / "sku_replace" / "run_reports" / f"{run_id}.jsonl"
     summary_path = pipeline_dir / f"{run_id}.summary.json"
     audit_repository: SkuReplaceAuditRepository | None = None
+    crawler_repository: StopSaleAuditRepository | None = None
     audit_contract: dict[str, Any] | None = None
     audit_tasks: list[Any] = []
+    account_key = ""
+    store_name = ""
     if args.mode == "execute":
         audit_config = resolve_stop_sale_app_config(args.shared_runtime_root)
         audit_repository = SkuReplaceAuditRepository(audit_config)
+        crawler_repository = StopSaleAuditRepository(audit_config)
         audit_contract = audit_repository.check_contract()
         if not audit_contract.get("ready"):
             raise RuntimeError(
                 "SKU replacement audit tables are missing: "
                 + ", ".join(audit_contract.get("missing_tables", []))
             )
-        if audit_repository.count_recent_active_runs(args.active_run_max_age_minutes) > 0:
-            raise RuntimeError("A recent SKU replacement audit run is still active")
         audit_tasks = load_selected_replace_tasks(args)
         if not audit_tasks:
             raise ValueError("No executable SKU replacement tasks were selected")
-    lock, lock_path = build_shared_lock(args, run_id)
+        account_key, store_name = resolve_pipeline_account(args, audit_tasks)
+        if audit_repository.count_recent_active_runs(
+            args.active_run_max_age_minutes,
+            store_name=store_name,
+        ) > 0:
+            raise RuntimeError(f"A recent SKU replacement audit run is still active for {store_name}")
+    lock, lock_path = build_shared_lock(args, run_id, account_key)
+    jushuitan_lock, jushuitan_lock_path = build_jushuitan_lock(args, run_id)
     started_at = datetime.now().isoformat(timespec="seconds")
     error_message = ""
     return_1688 = 1
@@ -261,10 +314,17 @@ def run(args: argparse.Namespace) -> int:
         with lock:
             emit_pipeline_event(run_id, "shared_lock_acquired", lock_path=lock_path)
             worker_state = (
-                assert_crawler_worker_paused(args.crawler_worker_task_name)
+                assert_crawler_worker_paused(args.crawler_worker_task_name, account_key)
                 if args.mode == "execute"
                 else {}
             )
+            if args.mode == "execute":
+                wait_for_active_crawler_tasks(
+                    crawler_repository,
+                    account_key=account_key,
+                    timeout_seconds=args.crawler_task_wait_seconds,
+                    poll_seconds=args.crawler_task_poll_seconds,
+                )
             if audit_repository is not None:
                 audit_repository.start_run(
                     run_id=run_id,
@@ -276,7 +336,13 @@ def run(args: argparse.Namespace) -> int:
                 )
                 audit_started = True
             heartbeat = (
-                (lambda: audit_repository.heartbeat_run(run_id))
+                (
+                    lambda: run_audit_heartbeat_process(
+                        kind="sku_replace",
+                        run_id=run_id,
+                        shared_runtime_root=args.shared_runtime_root,
+                    )
+                )
                 if audit_started and audit_repository is not None
                 else None
             )
@@ -298,19 +364,30 @@ def run(args: argparse.Namespace) -> int:
             if handoff_count > 0:
                 emit_pipeline_event(
                     run_id,
-                    "jushuitan_sync_stage_started",
-                    timeout_seconds=args.timeout_jushuitan_seconds,
-                    handoff_count=handoff_count,
+                    "jushuitan_lock_wait_started",
+                    lock_path=jushuitan_lock_path,
                 )
-                stage_jst = run_stage_command(
-                    build_jushuitan_command(args, handoff_path, results_dir),
-                    cwd=jushuitan_root,
-                    timeout_seconds=args.timeout_jushuitan_seconds,
-                    stage="jushuitan_sync_by_link",
-                    env=build_jushuitan_environment(handoff_path),
-                    heartbeat=heartbeat,
-                )
-                return_jushuitan = stage_jst.returncode
+                with jushuitan_lock:
+                    emit_pipeline_event(
+                        run_id,
+                        "jushuitan_lock_acquired",
+                        lock_path=jushuitan_lock_path,
+                    )
+                    emit_pipeline_event(
+                        run_id,
+                        "jushuitan_sync_stage_started",
+                        timeout_seconds=args.timeout_jushuitan_seconds,
+                        handoff_count=handoff_count,
+                    )
+                    stage_jst = run_stage_command(
+                        build_jushuitan_command(args, handoff_path, results_dir),
+                        cwd=jushuitan_root,
+                        timeout_seconds=args.timeout_jushuitan_seconds,
+                        stage="jushuitan_sync_by_link",
+                        env=build_jushuitan_environment(handoff_path),
+                        heartbeat=heartbeat,
+                    )
+                    return_jushuitan = stage_jst.returncode
                 emit_pipeline_event(
                     run_id,
                     "jushuitan_sync_stage_finished",
@@ -368,6 +445,9 @@ def run(args: argparse.Namespace) -> int:
         "replace_report_path": str(report_path),
         "jushuitan_report_path": str(result_path),
         "shared_lock_path": lock_path,
+        "account_key": account_key,
+        "store_name": store_name,
+        "jushuitan_lock_path": jushuitan_lock_path,
         "worker_state": worker_state,
         "audit_database": audit_contract,
         "audit_status": status if audit_started else None,

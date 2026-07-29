@@ -2,6 +2,7 @@
 
 ## Recent Reports
 
+- `2026-07-30_sku_replace_execution_report.md` - 7 月 28 日四店 SKU 替换真实页面、聚水潭、审计和通知验收结果。
 - `2026-07-27_stop_sale_execution_report.md` - 7 月 27 日每日下架生产结果、根因、代码修复和执行机验收边界。
 
 本目录用于本地部署、联调和上线检查。

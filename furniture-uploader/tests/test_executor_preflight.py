@@ -13,6 +13,7 @@ if str(SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_ROOT))
 
 from preflight_1688_stop_sale_executor import (
+    build_account_lock_checks,
     check_jushuitan_storage_state,
     check_plaintext_env_file,
     check_python_runtime_dependencies,
@@ -21,6 +22,24 @@ from preflight_1688_stop_sale_executor import (
 
 
 class ExecutorPreflightTests(unittest.TestCase):
+    def test_account_lock_checks_are_scoped_and_reject_unsafe_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            checks = build_account_lock_checks(
+                root,
+                [
+                    {"account_key": "lechang"},
+                    {"account_key": "gonglai"},
+                    {"account_key": "../shared"},
+                ],
+            )
+
+        self.assertTrue(checks[0]["valid"])
+        self.assertTrue(checks[1]["valid"])
+        self.assertNotEqual(checks[0]["path"], checks[1]["path"])
+        self.assertFalse(checks[2]["valid"])
+        self.assertEqual(checks[2]["path"], "")
+
     def test_plaintext_secret_keys_are_detected_without_returning_values(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             env_path = Path(temp_dir) / ".env"

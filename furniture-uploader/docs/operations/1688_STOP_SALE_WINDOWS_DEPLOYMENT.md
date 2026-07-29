@@ -1,6 +1,6 @@
 # 1688 停产下架 Windows 执行机部署
 
-更新日期：2026-07-18
+更新日期：2026-07-28
 
 ## Gitee 来源
 
@@ -30,8 +30,9 @@ git clone --branch deploy/1688-stop-sale-windows-20260718 `
 6. 把敏感配置写入执行任务用户的环境变量，不写项目文件。
 7. 验证并应用 `sql/360_ali1688_stop_sale_audit.sql`。
 8. 运行执行机 preflight。
-9. 先跑 preview，再跑单店单条 execute。
-10. 核对共享锁、运营群消息、1688/JST 报告和新库逐项审计。
+9. 先跑 preview，再分别跑乐畅、工莱单店单条 execute。
+10. 两条单店 Canary 闭环后，再跑乐畅 + 工莱各 1 条双账号 Canary。
+11. 核对账号锁、聚水潭全局锁、运营群消息、1688/JST 报告和新库逐项审计。
 
 当前 `npm ci` 审计基线报告 5 项依赖告警（1 低、3 中、1 高）。部署测试阶段不得直接执行 `npm audit fix --force`，避免未经回归的破坏性升级；由执行机 AI 单独输出审计报告后再安排依赖治理。
 
@@ -73,13 +74,15 @@ preview 只读取旧业务源，不写任何数据库。execute 在打开浏览�
 
 ## 共享锁
 
-真实 `execute` 默认获取：
+真实 `execute` 使用三层互斥：
 
-`E:\1688\1688-script-new\artifacts\locks\ali1688_full_cycle.lock`
+- 每账号浏览器锁：`E:\1688\1688-script-new\artifacts\locks\ali1688_account_<account_key>.lock`。
+- 聚水潭全局锁：`E:\1688\1688-script-new\artifacts\locks\ali1688_jushuitan.lock`。
+- 日批管理器单实例锁：`E:\1688\1688-script-new\artifacts\locks\ali1688_stop_sale_daily.lock`。
 
-现有爬虫必须经正式 orchestrator 启动。锁等待超时返回 `75`，下架浏览器不会启动，并向运营群发送延迟执行通知。
+共享爬虫 Worker 和下架 pipeline 必须使用同一个账号锁协议。同一账号互斥，不同账号可并行；聚水潭阶段仍保持单路。账号锁等待超时返回 `75`，对应店铺浏览器不会启动，并向运营群发送延迟执行通知。
 
-不要在共机生产环境使用 `--no-shared-lock`。
+不要在共机生产环境使用 `--no-shared-lock`。双店并发时也不要给不同账号传入同一个 `--shared-lock-path`。
 
 ## Preflight
 
@@ -149,7 +152,9 @@ python scripts\run_1688_stop_sale_pipeline.py `
 
 execute 使用统一 `run_id` 关联 1688 JSONL、聚水潭 JSONL 和新库两张审计表。preview 不创建新库记录。
 
-真实执行期间 pipeline 每 30 秒刷新 `app.ali1688_stop_sale_run.updated_at`。跨机器门禁按最近心跳判断活跃批次；单次心跳遇到瞬时数据库通信错误时会有限重试，连续失败后当前 pipeline 才会终止自己启动的子进程树并记录异常，避免线上操作脱离正式审计。
+真实执行期间 pipeline 每 30 秒刷新 `app.ali1688_stop_sale_run.updated_at`。跨机器门禁按最近心跳判断活跃批次；心跳连接和 SQL 语句都使用有限超时，瞬时数据库通信错误会有限重试，连续失败后当前 pipeline 才会终止自己启动的子进程树并记录异常，避免数据库锁等待使阶段超时失效或线上操作脱离正式审计。
+
+锁文件记录主机名、PID、令牌和 run_id。同机锁拥有者进程退出且超过 30 秒保护期后，后续任务可以自动回收该孤儿锁；不同主机的锁不能按本机 PID 推断失效，仍按跨机器超时规则保守处理。禁止人工盲删锁文件。
 
 单条 canary 建议使用上面的 15 分钟/10 分钟超时。按店铺执行 10 条时默认上限分别为 45 分钟和 20 分钟。超时只终止该 pipeline 子进程拥有的 PID 进程树，写入 `PipelineStageTimeoutError`、审计和钉钉，不允许使用全局关闭 Edge 的命令。
 
@@ -171,25 +176,46 @@ python rpa\sku_offline_main.py `
 
 ## 共机 Worker 门禁
 
-`YYDD-1688-Crawler-Worker` 不使用全局锁。真实下架前必须先确认 `app.crawler_task` 中没有 `claimed/preflight/running/persisted/validating` 的 task/variant，再暂停计划任务：
+共享爬虫 Worker 不再要求整机暂停。Worker 在打开账号 Profile 前获取 `ali1688_account_<account_key>.lock`，并持有到任务校验和自有浏览器清理完成；下架 pipeline 使用同一锁。
+
+pipeline 只检查当前账号在 `app.crawler_task` 中的 `claimed/preflight/running/persisted/validating` 任务。无关账号可以继续爬数；同账号仍有活动任务或账号锁时，对应下架店铺等待或以锁超时退出。不要手工删除锁，也不要全局结束 Edge、WebDriver 或 Python 进程。
+
+执行前只读确认：
 
 ```powershell
-Stop-ScheduledTask -TaskName "YYDD-1688-Crawler-Worker"
-
 Get-CimInstance Win32_Process |
   Where-Object {
-    $_.CommandLine -and $_.CommandLine.Contains("run_crawler_task_worker.py")
+    $_.CommandLine -and (
+      $_.CommandLine.Contains("run_crawler_task_worker.py") -or
+      $_.CommandLine.Contains("run_1688_stop_sale_pipeline.py")
+    )
   } |
-  Select-Object ProcessId, ParentProcessId
+  Select-Object ProcessId, ParentProcessId, CreationDate, CommandLine
 ```
 
-进程查询必须为空。pipeline 会再次检查计划任务状态、残留 Worker 进程和新库活动任务；任一不满足都会在打开浏览器前拒绝 execute。执行完成后恢复：
+发现同账号任务时等待其自然结束；只有 PID 不存在且锁元数据确认已失去所有者时，才按正式恢复流程处理陈旧锁。首轮通过后再安装 Windows 任务计划，不能在部署当天直接启动全量。
+
+## 双店并发上线步骤
+
+1. 分别完成乐畅和工莱各 1 条单店 Canary，并确认 1688、聚水潭、正式审计和钉钉一致。
+2. 重新运行 preflight，确认 `shared_lock.scope=account_key`、4 个账号键合法、管理器锁和聚水潭锁未被其他任务占用。
+3. 选择乐畅、工莱各 1 条未完成任务做双账号 Canary；不要复用已成功任务。
+4. 双账号 Canary 通过后，才允许运行 2 店日批：
 
 ```powershell
-Start-ScheduledTask -TaskName "YYDD-1688-Crawler-Worker"
+python scripts\manage_1688_stop_sale_daily.py run `
+  --date <业务日期> `
+  --mode execute `
+  --yes `
+  --max-parallel-stores 2 `
+  --batch-size 10 `
+  --batch-max-attempts 2 `
+  --crawler-task-wait-seconds 4800 `
+  --shared-runtime-root E:\1688\1688-script-new `
+  --jushuitan-root ..\jushuitan-sku-offline-batch
 ```
 
-首轮通过后再安装 Windows 任务计划，不能在部署当天直接启动全量。
+先稳定运行 2 店，不直接扩大到 4 店。每个店铺内部仍串行；聚水潭即使有多个店铺等待也只会单路执行。
 
 ## 运营通知
 

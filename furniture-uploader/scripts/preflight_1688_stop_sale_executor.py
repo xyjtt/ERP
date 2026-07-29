@@ -40,6 +40,7 @@ REQUIRED_PYTHON_MODULES = (
     "pyodbc",
 )
 MEMBER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.:@-]{2,160}$")
+ACCOUNT_KEY_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 
 
 def parse_args() -> argparse.Namespace:
@@ -124,6 +125,33 @@ def load_account_identity_flags(accounts_path: Path) -> dict[str, bool]:
     return result
 
 
+def build_account_lock_checks(
+    script_1688_root: Path,
+    store_accounts: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    checks: list[dict[str, Any]] = []
+    for binding in store_accounts:
+        account_key = str(binding.get("account_key") or "").strip()
+        valid = bool(ACCOUNT_KEY_PATTERN.fullmatch(account_key))
+        lock_path = (
+            script_1688_root
+            / "artifacts"
+            / "locks"
+            / f"ali1688_account_{account_key}.lock"
+            if valid
+            else None
+        )
+        checks.append(
+            {
+                "account_key": account_key,
+                "valid": valid,
+                "path": str(lock_path) if lock_path is not None else "",
+                "currently_present": bool(lock_path and lock_path.exists()),
+            }
+        )
+    return checks
+
+
 def build_report(args: argparse.Namespace) -> dict[str, Any]:
     script_1688_root = Path(args.script_1688_root).resolve()
     config_dir = Path(args.config_dir).resolve()
@@ -155,7 +183,13 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         )
 
     lock_module = script_1688_root / "src" / "runtime" / "global_lock.py"
-    lock_path = script_1688_root / "artifacts" / "locks" / "ali1688_full_cycle.lock"
+    account_lock_checks = build_account_lock_checks(script_1688_root, store_accounts)
+    manager_lock_path = (
+        script_1688_root / "artifacts" / "locks" / "ali1688_stop_sale_daily.lock"
+    )
+    jushuitan_lock_path = (
+        script_1688_root / "artifacts" / "locks" / "ali1688_jushuitan.lock"
+    )
     source_credentials = hydrate_source_database_credentials(script_1688_root)
     source_env = {
         "STOP_SALE_SOURCE_SQLSERVER_HOST": bool(
@@ -235,6 +269,8 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         "all_profiles_exist": bool(profile_checks) and all(item["profile_exists"] for item in profile_checks),
         "all_account_identities_configured": bool(profile_checks)
         and all(item["expected_member_id_configured"] for item in profile_checks),
+        "all_account_lock_keys_valid": bool(account_lock_checks)
+        and all(item["valid"] for item in account_lock_checks),
         "no_plaintext_jushuitan_secrets": not plaintext_keys,
     }
     return {
@@ -264,8 +300,16 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             and all(item["expected_member_id_configured"] for item in profile_checks),
         },
         "shared_lock": {
-            "path": str(lock_path),
-            "currently_present": lock_path.exists(),
+            "scope": "account_key",
+            "account_locks": account_lock_checks,
+            "manager_lock": {
+                "path": str(manager_lock_path),
+                "currently_present": manager_lock_path.exists(),
+            },
+            "jushuitan_lock": {
+                "path": str(jushuitan_lock_path),
+                "currently_present": jushuitan_lock_path.exists(),
+            },
         },
         "plaintext_env_keys": plaintext_keys,
         "python_runtime": {

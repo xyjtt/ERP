@@ -18,6 +18,8 @@ from run_1688_sku_replace_pipeline import (  # noqa: E402
     build_jushuitan_environment,
     build_pipeline_notification,
     count_statuses,
+    resolve_pipeline_account,
+    resolve_shared_lock_path,
 )
 
 
@@ -31,6 +33,12 @@ class Run1688SkuReplacePipelineTests(unittest.TestCase):
             skip_login=True,
             no_notify=False,
             shared_runtime_root="D:/runtime/1688",
+            shared_lock_path="",
+            no_shared_lock=False,
+            lock_stale_seconds=21600,
+            lock_wait_seconds=0,
+            lock_poll_seconds=10,
+            account_key="",
         )
 
     def test_1688_command_uses_replace_system(self) -> None:
@@ -48,6 +56,23 @@ class Run1688SkuReplacePipelineTests(unittest.TestCase):
         args = build_argument_parser().parse_args(["--file", "replace.csv"])
 
         self.assertEqual(args.lock_wait_seconds, 0)
+
+    def test_shared_lock_is_scoped_to_account(self) -> None:
+        args = self.build_args()
+
+        path = resolve_shared_lock_path(args, "gonglai")
+
+        self.assertEqual(path.name, "ali1688_account_gonglai.lock")
+
+    def test_pipeline_account_requires_one_store(self) -> None:
+        args = self.build_args()
+        tasks = [
+            SimpleNamespace(store_name="STORE-A"),
+            SimpleNamespace(store_name="STORE-B"),
+        ]
+
+        with self.assertRaisesRegex(RuntimeError, "exactly one"):
+            resolve_pipeline_account(args, tasks)
 
     def test_jushuitan_command_uses_sync_action(self) -> None:
         command = build_jushuitan_command(

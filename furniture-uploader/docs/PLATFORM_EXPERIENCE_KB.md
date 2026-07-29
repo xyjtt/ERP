@@ -10,6 +10,7 @@
 
 ## 2026-07-27 Long-Running Stop-Sale Recovery Findings
 
+- 本节的整机暂停 Worker 是历史恢复策略；2026-07-28 起由共享 `account_key` 锁和账号级 `crawler_task` 门禁取代。
 - 长时间每日下架不能假设 Crawler Worker 在外层上下文中一直保持 Disabled。其他计划任务或人工操作可能在中途重新启用它，因此每个浏览器批次尝试前都要重新检查计划任务状态、Worker 进程和 Profile Edge 进程。
 - 重申暂停时只允许操作指定的 `YYDD-1688-Crawler-Worker` 任务并等待其拥有的进程自然退出；未知 Profile Edge 必须等待或安全失败，不能通过全局结束 Python/Edge/Node 兜底。
 - Worker 或活动爬虫保护失败属于“批次已创建但未执行”的终态，应写 `not_attempted`、Pipeline Summary、审计结束状态和钉钉通知。仅打印异常或只发管理器总通知不足以追踪单批次。
@@ -189,6 +190,18 @@
 ### 坑 8：显式 Edge 路径不能和系统其他安装目录混合选版本
 
 当 `browser_binary_path` 已指定时，驱动版本检测只能检查该路径所属的 `Application` 目录。继续扫描 `PROGRAMFILES/LOCALAPPDATA` 并选最高版本，会把另一套 Edge 的版本误认为目标浏览器版本，最终造成驱动错配。只有未提供显式路径时才允许扫描系统默认安装目录。
+
+### 坑 9：多店并发不能继续使用整机浏览器全局锁
+
+不同店铺使用独立账号 Profile 时，整机全局锁会让无关账号互相阻塞；直接取消锁又会让爬虫和下架同时操作同一 Profile。正确边界是：
+
+1. 浏览器锁按 `account_key` 命名，共享爬虫 Worker 和下架 pipeline 使用同一锁文件协议。
+2. `crawler_task` 活跃检查必须带当前 `account_key`，近期下架审计必须带当前店铺。
+3. 同店商品、SKU 和重试保持串行，只允许不同账号店铺并行。
+4. 聚水潭这类共享单会话资源单独使用全局锁，不随 1688 店铺并发。
+5. 管理器仍需单实例锁，避免操作者重复启动两个完整日批。
+
+`--shared-lock-path` 是兼容旧入口的显式覆盖；并发日批不得把多个账号配置到同一个自定义锁文件。
 
 ## 知识库更新规则
 

@@ -155,6 +155,7 @@ class StopSaleAuditTests(unittest.TestCase):
         self.assertIn("status = 'running'", statement)
         self.assertIn("finished_at IS NULL", statement)
         self.assertEqual(cursor.execute.call_args.args[1], ("run-1",))
+        self.assertEqual(connection.timeout, 15)
         connection.commit.assert_called_once_with()
 
     def test_heartbeat_rejects_a_run_that_is_no_longer_active(self) -> None:
@@ -203,6 +204,8 @@ class StopSaleAuditTests(unittest.TestCase):
             StopSaleAuditRepository(config).heartbeat_run("run-1")
 
         self.assertEqual(verification_cursor.execute.call_count, 2)
+        self.assertEqual(update_connection.timeout, 15)
+        self.assertEqual(verification_connection.timeout, 15)
         verification_connection.commit.assert_called_once_with()
 
     def test_heartbeat_retries_a_transient_database_error(self) -> None:
@@ -226,6 +229,45 @@ class StopSaleAuditTests(unittest.TestCase):
         self.assertEqual(connect.call_count, 2)
         sleep.assert_called_once_with(2.0)
         connection.commit.assert_called_once_with()
+
+    def test_active_crawler_query_is_scoped_to_account_key(self) -> None:
+        object_result = SimpleNamespace(fetchone=lambda: (1,))
+        count_result = SimpleNamespace(fetchone=lambda: (2,))
+        cursor = SimpleNamespace()
+        cursor.execute = unittest.mock.Mock(side_effect=[object_result, count_result])
+        connection = unittest.mock.MagicMock()
+        connection.__enter__.return_value = connection
+        connection.cursor.return_value = cursor
+        config = SimpleNamespace(schema="app")
+
+        with patch("stop_sale_audit.connect_app_database", return_value=connection):
+            count = StopSaleAuditRepository(config).count_active_crawler_tasks("gonglai")
+
+        self.assertEqual(count, 2)
+        statement, params = cursor.execute.call_args_list[1].args
+        self.assertIn("AND account_key = ?", statement)
+        self.assertEqual(params, ("gonglai",))
+
+    def test_recent_stop_sale_query_can_filter_current_store_only(self) -> None:
+        count_result = SimpleNamespace(fetchone=lambda: (1,))
+        cursor = SimpleNamespace()
+        cursor.execute = unittest.mock.Mock(return_value=count_result)
+        connection = unittest.mock.MagicMock()
+        connection.__enter__.return_value = connection
+        connection.cursor.return_value = cursor
+        config = SimpleNamespace(schema="app")
+
+        with patch("stop_sale_audit.connect_app_database", return_value=connection):
+            count = StopSaleAuditRepository(config).count_recent_active_stop_sale_runs(
+                240,
+                ["STORE-A"],
+            )
+
+        self.assertEqual(count, 1)
+        statement, params = cursor.execute.call_args.args
+        self.assertIn("JOIN [app].[ali1688_stop_sale_item]", statement)
+        self.assertIn("item.store_name IN (?)", statement)
+        self.assertEqual(params, (-240, "STORE-A"))
 
 
 if __name__ == "__main__":

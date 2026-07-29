@@ -262,7 +262,22 @@ def build_connection_string(config: StopSaleAppConfig) -> str:
 def connect_app_database(config: StopSaleAppConfig):
     import pyodbc
 
-    return pyodbc.connect(build_connection_string(config), timeout=config.timeout_seconds)
+    attempts = max(1, int(os.getenv("STOP_SALE_APP_SQLSERVER_CONNECT_ATTEMPTS", "3")))
+    retry_seconds = max(
+        0.0,
+        float(os.getenv("STOP_SALE_APP_SQLSERVER_CONNECT_RETRY_SECONDS", "2")),
+    )
+    for attempt in range(attempts):
+        try:
+            return pyodbc.connect(
+                build_connection_string(config),
+                timeout=config.timeout_seconds,
+            )
+        except pyodbc.Error:
+            if attempt + 1 >= attempts:
+                raise
+            time.sleep(retry_seconds)
+    raise RuntimeError("SQL Server connection retry loop exited unexpectedly")
 
 
 def normalized_identity_part(value: Any) -> str:
@@ -355,34 +370,57 @@ class StopSaleAuditRepository:
             "ready": not missing,
         }
 
-    def count_active_crawler_tasks(self) -> int:
+    def count_active_crawler_tasks(self, account_key: str = "") -> int:
+        normalized_account_key = str(account_key or "").strip()
         with connect_app_database(self.config) as connection:
             cursor = connection.cursor()
             if cursor.execute("SELECT OBJECT_ID('app.crawler_task', 'U')").fetchone()[0] is None:
                 return 0
-            row = cursor.execute(
-                """
+            sql = """
                 SELECT COUNT(*)
                 FROM app.crawler_task
                 WHERE task_kind IN ('task', 'variant')
                   AND status IN ('claimed', 'preflight', 'running', 'persisted', 'validating')
                 """
-            ).fetchone()
+            params: tuple[Any, ...] = ()
+            if normalized_account_key:
+                sql += " AND account_key = ?"
+                params = (normalized_account_key,)
+            query = cursor.execute(sql, params) if params else cursor.execute(sql)
+            row = query.fetchone()
             return int(row[0] or 0)
 
-    def count_recent_active_stop_sale_runs(self, max_age_minutes: int = 240) -> int:
+    def count_recent_active_stop_sale_runs(
+        self,
+        max_age_minutes: int = 240,
+        store_names: Iterable[str] | None = None,
+    ) -> int:
         age_minutes = max(1, int(max_age_minutes))
+        normalized_stores = sorted(
+            {str(item or "").strip() for item in (store_names or []) if str(item or "").strip()}
+        )
         run_table = self._table("ali1688_stop_sale_run")
+        item_table = self._table("ali1688_stop_sale_item")
+        joins = ""
+        store_filter = ""
+        params: list[Any] = [-age_minutes]
+        if normalized_stores:
+            joins = f" JOIN {item_table} AS item ON item.run_id = run_row.run_id"
+            placeholders = ", ".join("?" for _ in normalized_stores)
+            store_filter = f" AND item.store_name IN ({placeholders})"
+            params.extend(normalized_stores)
         with connect_app_database(self.config) as connection:
             row = connection.cursor().execute(
                 f"""
-                SELECT COUNT(*)
-                FROM {run_table}
-                WHERE status = 'running'
-                  AND finished_at IS NULL
-                  AND COALESCE(updated_at, started_at) >= DATEADD(MINUTE, ?, SYSUTCDATETIME())
+                SELECT COUNT(DISTINCT run_row.run_id)
+                FROM {run_table} AS run_row
+                {joins}
+                WHERE run_row.status = 'running'
+                  AND run_row.finished_at IS NULL
+                  AND COALESCE(run_row.updated_at, run_row.started_at) >= DATEADD(MINUTE, ?, SYSUTCDATETIME())
+                  {store_filter}
                 """,
-                (-age_minutes,),
+                tuple(params),
             ).fetchone()
             return int(row[0] or 0)
 
@@ -399,9 +437,14 @@ class StopSaleAuditRepository:
         import pyodbc
 
         run_table = self._table("ali1688_stop_sale_run")
+        query_timeout_seconds = max(
+            1,
+            int(getattr(self.config, "timeout_seconds", 15) or 15),
+        )
         for attempt in range(max_attempts):
             try:
                 with connect_app_database(self.config) as connection:
+                    connection.timeout = query_timeout_seconds
                     cursor = connection.cursor()
                     active_row = cursor.execute(
                         f"""
@@ -426,6 +469,7 @@ class StopSaleAuditRepository:
                 # OUTPUT result even when the UPDATE committed. Verify through a
                 # fresh connection before treating the run as externally closed.
                 with connect_app_database(self.config) as verification_connection:
+                    verification_connection.timeout = query_timeout_seconds
                     verification_cursor = verification_connection.cursor()
                     verified_row = verification_cursor.execute(
                         f"""

@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
@@ -21,8 +23,10 @@ from manage_1688_stop_sale_daily import (
     _load_preview_report,
     _load_pipeline_result,
     build_argument_parser,
+    build_preflight_command,
     build_pipeline_command,
     build_preview_command,
+    ensure_worker_paused,
     paused_worker,
     run_daily,
     split_store_input,
@@ -30,6 +34,15 @@ from manage_1688_stop_sale_daily import (
 
 
 class Manage1688StopSaleDailyTests(unittest.TestCase):
+    def test_scheduled_task_wrapper_forwards_store_parallelism(self) -> None:
+        source = (SCRIPTS_ROOT / "manage_1688_stop_sale_daily_task.ps1").read_text(
+            encoding="utf-8-sig"
+        )
+
+        self.assertIn("[int]$MaxParallelStores = 1", source)
+        self.assertIn('"--max-parallel-stores", [string]$MaxParallelStores', source)
+        self.assertIn('"-MaxParallelStores", [string]$MaxParallelStores', source)
+
     @staticmethod
     def write_store_csv(path: Path, rows: list[tuple[str, str, str]]) -> None:
         content = "store_name,product_id,online_sku\n" + "".join(
@@ -73,6 +86,9 @@ class Manage1688StopSaleDailyTests(unittest.TestCase):
         self.assertEqual(command[command.index("--run-id") + 1], "daily_run_s01")
         self.assertEqual(command[command.index("--1688-timeout-seconds") + 1], "3600")
         self.assertEqual(command[command.index("--jushuitan-timeout-seconds") + 1], "1800")
+        self.assertEqual(command[command.index("--crawler-task-wait-seconds") + 1], "4800")
+        self.assertEqual(command[command.index("--source-database") + 1], "JSReportReplica")
+        self.assertEqual(command[command.index("--source-table") + 1], "app.op_stop_sale")
 
     def test_preview_command_supplies_shared_runtime_for_source_credentials(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -83,6 +99,16 @@ class Manage1688StopSaleDailyTests(unittest.TestCase):
             command[command.index("--shared-runtime-root") + 1],
             str(Path("E:/1688/1688-script-new").resolve()),
         )
+        self.assertEqual(command[command.index("--database") + 1], "JSReportReplica")
+        self.assertEqual(command[command.index("--table") + 1], "app.op_stop_sale")
+        self.assertEqual(command[command.index("--driver") + 1], "SQL Server")
+
+    def test_app_source_preflight_does_not_require_legacy_source_credentials(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            args = self.build_args(Path(temp_dir), mode="preview")
+            command = build_preflight_command(args)
+
+        self.assertIn("--existing-input", command)
 
     def test_scheduler_defaults_to_current_business_date_and_small_recoverable_batches(self) -> None:
         args = build_argument_parser().parse_args(["run"])
@@ -93,6 +119,9 @@ class Manage1688StopSaleDailyTests(unittest.TestCase):
         self.assertEqual(args.batch_size, 10)
         self.assertEqual(args.batch_max_attempts, 2)
         self.assertEqual(args.batch_retry_backoff_seconds, 60)
+        self.assertEqual(args.crawler_task_wait_seconds, 4800)
+        self.assertEqual(args.source_database, "JSReportReplica")
+        self.assertEqual(args.source_table, "app.op_stop_sale")
         self.assertIn("management_tab_mismatch", SAFETY_ERROR_CATEGORIES)
 
     def test_store_input_is_split_into_recoverable_batches(self) -> None:
@@ -284,6 +313,42 @@ class Manage1688StopSaleDailyTests(unittest.TestCase):
 
         self.assertEqual(actions, ["Disable", "Stop", "Enable", "Start"])
         self.assertEqual(lifecycle["restored"]["scheduled_task_state"], "Running")
+
+    def test_missing_worker_task_is_safe_when_no_owned_processes_exist(self) -> None:
+        missing = {
+            "scheduled_task_exists": False,
+            "scheduled_task_state": "",
+            "worker_process_count": 0,
+            "profile_edge_process_count": 0,
+        }
+        with (
+            patch("manage_1688_stop_sale_daily.query_crawler_worker_state", return_value=missing),
+            patch("manage_1688_stop_sale_daily._powershell_task_action") as task_action,
+        ):
+            with paused_worker("YYDD-1688-Crawler-Worker") as lifecycle:
+                self.assertEqual(lifecycle["paused"], missing)
+
+        task_action.assert_not_called()
+        self.assertEqual(lifecycle["restored"], missing)
+
+    def test_running_manager_profile_is_allowed_during_worker_recheck(self) -> None:
+        manager_profile = {
+            "scheduled_task_exists": False,
+            "scheduled_task_state": "",
+            "worker_process_count": 0,
+            "profile_edge_process_count": 1,
+        }
+
+        with patch(
+            "manage_1688_stop_sale_daily.query_crawler_worker_state",
+            return_value=manager_profile,
+        ):
+            result = ensure_worker_paused(
+                "YYDD-1688-Crawler-Worker",
+                allow_profile_edges=True,
+            )
+
+        self.assertEqual(result["paused"], manager_profile)
 
     def test_no_tasks_is_a_successful_noop(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -544,9 +609,9 @@ class Manage1688StopSaleDailyTests(unittest.TestCase):
         self.assertEqual(return_code, 0)
         self.assertEqual(summary["status"], "success")
         self.assertEqual(len(summary["batch_attempts"]), 2)
+        self.assertEqual(summary["worker_status"], "restored")
         self.assertEqual(summary["worker_pause_check_count"], 2)
         self.assertEqual(len(summary["worker_reassertions"]), 1)
-        self.assertEqual(summary["worker_reassertions"][0]["actions"], ["Disable", "Stop"])
         self.assertEqual(ensure_paused.call_count, 2)
         self.assertEqual(second_command[second_command.index("--file") + 1], str(retry_file.resolve()))
 
@@ -555,6 +620,86 @@ class Manage1688StopSaleDailyTests(unittest.TestCase):
             result = _load_pipeline_result(Path(temp_dir), "missing", 0)
 
         self.assertEqual(result["state"], "failed")
+
+    def test_store_parallelism_is_bounded_and_default_remains_sequential(self) -> None:
+        for max_parallel, expected_peak in ((1, 1), (2, 2)):
+            with self.subTest(max_parallel=max_parallel), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                args = self.build_args(root / "scheduler")
+                args.max_parallel_stores = max_parallel
+                preview = {
+                    "selected_count": 3,
+                    "required_null_counts": {},
+                    "per_store_preview_csv": [
+                        {"store_name": f"STORE-{index}", "count": 1, "path": str(root / f"{index}.csv")}
+                        for index in range(1, 4)
+                    ],
+                }
+                state_lock = threading.Lock()
+                active = 0
+                peak = 0
+
+                def fake_store_runner(*, index: int, item: dict, **_kwargs):
+                    nonlocal active, peak
+                    with state_lock:
+                        active += 1
+                        peak = max(peak, active)
+                    time.sleep(0.03)
+                    with state_lock:
+                        active -= 1
+                    return {
+                        "index": index,
+                        "store": {
+                            "store_name": item["store_name"],
+                            "selected_count": 1,
+                            "state": "success",
+                            "batch_count": 0,
+                            "attempted_batch_count": 0,
+                            "completed_batch_count": 0,
+                            "safety_stopped": False,
+                            "run_ids": [],
+                            "batches": [],
+                            "batch_attempts": [],
+                        },
+                        "worker_pause_check_count": 0,
+                        "worker_reassertions": [],
+                        "exhausted_retry_batch_count": 0,
+                        "infrastructure_failed": False,
+                    }
+
+                @contextmanager
+                def fake_paused_worker(_task_name):
+                    yield {
+                        "before": {"scheduled_task_state": "Running"},
+                        "paused": {"scheduled_task_state": "Disabled"},
+                        "restored": {"scheduled_task_state": "Running"},
+                    }
+
+                with (
+                    patch(
+                        "manage_1688_stop_sale_daily._run_capture",
+                        side_effect=[(0, json.dumps({"status": "ok"})), (0, json.dumps(preview))],
+                    ),
+                    patch("manage_1688_stop_sale_daily.build_manager_lock", return_value=nullcontext()),
+                    patch(
+                        "manage_1688_stop_sale_daily._run_store_batches",
+                        side_effect=fake_store_runner,
+                    ) as store_runner,
+                    patch(
+                        "manage_1688_stop_sale_daily.paused_worker",
+                        side_effect=fake_paused_worker,
+                    ) as paused,
+                    patch("manage_1688_stop_sale_daily.send_manager_notification", return_value=False),
+                ):
+                    return_code, summary = run_daily(args)
+
+                self.assertEqual(return_code, 0)
+                self.assertEqual(summary["status"], "success")
+                self.assertEqual(summary["worker_status"], "restored")
+                self.assertEqual([row["store_name"] for row in summary["stores"]], ["STORE-1", "STORE-2", "STORE-3"])
+                self.assertEqual(store_runner.call_count, 3)
+                self.assertEqual(peak, expected_peak)
+                paused.assert_called_once_with("YYDD-1688-Crawler-Worker")
 
 
 if __name__ == "__main__":

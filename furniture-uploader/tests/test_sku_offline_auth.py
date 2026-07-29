@@ -116,7 +116,11 @@ class SkuOfflineAuthTests(unittest.TestCase):
                 )
 
     def test_unproven_identity_is_retryable_login_failure_not_store_mismatch(self) -> None:
+        attempts = 0
+
         def runner(command, **_kwargs):
+            nonlocal attempts
+            attempts += 1
             return subprocess.CompletedProcess(
                 command,
                 4,
@@ -132,6 +136,25 @@ class SkuOfflineAuthTests(unittest.TestCase):
                     "常州工莱家具",
                     command_runner=runner,
                 )
+
+        self.assertEqual(attempts, 2)
+
+    def test_unproven_identity_is_verified_once_more_before_success(self) -> None:
+        return_codes = iter((4, 0))
+
+        def runner(command, **_kwargs):
+            return subprocess.CompletedProcess(command, next(return_codes), stdout="")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_root = self.create_runtime(Path(temp_dir))
+            result = ensure_1688_authenticated_session(
+                runtime_root,
+                "gonglai",
+                "常州工莱家具",
+                command_runner=runner,
+            )
+
+        self.assertEqual(result["status"], "success")
 
     def test_nonzero_exit_includes_sanitized_subprocess_diagnostic(self) -> None:
         def runner(command, **_kwargs):

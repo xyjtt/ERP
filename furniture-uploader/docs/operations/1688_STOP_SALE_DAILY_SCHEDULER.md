@@ -9,13 +9,17 @@ Windows 执行机每天 13:00 执行一次停产下架闭环：
 3. 1688 成功或已下架后，继续执行聚水潭 1688 链接清除。
 4. 单商品业务异常记录审计并发送钉钉，继续后续商品。
 5. 登录失效、风控、店铺错配、浏览器窗口关闭等安全异常只停止当前店铺。
-6. 执行前暂停 `YYDD-1688-Crawler-Worker`，执行后恢复原状态。
+6. 共享爬虫 Worker 与下架按 `account_key` 互斥；无关账号无需暂停。
 
 计划任务默认读取执行当天的指标日期，不自动补跑前几天。业务源当天通知会继续包含此前未成功的 SKU，系统只需保证当天输入在本次任务内充分重试和完整留痕。
 
 脚本不会把最后一个在线 SKU 自动改成整商品下架。1688 平台拒绝的业务规则会进入异常终态并通知钉钉，不会阻塞其他店铺。
 
 执行顺序按“店铺 -> 商品 ID -> SKU”组织。同一店铺、同一商品 ID 的多个目标 SKU 在 1688 只打开一次编辑页，依次切换目标 SKU 后统一提交一次；每个 SKU 仍独立写入审计。聚水潭复用当前店铺和商品查询页，同组 SKU 依次清除链接，不重复切换店铺或重新查询同一商品。
+
+首轮并发只启用 2 个店铺。不同账号的 1688 阶段可以并行；同店批次、同商品 SKU 和重试保持串行；聚水潭通过全局锁保持单路执行。
+
+账号锁包含主机名和拥有者 PID。同机拥有者异常退出时，后续批次在保护期后自动回收孤儿锁；跨机器锁继续保守等待。审计心跳 SQL 有独立语句超时，不能无限占住账号锁或聚水潭锁。
 
 ## 部署路径
 
@@ -35,6 +39,8 @@ Set-Location $ProjectRoot
 
 建议在源数据 12:00 更新后，于北京时间 13:00 执行：
 
+以下 `-MaxParallelStores 2` 只在乐畅、工莱双账号 Canary 通过后使用；Canary 前保持默认值 1。
+
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass `
   -File scripts\manage_1688_stop_sale_daily_task.ps1 `
@@ -45,6 +51,7 @@ powershell -NoProfile -ExecutionPolicy Bypass `
   -JushuitanRoot $JushuitanRoot `
   -BatchSize 10 `
   -BatchMaxAttempts 2 `
+  -MaxParallelStores 2 `
   -BatchRetryBackoffSeconds 60 `
   -StopSale1688TimeoutSeconds 3600 `
   -StopSaleJushuitanTimeoutSeconds 1800
@@ -66,7 +73,8 @@ powershell -NoProfile -ExecutionPolicy Bypass `
   -ProjectRoot $ProjectRoot `
   -SharedRuntimeRoot $SharedRuntimeRoot `
   -JushuitanRoot $JushuitanRoot `
-  -BatchSize 10
+  -BatchSize 10 `
+  -MaxParallelStores 2
 
 powershell -NoProfile -ExecutionPolicy Bypass `
   -File scripts\manage_1688_stop_sale_daily_task.ps1 `
@@ -75,7 +83,8 @@ powershell -NoProfile -ExecutionPolicy Bypass `
   -ProjectRoot $ProjectRoot `
   -SharedRuntimeRoot $SharedRuntimeRoot `
   -JushuitanRoot $JushuitanRoot `
-  -BatchSize 10
+  -BatchSize 10 `
+  -MaxParallelStores 2
 ```
 
 `run` 使用 `--skip-login` 复用已登录 Profile，不会出现要求人工按回车的登录流程。若 Profile 登录态失效，会执行一次账号恢复；只有已识别滑块可受限自动处理最多 4 次。未解决验证或页面异常记录、审计并通知，只有真实店铺/`member_id` 不匹配停止对应店铺。
@@ -95,7 +104,7 @@ powershell -NoProfile -ExecutionPolicy Bypass `
 - `state`、`enabled`：计划任务当前状态。
 - `last_run_time`、`last_task_result`：上次运行时间和 Windows 结果码。
 - `next_run_time`：下一次计划运行时间。
-- `latest_summary`：最近一批的业务日期、选中数量、每店批次、Worker 状态、异常状态和日志路径。
+- `latest_summary`：最近一批的业务日期、选中数量、并发店铺数、每店批次、账号锁状态、异常状态和日志路径。
 
 任务管理命令：
 
@@ -163,9 +172,9 @@ ORDER BY updated_at DESC;
 | `completed_with_exceptions` | 有商品业务异常，但审计和通知已完成 | 是 |
 | `no_tasks` | 该业务日期没有待处理数据 | 不需要 |
 | `preview_only` | 只取数和生成报告，没有线上操作 | 不适用 |
-| `failed` | 预检、数据库、Worker、锁、进程或审计基础设施失败 | 按报告处理，不能假设完成 |
+| `failed` | 预检、数据库、账号锁、进程或审计基础设施失败 | 按报告处理，不能假设完成 |
 
-商品不存在、SKU 不存在、已下架、唯一在线 SKU、活动限制、页面校验阻止等属于逐项异常或业务终态，记录后发送钉钉。登录失效、风控、店铺错配和浏览器窗口关闭属于安全异常，只停止当前店铺批次；不会全局关闭浏览器，也不会自动重试验证码。
+商品不存在、SKU 不存在、已下架、唯一在线 SKU、活动限制、页面校验阻止等属于逐项异常或业务终态，记录后发送钉钉。登录失效、风控、店铺错配和浏览器窗口关闭属于安全异常，只停止当前店铺批次；不会全局关闭浏览器。只有已识别滑块允许受限恢复，其他验证不自动处理。
 
 ## 超时和重试
 
@@ -186,4 +195,4 @@ python scripts\preflight_1688_stop_sale_executor.py `
   --jushuitan-root $JushuitanRoot
 ```
 
-必须看到 `status: ok`，并确认 `all_profiles_exist`、`shared_lock_module`、`app_audit_tables_exist`、聚水潭登录态和钉钉凭据检查通过。真实执行前，先用 `-Action preview` 核对昨日选中数量和四店分布。
+必须看到 `status: ok`，并确认 `all_profiles_exist`、`all_account_lock_keys_valid`、`shared_lock_module`、`app_audit_tables_exist`、聚水潭登录态和钉钉凭据检查通过。`shared_lock.scope` 必须是 `account_key`；真实执行前，先用 `-Action preview` 核对业务日期、选中数量和四店分布。

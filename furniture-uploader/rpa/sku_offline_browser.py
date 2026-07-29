@@ -5,7 +5,7 @@ import math
 import time
 import re
 from typing import Any
-from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qs, parse_qsl, urlencode, urljoin, urlparse, urlunparse
 from datetime import datetime
 
 from selenium.common.exceptions import TimeoutException
@@ -30,10 +30,17 @@ from sku_offline_tasks import OfflineTask, store_name_matches
 
 class SkuOfflineBrowser(BrowserRPA):
     MANAGEMENT_ALL_TAB_XPATHS = (
-        '//*[@role="tab" and normalize-space(.)="全部"]',
-        '//*[contains(@class, "tabs-tab") and normalize-space(.)="全部"]',
-        '//*[contains(@class, "next-tabs-tab") and normalize-space(.)="全部"]',
-        '//*[contains(@class, "ant-tabs-tab") and normalize-space(.)="全部"]',
+        '//*[@role="tab" and starts-with(normalize-space(.), "全部") '
+        'and not(starts-with(normalize-space(.), "全部商品"))]',
+        '//*[contains(concat(" ", normalize-space(@class), " "), " tabs-tab ") '
+        'and starts-with(normalize-space(.), "全部") '
+        'and not(starts-with(normalize-space(.), "全部商品"))]',
+        '//*[contains(concat(" ", normalize-space(@class), " "), " next-tabs-tab ") '
+        'and starts-with(normalize-space(.), "全部") '
+        'and not(starts-with(normalize-space(.), "全部商品"))]',
+        '//*[contains(concat(" ", normalize-space(@class), " "), " ant-tabs-tab ") '
+        'and starts-with(normalize-space(.), "全部") '
+        'and not(starts-with(normalize-space(.), "全部商品"))]',
     )
 
     def _emit_stage(self, stage: str, context: dict[str, Any]) -> None:
@@ -110,12 +117,29 @@ class SkuOfflineBrowser(BrowserRPA):
                 try:
                     if self._is_management_tab_active(element):
                         return False
-                    self.driver.execute_script("arguments[0].click();", element)
+                    self._click_management_tab(element)
                     self._pause(1.5)
                     return True
                 except Exception:
                     continue
         return False
+
+    def _click_management_tab(self, element: Any) -> str:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        try:
+            self.driver.execute_script(
+                "arguments[0].scrollIntoView({block: 'center', inline: 'nearest'});",
+                element,
+            )
+        except Exception:
+            pass
+        try:
+            element.click()
+            return "native"
+        except Exception:
+            self.driver.execute_script("arguments[0].click();", element)
+            return "javascript"
 
     @staticmethod
     def _is_management_tab_active(element: Any) -> bool:
@@ -181,7 +205,9 @@ class SkuOfflineBrowser(BrowserRPA):
 
             if not clicked and visible_elements:
                 try:
-                    self.driver.execute_script("arguments[0].click();", visible_elements[0])
+                    context["management_products_tab_click_mode"] = self._click_management_tab(
+                        visible_elements[0]
+                    )
                     clicked = True
                     context["management_products_tab_click"] = "all"
                 except Exception as exc:
@@ -699,13 +725,22 @@ class SkuOfflineBrowser(BrowserRPA):
         selector = self._resolve_selector(selectors.get("current_store_name", {}), context)
         if not self._selector_is_configured(selector):
             if required:
-                raise OfflineStoreMismatchError("current_store_name selector is required but not configured.")
+                raise OfflineTaskStateError(
+                    "current_store_name selector is required but not configured."
+                )
             return
         try:
             current_store_name = self._wait_for_element(selector).text.strip()
         except Exception as exc:
             if required:
-                raise OfflineStoreMismatchError("Unable to verify current 1688 store before offline execution.") from exc
+                message = "Unable to prove the current 1688 store identity before offline execution."
+                self._annotate_page_error_context(
+                    context,
+                    stage_name="store_context_check",
+                    error_text=message,
+                    error_category="login_required",
+                )
+                raise OfflineLoginRequiredError(message) from exc
             raise
         context["current_store_name"] = current_store_name
         expected_store_name = context.get("store_name", "").strip()
@@ -852,7 +887,22 @@ class SkuOfflineBrowser(BrowserRPA):
         self.driver.switch_to.default_content()
         frame_selector = self._resolve_selector(selectors.get("management_iframe", {}), context)
         if self._selector_is_configured(frame_selector):
-            iframe = self._wait_for_element(frame_selector)
+            try:
+                iframe = self._wait_for_element(frame_selector)
+            except TimeoutException:
+                context["management_frame_retry"] = "reload"
+                current_url = str(self.driver.current_url or "").strip()
+                if not current_url:
+                    raise
+                self.driver.switch_to.default_content()
+                navigation_timed_out = self._navigate_with_timeout_recovery(current_url)
+                if navigation_timed_out:
+                    context["management_frame_reload_navigation_timeout"] = "true"
+                self._pause(
+                    float(self.browser_config.get("management_frame_reload_wait_seconds", 8.0))
+                )
+                self._assert_not_redirected_to_login(context)
+                iframe = self._wait_for_element(frame_selector)
             self.driver.switch_to.frame(iframe)
             context["edit_entry_stage"] = "management_frame_entered"
 
@@ -1051,26 +1101,106 @@ class SkuOfflineBrowser(BrowserRPA):
         edit_button_in_row = selectors.get("edit_button_in_row", {})
         before_handles = list(self.driver.window_handles)
 
+        edit_button: Any
         if self._selector_is_configured(result_row_selector) and edit_button_in_row:
             row_element = self._wait_for_management_result_row(result_row_selector, context)
             edit_button = row_element.find_element(
                 BY_MAPPING.get(str(edit_button_in_row.get("by", "css")).strip().lower(), By.CSS_SELECTOR),
                 str(edit_button_in_row.get("value", "")).strip(),
             )
-            self.driver.execute_script("arguments[0].click();", edit_button)
-            context["edit_entry_stage"] = "management_edit_clicked"
         else:
             edit_button_selector = self._resolve_selector(selectors.get("edit_button", {}), context)
             if not self._selector_is_configured(edit_button_selector):
                 raise ValueError("Neither edit_button_in_row nor edit_button selector is configured.")
-            self._wait_for_element(edit_button_selector, clickable=True).click()
+            edit_button = self._wait_for_element(edit_button_selector, clickable=True)
 
-        self._switch_to_newest_window(before_handles)
+        edit_href = self._resolve_management_edit_href(edit_button, product_id)
+        if edit_href:
+            context["management_edit_href"] = edit_href
+        try:
+            self.driver.execute_script(
+                "arguments[0].scrollIntoView({block: 'center', inline: 'nearest'});",
+                edit_button,
+            )
+        except Exception:
+            pass
+        try:
+            edit_button.click()
+            context["management_edit_click_mode"] = "native"
+        except Exception:
+            self.driver.execute_script("arguments[0].click();", edit_button)
+            context["management_edit_click_mode"] = "javascript"
+        context["edit_entry_stage"] = "management_edit_clicked"
+
+        opened_new_window = self._switch_to_newest_window(before_handles)
+        if opened_new_window:
+            context["management_edit_navigation"] = "new_window"
+        elif self._is_expected_edit_page_url(str(self.driver.current_url or ""), product_id):
+            context["management_edit_navigation"] = "same_window"
+        elif edit_href:
+            self.driver.switch_to.default_content()
+            navigation_timed_out = self._navigate_with_timeout_recovery(edit_href)
+            if navigation_timed_out:
+                context["edit_navigation_recovered_from_timeout"] = "true"
+            context["management_edit_navigation"] = "row_href_fallback"
+        else:
+            fallback_url = (
+                "https://offer-new.1688.com/popular/publish.htm?"
+                + urlencode({"id": product_id, "operator": "edit"})
+            )
+            self.driver.switch_to.default_content()
+            navigation_timed_out = self._navigate_with_timeout_recovery(fallback_url)
+            if navigation_timed_out:
+                context["edit_navigation_recovered_from_timeout"] = "true"
+            context["management_edit_navigation"] = "constructed_url_fallback"
+            context["management_edit_fallback_url"] = fallback_url
         self._pause(1.5)
+
+        if not self._is_expected_edit_page_url(str(self.driver.current_url or ""), product_id):
+            message = (
+                f"1688 edit page did not open for product {product_id}; "
+                f"current URL: {str(self.driver.current_url or '')[:240]}"
+            )
+            self._annotate_page_error_context(
+                context,
+                stage_name="management_edit_navigation",
+                error_text=message,
+                error_category="edit_page_not_opened",
+            )
+            raise OfflineTaskStateError(message)
 
         self._raise_if_edit_page_unavailable(context)
         self._activate_sales_info_section(selectors, context)
         context["edit_entry_stage"] = "edit_page_ready"
+
+    def _resolve_management_edit_href(self, element: Any, product_id: str) -> str:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        try:
+            raw_href = str(element.get_attribute("href") or "").strip()
+        except Exception:
+            return ""
+        if not raw_href or raw_href.lower().startswith(("javascript:", "data:")):
+            return ""
+        href = urljoin(str(self.driver.current_url or ""), raw_href)
+        return href if self._is_expected_edit_page_url(href, product_id) else ""
+
+    @staticmethod
+    def _is_expected_edit_page_url(raw_url: str, product_id: str) -> bool:
+        value = str(raw_url or "").strip()
+        expected_product_id = str(product_id or "").strip()
+        if not value or not expected_product_id:
+            return False
+        try:
+            parsed = urlparse(value)
+            host = str(parsed.hostname or "").lower()
+            query = parse_qs(parsed.query, keep_blank_values=True)
+        except Exception:
+            return False
+        if host != "1688.com" and not host.endswith(".1688.com"):
+            return False
+        current_product_id = str((query.get("id") or [""])[0]).strip()
+        return current_product_id == expected_product_id
 
     def _raise_if_edit_page_unavailable(self, context: dict[str, Any]) -> None:
         if not self.driver:
@@ -2485,71 +2615,98 @@ class SkuOfflineBrowser(BrowserRPA):
             }
             for context in contexts
         ]
-        result = self.driver.execute_script(
-            """
-            const mappings = Array.isArray(arguments[0]) ? arguments[0] : [];
-            const normalize = (value) => String(value || '').trim().toUpperCase();
-            const rows = Array.from(document.querySelectorAll('#guid-skuTable tbody tr'));
-            const cargoInputs = rows.map((row) => {
-              const inputs = Array.from(row.querySelectorAll('input'));
-              return inputs.length ? inputs[inputs.length - 1] : null;
-            });
-            const codes = cargoInputs.map((input) => input ? String(input.value || '').trim() : '');
-            const findUnique = (target) => {
-              const exact = [];
-              const normalized = [];
-              codes.forEach((code, index) => {
-                if (code === target) exact.push(index);
-                else if (normalize(target) && normalize(code) === normalize(target)) normalized.push(index);
-              });
-              if (exact.length === 1) return exact[0];
-              if (exact.length === 0 && normalized.length === 1) return normalized[0];
-              return -1;
-            };
-            const prepared = mappings.map((mapping) => ({
-              old: String(mapping.old || '').trim(),
-              new: String(mapping.new || '').trim(),
-              sourceIndex: findUnique(String(mapping.old || '').trim()),
-              targetIndex: findUnique(String(mapping.new || '').trim()),
-            }));
-            const results = prepared.map((item) => {
-              if (item.sourceIndex < 0) {
-                return item.targetIndex >= 0
-                  ? {status: 'already_replaced', target_index: item.targetIndex}
-                  : {status: 'not_found', reason: 'source_and_replacement_absent'};
-              }
-              if (item.targetIndex >= 0 && item.targetIndex !== item.sourceIndex) {
-                return {status: 'conflict', reason: 'replacement_belongs_to_another_row'};
-              }
-              return {status: 'changed', source_index: item.sourceIndex, before: codes[item.sourceIndex], after: item.new};
-            });
-            const descriptor = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
-            results.forEach((item, index) => {
-              if (item.status !== 'changed') return;
-              const input = cargoInputs[item.source_index];
-              if (!input) {
-                item.status = 'failed';
-                item.reason = 'cargo_input_missing';
-                return;
-              }
-              if (descriptor && descriptor.set) descriptor.set.call(input, prepared[index].new);
-              else input.value = prepared[index].new;
-              input.dispatchEvent(new Event('input', {bubbles: true}));
-              input.dispatchEvent(new Event('change', {bubbles: true}));
-              item.dom_after = String(input.value || '').trim();
-              item.verified = item.dom_after === prepared[index].new;
-              if (!item.verified) {
-                item.status = 'failed';
-                item.reason = 'dom_value_not_updated';
-              }
-            });
-            return {supported: rows.length > 0, changed_count: results.filter((item) => item.status === 'changed').length, results};
-            """,
-            mappings,
-        )
-        if not isinstance(result, dict):
-            return {"supported": False, "reason": "invalid_dom_result", "results": []}
-        return {str(key): value for key, value in result.items()}
+
+        def read_inputs() -> tuple[list[Any], list[str]]:
+            rows = self.driver.find_elements(By.CSS_SELECTOR, "#guid-skuTable tbody tr")
+            cargo_inputs: list[Any] = []
+            codes: list[str] = []
+            for row in rows:
+                inputs = row.find_elements(By.TAG_NAME, "input")
+                if not inputs:
+                    continue
+                cargo_input = inputs[-1]
+                cargo_inputs.append(cargo_input)
+                codes.append(str(cargo_input.get_attribute("value") or "").strip())
+            return cargo_inputs, codes
+
+        def find_unique(codes: list[str], target: str) -> int:
+            exact = [index for index, code in enumerate(codes) if code == target]
+            if len(exact) == 1:
+                return exact[0]
+            normalized_target = target.strip().casefold()
+            normalized = [
+                index
+                for index, code in enumerate(codes)
+                if normalized_target and code.strip().casefold() == normalized_target
+            ]
+            return normalized[0] if not exact and len(normalized) == 1 else -1
+
+        initial_inputs, _ = read_inputs()
+        if not initial_inputs:
+            return {"supported": False, "reason": "sku_table_empty", "results": []}
+
+        results: list[dict[str, Any]] = []
+        for mapping in mappings:
+            old_sku = str(mapping.get("old") or "").strip()
+            new_sku = str(mapping.get("new") or "").strip()
+            cargo_inputs, codes = read_inputs()
+            source_index = find_unique(codes, old_sku)
+            target_index = find_unique(codes, new_sku)
+            if source_index < 0:
+                if target_index >= 0:
+                    results.append({"status": "already_replaced", "target_index": target_index})
+                else:
+                    results.append({"status": "not_found", "reason": "source_and_replacement_absent"})
+                continue
+            if target_index >= 0 and target_index != source_index:
+                results.append({
+                    "status": "conflict",
+                    "reason": "replacement_belongs_to_another_row",
+                    "source_index": source_index,
+                    "target_index": target_index,
+                })
+                continue
+
+            result: dict[str, Any] = {
+                "status": "changed",
+                "source_index": source_index,
+                "before": codes[source_index],
+                "after": new_sku,
+            }
+            try:
+                cargo_input = cargo_inputs[source_index]
+                self._fill_management_search_field(cargo_input, new_sku)
+                cargo_input.send_keys(Keys.TAB)
+                deadline = time.time() + max(
+                    1.0,
+                    float(self.browser_config.get("replacement_state_wait_seconds", 5) or 5),
+                )
+                dom_after = ""
+                while time.time() < deadline:
+                    _, refreshed_codes = read_inputs()
+                    dom_after = (
+                        refreshed_codes[source_index]
+                        if source_index < len(refreshed_codes)
+                        else ""
+                    )
+                    if dom_after == new_sku:
+                        break
+                    time.sleep(0.2)
+                result["dom_after"] = dom_after
+                result["verified"] = dom_after == new_sku
+                if not result["verified"]:
+                    result["status"] = "failed"
+                    result["reason"] = "dom_value_not_updated"
+            except Exception as exc:
+                result["status"] = "failed"
+                result["reason"] = f"dom_input_failed:{type(exc).__name__}"
+            results.append(result)
+
+        return {
+            "supported": True,
+            "changed_count": sum(item.get("status") == "changed" for item in results),
+            "results": results,
+        }
 
     def _read_sku_code_state(self) -> dict[str, Any]:
         if not self.driver:
@@ -4845,11 +5002,15 @@ class SkuOfflineBrowser(BrowserRPA):
         context["review_submission_message"] = candidate_text
         return True
 
-    def _switch_to_newest_window(self, before_handles: list[str]) -> None:
+    def _switch_to_newest_window(self, before_handles: list[str]) -> bool:
         if not self.driver:
             raise RuntimeError("Browser has not been opened.")
 
         before = set(before_handles)
+        try:
+            original_handle = str(self.driver.current_window_handle or "")
+        except Exception:
+            original_handle = ""
         wait = WebDriverWait(self.driver, self.browser_config.get("explicit_wait_seconds", 20))
 
         def has_new_window(driver: Any) -> bool:
@@ -4860,10 +5021,15 @@ class SkuOfflineBrowser(BrowserRPA):
             new_handles = [handle for handle in self.driver.window_handles if handle not in before]
             if new_handles:
                 self.driver.switch_to.window(new_handles[-1])
-            return
+                return True
+            return False
         except TimeoutException:
-            if self.driver.window_handles:
-                self.driver.switch_to.window(self.driver.window_handles[-1])
+            current_handles = list(self.driver.window_handles)
+            if original_handle and original_handle in current_handles:
+                self.driver.switch_to.window(original_handle)
+            elif current_handles:
+                self.driver.switch_to.window(current_handles[-1])
+            return False
 
     def _restore_management_window(self, main_window: str) -> None:
         if not self.driver:

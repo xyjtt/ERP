@@ -261,3 +261,14 @@
 - 自动登录只使用共享 1688 项目的账号凭据引用和 Profile，不在 ERP 代码、命令输出、报告或通知中写入密码、Cookie、Token。
 - 自动登录统计写入执行汇总：`auto_login_attempts`、`auto_login_success`、`auto_login_failed`。
 - 该能力已完成本地代码和测试验证，尚未替代执行机上的真实过期 Profile canary；交付前必须验证“过期态 -> 自动登录 -> 店铺身份复核 -> 继续执行”。
+
+## 2026-07-28 当前事实：下架双店并发
+
+- 每个店铺仍是一个串行执行单元；同店商品批次、同商品多个 SKU 和失败重试不会并发。
+- 不同店铺可由 `manage_1688_stop_sale_daily.py run --max-parallel-stores 2` 并行调度，参数范围为 `1..4`，默认 `1` 保持旧行为。
+- 1688 浏览器锁已从全局锁改为 `account_key` 级锁：`artifacts/locks/ali1688_account_<account_key>.lock`。共享爬虫 Worker 与下架 pipeline 使用同一协议，且 Worker 持锁直到校验和自有浏览器清理完成。
+- `app.crawler_task` 活跃任务门禁仅检查当前 `account_key`；近期下架审计门禁仅检查当前店铺。管理器自身仍保留单实例锁，禁止重复启动同一个日批管理器。
+- 聚水潭阶段使用全局 `ali1688_jushuitan.lock` 保持单路执行；不同店铺的 1688 阶段可以并行，但聚水潭页面操作不能并行。
+- 每个店铺继续使用独立 Profile、run id、批次日志、审计结果和异常汇总；最终管理器汇总按原始店铺顺序稳定输出。
+- 开发机验证：共享运行时 Python `659/659`、ERP Python `339/339`、聚水潭 TypeScript `18/18`，`check` 和 `build` 均通过。`doctor` 为 `ok`，2026-07-28 正式数据只读 preview 去重后 117 条（乐畅 9、工莱 56、沃来 17、淘淘 35）。
+- 当前尚未部署执行机，也未完成乐畅、工莱各 1 条双账号真实 Canary；上述结果不代表真实页面或业务验收完成。

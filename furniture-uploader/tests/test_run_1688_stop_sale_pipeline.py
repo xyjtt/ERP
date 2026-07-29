@@ -6,6 +6,7 @@ import json
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from unittest.mock import patch
 from types import SimpleNamespace
@@ -23,16 +24,76 @@ from run_1688_stop_sale_pipeline import (
     build_1688_command,
     build_jushuitan_command,
     build_jushuitan_environment,
+    build_jushuitan_lock,
     derive_audit_status,
     load_selected_audit_tasks,
     notify_execute_startup_failure,
     PipelineStageTimeoutError,
+    AuditHeartbeatProcessError,
+    run_audit_heartbeat_process,
     run_stage_command,
     run_pipeline,
+    resolve_pipeline_account,
+    resolve_shared_lock_path,
+    wait_for_active_crawler_tasks,
 )
 
 
 class Run1688StopSalePipelineTests(unittest.TestCase):
+    def test_audit_heartbeat_runs_in_an_isolated_bounded_process(self) -> None:
+        completed = subprocess.CompletedProcess(["python"], 0, stdout="", stderr="")
+        with patch("run_1688_stop_sale_pipeline.subprocess.run", return_value=completed) as run:
+            run_audit_heartbeat_process(
+                kind="stop_sale",
+                run_id="run-1",
+                shared_runtime_root="D:/runtime",
+                timeout_seconds=7,
+            )
+
+        command = run.call_args.args[0]
+        self.assertIn("run_1688_audit_heartbeat.py", command[1])
+        self.assertEqual(command[command.index("--kind") + 1], "stop_sale")
+        self.assertEqual(command[command.index("--run-id") + 1], "run-1")
+        self.assertEqual(run.call_args.kwargs["timeout"], 7)
+
+    def test_audit_heartbeat_process_failure_is_explicit(self) -> None:
+        completed = subprocess.CompletedProcess(
+            ["python"],
+            5,
+            stdout="",
+            stderr="database timeout",
+        )
+        with (
+            patch("run_1688_stop_sale_pipeline.subprocess.run", return_value=completed),
+            self.assertRaisesRegex(AuditHeartbeatProcessError, "code 5"),
+        ):
+            run_audit_heartbeat_process(
+                kind="stop_sale",
+                run_id="run-1",
+                shared_runtime_root="D:/runtime",
+                max_attempts=1,
+            )
+
+    def test_audit_heartbeat_process_retries_a_transient_exit(self) -> None:
+        failed = subprocess.CompletedProcess(["python"], 1, stdout="", stderr="temporary")
+        succeeded = subprocess.CompletedProcess(["python"], 0, stdout="", stderr="")
+        with (
+            patch(
+                "run_1688_stop_sale_pipeline.subprocess.run",
+                side_effect=[failed, succeeded],
+            ) as run,
+            patch("run_1688_stop_sale_pipeline.time.sleep") as sleep,
+        ):
+            run_audit_heartbeat_process(
+                kind="stop_sale",
+                run_id="run-1",
+                shared_runtime_root="D:/runtime",
+                retry_seconds=0.25,
+            )
+
+        self.assertEqual(run.call_count, 2)
+        sleep.assert_called_once_with(0.25)
+
     def build_args(self, *, mode: str = "execute") -> Namespace:
         return Namespace(
             mode=mode,
@@ -105,13 +166,13 @@ class Run1688StopSalePipelineTests(unittest.TestCase):
         self.assertEqual(args.lock_wait_seconds, 0)
 
     def test_cross_machine_guard_rejects_recent_running_batch(self) -> None:
-        repository = SimpleNamespace(count_recent_active_stop_sale_runs=lambda _minutes: 1)
+        repository = SimpleNamespace(count_recent_active_stop_sale_runs=lambda _minutes, _stores: 1)
 
         with self.assertRaisesRegex(RuntimeError, "cross-machine execute is blocked"):
             assert_no_recent_stop_sale_runs(repository, 240)
 
     def test_cross_machine_guard_accepts_no_recent_running_batch(self) -> None:
-        repository = SimpleNamespace(count_recent_active_stop_sale_runs=lambda _minutes: 0)
+        repository = SimpleNamespace(count_recent_active_stop_sale_runs=lambda _minutes, _stores: 0)
 
         assert_no_recent_stop_sale_runs(repository, 240)
 
@@ -393,6 +454,93 @@ class Run1688StopSalePipelineTests(unittest.TestCase):
             state = assert_crawler_worker_paused("YYDD-1688-Crawler-Worker")
 
         self.assertEqual(state["worker_process_count"], 0)
+
+    def test_active_crawler_task_waits_without_consuming_pipeline_attempt(self) -> None:
+        repository = SimpleNamespace(
+            count_active_crawler_tasks=unittest.mock.Mock(side_effect=[1, 1, 0])
+        )
+
+        with patch("run_1688_stop_sale_pipeline.time.sleep") as sleep:
+            result = wait_for_active_crawler_tasks(
+                repository,
+                account_key="gonglai",
+                timeout_seconds=30,
+                poll_seconds=2,
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(repository.count_active_crawler_tasks.call_count, 3)
+        repository.count_active_crawler_tasks.assert_called_with("gonglai")
+        self.assertEqual(sleep.call_count, 2)
+
+    def test_active_crawler_task_wait_timeout_remains_fail_closed(self) -> None:
+        repository = SimpleNamespace(count_active_crawler_tasks=lambda _account_key: 1)
+
+        with (
+            patch("run_1688_stop_sale_pipeline.time.monotonic", side_effect=[0.0, 0.0]),
+            self.assertRaisesRegex(RuntimeError, "after waiting 0 seconds"),
+        ):
+            wait_for_active_crawler_tasks(
+                repository,
+                account_key="gonglai",
+                timeout_seconds=0,
+                poll_seconds=2,
+            )
+
+    def test_pipeline_account_is_resolved_from_exactly_one_store(self) -> None:
+        args = SimpleNamespace(account_key="")
+        tasks = [SimpleNamespace(store_name="STORE-A")]
+        with (
+            patch("run_1688_stop_sale_pipeline.load_json_with_local_override", return_value={}),
+            patch(
+                "run_1688_stop_sale_pipeline.resolve_store_account_binding",
+                return_value={"account_key": "lechang"},
+            ),
+        ):
+            account_key, store_name = resolve_pipeline_account(args, tasks)
+
+        self.assertEqual((account_key, store_name), ("lechang", "STORE-A"))
+
+    def test_pipeline_rejects_multiple_stores_before_opening_a_browser(self) -> None:
+        args = SimpleNamespace(account_key="")
+        tasks = [SimpleNamespace(store_name="STORE-A"), SimpleNamespace(store_name="STORE-B")]
+
+        with self.assertRaisesRegex(RuntimeError, "exactly one 1688 store"):
+            resolve_pipeline_account(args, tasks)
+
+    def test_account_and_jushuitan_lock_paths_are_isolated_by_scope(self) -> None:
+        fake_module = types.ModuleType("src.runtime.global_lock")
+
+        class FakeLock:
+            def __init__(self, path, **kwargs):
+                self.path = Path(path)
+                self.kwargs = kwargs
+
+        fake_module.GlobalFileLock = FakeLock
+        fake_module.account_lock_path = (
+            lambda root, account_key: Path(root).resolve()
+            / "artifacts"
+            / "locks"
+            / f"ali1688_account_{account_key}.lock"
+        )
+        args = SimpleNamespace(
+            shared_lock_path="",
+            shared_runtime_root="D:/runtime/1688",
+            mode="execute",
+            no_shared_lock=False,
+            lock_stale_seconds=21600,
+            lock_poll_seconds=10.0,
+            jushuitan_lock_wait_seconds=3600,
+        )
+        with patch.dict(sys.modules, {"src.runtime.global_lock": fake_module}):
+            lechang_path = resolve_shared_lock_path(args, "lechang")
+            gonglai_path = resolve_shared_lock_path(args, "gonglai")
+            first_lock, first_path = build_jushuitan_lock(args, "run-1")
+            second_lock, second_path = build_jushuitan_lock(args, "run-2")
+
+        self.assertNotEqual(lechang_path, gonglai_path)
+        self.assertEqual(first_path, second_path)
+        self.assertEqual(first_lock.path, second_lock.path)
 
     def test_audit_tasks_keep_all_platform_codes_for_one_offline_sku(self) -> None:
         args = self.build_args()

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+import time
 from typing import Any, Iterable, Mapping
 
 from stop_sale_audit import (
@@ -73,33 +74,111 @@ class SkuReplaceAuditRepository:
             "ready": not missing,
         }
 
-    def count_recent_active_runs(self, max_age_minutes: int = 240) -> int:
+    def count_recent_active_runs(
+        self,
+        max_age_minutes: int = 240,
+        *,
+        store_name: str = "",
+    ) -> int:
+        normalized_store = str(store_name or "").strip()
+        store_clause = ""
+        parameters: list[Any] = [-max(1, int(max_age_minutes))]
+        if normalized_store:
+            store_clause = f"""
+                  AND EXISTS (
+                      SELECT 1 FROM {self._table('ali1688_sku_replace_item')} AS item
+                      WHERE item.run_id = run_row.run_id AND item.store_name = ?
+                  )
+            """
+            parameters.append(normalized_store)
         with connect_app_database(self.config) as connection:
             row = connection.cursor().execute(
                 f"""
-                SELECT COUNT(*) FROM {self._table('ali1688_sku_replace_run')}
-                WHERE status = 'running' AND finished_at IS NULL
-                  AND COALESCE(updated_at, started_at) >= DATEADD(MINUTE, ?, SYSUTCDATETIME())
+                SELECT COUNT(*) FROM {self._table('ali1688_sku_replace_run')} AS run_row
+                WHERE run_row.status = 'running' AND run_row.finished_at IS NULL
+                  AND COALESCE(run_row.updated_at, run_row.started_at) >= DATEADD(MINUTE, ?, SYSUTCDATETIME())
+                  {store_clause}
                 """,
-                (-max(1, int(max_age_minutes)),),
+                tuple(parameters),
             ).fetchone()
             return int(row[0] or 0)
 
-    def heartbeat_run(self, run_id: str) -> None:
-        with connect_app_database(self.config) as connection:
-            cursor = connection.cursor()
-            row = cursor.execute(
-                f"""
-                UPDATE {self._table('ali1688_sku_replace_run')}
-                SET updated_at = SYSUTCDATETIME()
-                OUTPUT inserted.status
-                WHERE run_id = ? AND status = 'running' AND finished_at IS NULL
-                """,
-                (str(run_id),),
-            ).fetchone()
-            if row is None or str(row[0] or "") != "running":
-                raise RuntimeError(f"SKU replacement audit run is no longer active: {run_id}")
-            connection.commit()
+    def heartbeat_run(
+        self,
+        run_id: str,
+        *,
+        max_attempts: int = 3,
+        retry_seconds: float = 2.0,
+    ) -> None:
+        if max_attempts <= 0 or retry_seconds < 0:
+            raise ValueError("Heartbeat retry settings are invalid.")
+
+        import pyodbc
+
+        run_table = self._table("ali1688_sku_replace_run")
+        query_timeout_seconds = max(
+            1,
+            int(getattr(self.config, "timeout_seconds", 15) or 15),
+        )
+        for attempt in range(max_attempts):
+            try:
+                with connect_app_database(self.config) as connection:
+                    connection.timeout = query_timeout_seconds
+                    cursor = connection.cursor()
+                    active_row = cursor.execute(
+                        f"""
+                        UPDATE {run_table}
+                        SET updated_at = SYSUTCDATETIME()
+                        OUTPUT inserted.status, inserted.finished_at
+                        WHERE run_id = ?
+                          AND status = 'running'
+                          AND finished_at IS NULL
+                        """,
+                        (str(run_id),),
+                    ).fetchone()
+                    connection.commit()
+                if (
+                    active_row is not None
+                    and str(active_row[0] or "") == "running"
+                    and active_row[1] is None
+                ):
+                    return
+
+                with connect_app_database(self.config) as verification_connection:
+                    verification_connection.timeout = query_timeout_seconds
+                    verification_cursor = verification_connection.cursor()
+                    verified_row = verification_cursor.execute(
+                        f"""
+                        SELECT status, finished_at
+                        FROM {run_table}
+                        WHERE run_id = ?
+                        """,
+                        (str(run_id),),
+                    ).fetchone()
+                    if (
+                        verified_row is None
+                        or str(verified_row[0] or "") != "running"
+                        or verified_row[1] is not None
+                    ):
+                        raise RuntimeError(
+                            f"SKU replacement audit run is no longer active: {run_id}"
+                        )
+                    verification_cursor.execute(
+                        f"""
+                        UPDATE {run_table}
+                        SET updated_at = SYSUTCDATETIME()
+                        WHERE run_id = ?
+                          AND status = 'running'
+                          AND finished_at IS NULL
+                        """,
+                        (str(run_id),),
+                    )
+                    verification_connection.commit()
+                return
+            except pyodbc.Error:
+                if attempt + 1 >= max_attempts:
+                    raise
+                time.sleep(retry_seconds)
 
     def start_run(
         self,

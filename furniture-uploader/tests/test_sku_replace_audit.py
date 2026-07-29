@@ -4,6 +4,8 @@ import hashlib
 from pathlib import Path
 import sys
 import unittest
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -45,6 +47,92 @@ class SkuReplaceAuditTests(unittest.TestCase):
         self.assertIn("replace_status", ddl)
         self.assertIn("jushuitan_status", ddl)
         self.assertIn("JSReportReplica", ddl)
+
+    def test_recent_active_run_check_can_be_scoped_to_store(self) -> None:
+        cursor = MagicMock()
+        cursor.execute.return_value.fetchone.return_value = (1,)
+        connection = MagicMock()
+        connection.__enter__.return_value = connection
+        connection.cursor.return_value = cursor
+
+        with patch("sku_replace_audit.connect_app_database", return_value=connection):
+            count = SkuReplaceAuditRepository(SimpleNamespace(schema="app")).count_recent_active_runs(
+                240,
+                store_name="STORE-A",
+            )
+
+        statement, parameters = cursor.execute.call_args.args
+        self.assertEqual(count, 1)
+        self.assertIn("ali1688_sku_replace_item", statement)
+        self.assertIn("item.store_name = ?", statement)
+        self.assertEqual(parameters, (-240, "STORE-A"))
+
+    def test_heartbeat_sets_a_bounded_query_timeout(self) -> None:
+        cursor = MagicMock()
+        cursor.execute.return_value.fetchone.return_value = ("running", None)
+        connection = MagicMock()
+        connection.__enter__.return_value = connection
+        connection.cursor.return_value = cursor
+        config = SimpleNamespace(schema="app", timeout_seconds=9)
+
+        with patch("sku_replace_audit.connect_app_database", return_value=connection):
+            SkuReplaceAuditRepository(config).heartbeat_run("run-1")
+
+        self.assertEqual(connection.timeout, 9)
+        connection.commit.assert_called_once_with()
+
+    def test_heartbeat_verifies_empty_output_with_a_fresh_connection(self) -> None:
+        update_cursor = MagicMock()
+        update_cursor.execute.return_value.fetchone.return_value = None
+        update_connection = MagicMock()
+        update_connection.__enter__.return_value = update_connection
+        update_connection.cursor.return_value = update_cursor
+
+        verification_cursor = MagicMock()
+        verification_cursor.execute.side_effect = [
+            MagicMock(fetchone=MagicMock(return_value=("running", None))),
+            MagicMock(),
+        ]
+        verification_connection = MagicMock()
+        verification_connection.__enter__.return_value = verification_connection
+        verification_connection.cursor.return_value = verification_cursor
+        config = SimpleNamespace(schema="app", timeout_seconds=9)
+
+        with patch(
+            "sku_replace_audit.connect_app_database",
+            side_effect=[update_connection, verification_connection],
+        ):
+            SkuReplaceAuditRepository(config).heartbeat_run("run-1")
+
+        update_connection.commit.assert_called_once_with()
+        verification_connection.commit.assert_called_once_with()
+        self.assertEqual(verification_cursor.execute.call_count, 2)
+
+    def test_heartbeat_rejects_a_terminal_run_after_empty_output(self) -> None:
+        update_cursor = MagicMock()
+        update_cursor.execute.return_value.fetchone.return_value = None
+        update_connection = MagicMock()
+        update_connection.__enter__.return_value = update_connection
+        update_connection.cursor.return_value = update_cursor
+
+        verification_cursor = MagicMock()
+        verification_cursor.execute.return_value.fetchone.return_value = (
+            "partial",
+            "2026-07-29T00:00:00",
+        )
+        verification_connection = MagicMock()
+        verification_connection.__enter__.return_value = verification_connection
+        verification_connection.cursor.return_value = verification_cursor
+        config = SimpleNamespace(schema="app", timeout_seconds=9)
+
+        with (
+            patch(
+                "sku_replace_audit.connect_app_database",
+                side_effect=[update_connection, verification_connection],
+            ),
+            self.assertRaisesRegex(RuntimeError, "no longer active"),
+        ):
+            SkuReplaceAuditRepository(config).heartbeat_run("run-1")
 
 
 if __name__ == "__main__":

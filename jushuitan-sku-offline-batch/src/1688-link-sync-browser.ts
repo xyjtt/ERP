@@ -59,6 +59,30 @@ async function firstVisible(target: Target, candidates: readonly string[], timeo
   throw new LinkSyncBrowserError("action_unavailable", `No visible locator matched: ${candidates.join(" | ")}`);
 }
 
+export async function activateWithFallback(
+  isActive: () => Promise<boolean>,
+  actions: Array<() => Promise<void>>,
+  options: {pollAttempts?: number; pollDelayMs?: number} = {},
+): Promise<boolean> {
+  if (await isActive()) return true;
+  const pollAttempts = options.pollAttempts ?? 10;
+  const pollDelayMs = options.pollDelayMs ?? 150;
+  for (const action of actions) {
+    try {
+      await action();
+    } catch {
+      // Try the next activation strategy.
+    }
+    for (let attempt = 0; attempt < pollAttempts; attempt += 1) {
+      if (await isActive()) return true;
+      if (pollDelayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, pollDelayMs));
+      }
+    }
+  }
+  return false;
+}
+
 async function assertSessionSafe(page: Page): Promise<void> {
   const text = await page.locator("body").innerText().catch(() => "");
   if (/向右滑动验证|滑块验证|验证码|安全验证|账号存在风险|操作过于频繁/.test(text)) {
@@ -69,18 +93,53 @@ async function assertSessionSafe(page: Page): Promise<void> {
   }
 }
 
-async function openSyncModal(page: Page): Promise<Locator> {
+async function openSyncModal(page: Page, target: Target): Promise<Locator> {
   await dismissQuickSaveModal(page);
   await dismissVisibleGuides(page);
   await dismissVisibleModals(page);
-  const button = await firstVisible(page, manualSyncButtons);
+  const button = await firstVisible(target, manualSyncButtons);
   await button.click({force: true});
-  const modal = await firstVisible(page, syncModals, 10000);
+  const modal = await firstVisible(target, syncModals, 10000);
   const linkTab = await firstVisible(modal, [
     '[role="tab"]:has-text("按链接同步")',
+    '.ant-tabs-tab:has-text("按链接同步")',
+    '.ant-tabs-tab-btn:has-text("按链接同步")',
     'text=按链接同步',
   ]);
-  await linkTab.click({force: true});
+  const tabContainer = linkTab.locator(
+    'xpath=ancestor::*[contains(concat(" ", normalize-space(@class), " "), " ant-tabs-tab ")][1]',
+  );
+  const hasTabContainer = (await tabContainer.count()) > 0;
+  const isLinkTabActive = async () => {
+    for (const selector of [
+      '[role="tab"][aria-selected="true"]:has-text("按链接同步")',
+      '.ant-tabs-tab-active [role="tab"]:has-text("按链接同步")',
+      '.ant-tabs-tab-active:has-text("按链接同步")',
+    ]) {
+      if (await modal.locator(selector).first().isVisible({timeout: 200}).catch(() => false)) {
+        return true;
+      }
+    }
+    return false;
+  };
+  await linkTab.scrollIntoViewIfNeeded().catch(() => undefined);
+  const actions: Array<() => Promise<void>> = [
+    async () => linkTab.click({timeout: 3000}),
+    async () => linkTab.evaluate((element) => (element as HTMLElement).click()),
+  ];
+  if (hasTabContainer) {
+    actions.push(async () => tabContainer.click({force: true, timeout: 3000}));
+  }
+  actions.push(async () => {
+    await linkTab.focus();
+    await linkTab.press("Enter");
+  });
+  if (!await activateWithFallback(isLinkTabActive, actions)) {
+    throw new LinkSyncBrowserError(
+      "action_unavailable",
+      "The manual-sync dialog opened, but the 按链接同步 tab could not be activated",
+    );
+  }
   return modal;
 }
 
@@ -91,8 +150,16 @@ async function selectStoreInSyncModal(modal: Locator, storeName: string): Promis
   ]);
   const searchTerm = storeName.replace(/^阿里巴巴[-—–]?/, "");
   await searchInput.fill(searchTerm);
-  const searchButton = await firstVisible(modal, ['button:has-text("搜索")', 'text=搜索']);
-  await searchButton.click({force: true});
+  const searchButton = await firstVisible(
+    modal,
+    ['button:has-text("搜索")', '[role="button"]:has-text("搜索")', 'text=搜索'],
+    3000,
+  ).catch(() => null);
+  if (searchButton) {
+    await searchButton.click({force: true});
+  } else {
+    await searchInput.press("Enter");
+  }
 
   const exactCandidates = [
     `label.ant-radio-wrapper:has-text("${storeName}")`,
@@ -128,8 +195,8 @@ async function selectStoreInSyncModal(modal: Locator, storeName: string): Promis
   }
 }
 
-async function submitStoreSync(page: Page, group: StoreSyncGroup): Promise<string> {
-  const modal = await openSyncModal(page);
+async function submitStoreSync(page: Page, target: Target, group: StoreSyncGroup): Promise<string> {
+  const modal = await openSyncModal(page, target);
   await selectStoreInSyncModal(modal, group.store_name);
   const textarea = await firstVisible(modal, [
     'textarea[placeholder*="商品链接或商品ID"]',
@@ -147,7 +214,7 @@ async function submitStoreSync(page: Page, group: StoreSyncGroup): Promise<strin
   const deadline = Date.now() + 15000;
   while (Date.now() <= deadline) {
     const modalVisible = await modal.isVisible().catch(() => false);
-    const message = await page.locator('.ant-message-notice-content, [role="alert"]').allInnerTexts().catch(() => []);
+    const message = await target.locator('.ant-message-notice-content, [role="alert"]').allInnerTexts().catch(() => []);
     const messageText = message.join(" | ").trim();
     if (/失败|错误|不能为空|请选择/.test(messageText)) {
       throw new LinkSyncBrowserError("sync_rejected", messageText);
@@ -162,6 +229,7 @@ async function submitStoreSync(page: Page, group: StoreSyncGroup): Promise<strin
 
 async function saveEvidence(
   page: Page,
+  target: Target,
   options: LinkSyncRunOptions,
   group: StoreSyncGroup,
   stage: string,
@@ -172,9 +240,12 @@ async function saveEvidence(
   const base = sanitizeFileName(`${group.store_name}-b${group.batch_index}-${stage}`);
   const screenshotPath = path.join(dir, `${base}.png`);
   const htmlPath = path.join(dir, `${base}.html`);
+  const targetHtmlPath = path.join(dir, `${base}-target.html`);
   const jsonPath = path.join(dir, `${base}.json`);
   await page.screenshot({path: screenshotPath, fullPage: true}).catch(() => undefined);
   await fs.writeFile(htmlPath, await page.content().catch(() => ""), "utf8");
+  const targetHtml = await target.locator("body").evaluate((body) => body.outerHTML).catch(() => "");
+  await fs.writeFile(targetHtmlPath, targetHtml, "utf8");
   await fs.writeFile(jsonPath, JSON.stringify({
     store_name: group.store_name,
     batch_index: group.batch_index,
@@ -241,7 +312,7 @@ export async function runBrowserLinkSync(
       await login(page, {allowManualWait: false});
     }
     await assertSessionSafe(page);
-    await ensureProductPage(page);
+    let productTarget = await ensureProductPage(page);
     await ensureDir(path.dirname(appConfig.storageStatePath));
     if (appConfig.saveStorageState) await context.storageState({path: appConfig.storageStatePath});
 
@@ -256,20 +327,20 @@ export async function runBrowserLinkSync(
       }
       try {
         await assertSessionSafe(page);
-        const message = await submitStoreSync(page, group);
-        const evidencePath = await saveEvidence(page, options, group, "success");
+        const message = await submitStoreSync(page, productTarget, group);
+        const evidencePath = await saveEvidence(page, productTarget, options, group, "success");
         const groupResults = group.tasks.map((task) => resultForTask(task, "success", {message, evidencePath}));
         results.push(...groupResults);
         await appendSyncLedger(options.ledgerPath, groupResults);
       } catch (error) {
-        const evidencePath = await saveEvidence(page, options, group, "failed", error).catch(() => "");
+        const evidencePath = await saveEvidence(page, productTarget, options, group, "failed", error).catch(() => "");
         const category = error instanceof LinkSyncBrowserError ? error.category : "browser_error";
         const message = error instanceof Error ? error.message : String(error);
         results.push(...group.tasks.map((task) => resultForTask(task, "failed", {category, message, evidencePath})));
         if (category === "store_mismatch") stoppedStores.add(group.store_name);
         if (["login_required", "risk_control"].includes(category)) stopAll = true;
         await page.reload({waitUntil: "domcontentloaded", timeout: 120000}).catch(() => undefined);
-        await ensureProductPage(page).catch(() => undefined);
+        productTarget = await ensureProductPage(page).catch(() => page);
       }
     }
   } catch (error) {
