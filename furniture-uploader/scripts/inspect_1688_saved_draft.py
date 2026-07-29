@@ -10,6 +10,7 @@ import time
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 from selenium.common.exceptions import StaleElementReferenceException, TimeoutException
 from selenium.webdriver.common.by import By
@@ -33,6 +34,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", required=True)
     parser.add_argument("--draft-id", default="", help="override the payload draft ID for read-only inspection")
     parser.add_argument(
+        "--publish-url",
+        default="",
+        help="exact saved offer-new publish URL; must match the expected draft ID and category",
+    )
+    parser.add_argument(
         "--open-from-management",
         action="store_true",
         help="open the draft by clicking its real product-management draft-box link",
@@ -51,6 +57,23 @@ def _decimal_equal(left: object, right: object) -> bool:
 def _spec_equal(actual: object, expected: object) -> bool:
     expected_value = str(expected or "").strip()
     return bool(expected_value) and str(actual or "").strip() == expected_value
+
+
+def _validate_publish_url_override(raw_url: object, expected_draft_id: str) -> str:
+    url = str(raw_url or "").strip()
+    parsed = urlparse(url)
+    query = parse_qs(parsed.query)
+    draft_id = str((query.get("draftId") or [""])[0]).strip()
+    category_id = str((query.get("catId") or [""])[0]).strip()
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != "offer-new.1688.com"
+        or parsed.path != "/popular/publish.htm"
+        or draft_id != expected_draft_id
+        or not category_id
+    ):
+        raise ValueError("publish URL must be the saved 1688 URL for the expected draft and category")
+    return url
 
 
 def _assert_management_inspection_gate(report: dict[str, object]) -> None:
@@ -168,6 +191,110 @@ def _wait_for_inspection_runtime(browser: BrowserRPA, *, timeout_seconds: float)
     browser._wait_for_publish_runtime_ready(timeout_seconds=timeout_seconds)
 
 
+def _install_draft_boot_network_probe(browser: BrowserRPA) -> bool:
+    driver = browser.driver
+    if driver is None:
+        return False
+    try:
+        driver.execute_cdp_cmd(
+            "Page.addScriptToEvaluateOnNewDocument",
+            {
+                "source": r"""
+(() => {
+  if (window.__codexDraftBootProbeInstalled) return;
+  window.__codexDraftBootProbeInstalled = true;
+  window.__codexDraftBootRecords = [];
+  const records = window.__codexDraftBootRecords;
+  const relevant = (rawUrl) => {
+    try {
+      const parsed = new URL(String(rawUrl || ''), window.location.href);
+      return parsed.hostname === 'offer-new.1688.com' &&
+        (parsed.pathname.includes('/popular/') || parsed.pathname.includes('/processing/'));
+    } catch (error) {
+      return false;
+    }
+  };
+  const append = (record) => {
+    records.push(record);
+    if (records.length > 100) records.splice(0, records.length - 100);
+  };
+  const preview = (value) => String(value == null ? '' : value).slice(0, 4000);
+
+  const originalOpen = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function(method, url) {
+    this.__codexDraftBootMeta = { method: String(method || ''), url: String(url || '') };
+    return originalOpen.apply(this, arguments);
+  };
+  const originalSend = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.send = function() {
+    const meta = this.__codexDraftBootMeta || {};
+    if (relevant(meta.url)) {
+      this.addEventListener('loadend', () => {
+        let responseText = '';
+        try { responseText = preview(this.responseText); } catch (error) {}
+        append({
+          transport: 'xhr',
+          method: meta.method,
+          url: meta.url,
+          status: Number(this.status || 0),
+          responseText,
+        });
+      }, { once: true });
+    }
+    return originalSend.apply(this, arguments);
+  };
+
+  const originalFetch = window.fetch;
+  if (typeof originalFetch === 'function') {
+    window.fetch = function() {
+      const args = Array.from(arguments);
+      const input = args[0];
+      const url = typeof input === 'string' ? input : String((input && input.url) || '');
+      const method = String(((args[1] || {}).method) || (input && input.method) || 'GET');
+      const promise = originalFetch.apply(window, args);
+      if (relevant(url)) {
+        promise.then(async (response) => {
+          let responseText = '';
+          try { responseText = preview(await response.clone().text()); } catch (error) {}
+          append({
+            transport: 'fetch',
+            method,
+            url,
+            status: Number(response.status || 0),
+            responseText,
+          });
+        }).catch((error) => {
+          append({ transport: 'fetch', method, url, status: 0, responseText: preview(error) });
+        });
+      }
+      return promise;
+    };
+  }
+})();
+""",
+            },
+        )
+        return True
+    except Exception:
+        return False
+
+
+def _collect_draft_boot_network_records(browser: BrowserRPA) -> list[dict[str, object]]:
+    driver = browser.driver
+    if driver is None:
+        return []
+    try:
+        records = driver.execute_script(
+            "return Array.isArray(window.__codexDraftBootRecords) "
+            "? window.__codexDraftBootRecords.map((item) => ({...item})) : [];"
+        )
+    except Exception:
+        return []
+    if not isinstance(records, list):
+        return []
+    return [dict(item) for item in records if isinstance(item, dict)]
+
+
 def main() -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -202,20 +329,29 @@ def main() -> int:
     operator_config = load_json_with_local_override(config_dir / "operator_config.json")
     system_config = load_json_with_local_override(config_dir / "systems" / "1688_sku_offline.json")
     output_path = Path(args.output)
-    publish_url, _category_id = resolve_1688_publish_url(
-        {
-            **payload,
-            "workflow": {
-                **(payload.get("workflow") or {}),
-                "pending_draft_id": expected_draft_id,
+    publish_url = ""
+    entry_evidence: dict[str, object] = {"entry_mode": "direct_draft_url"}
+    if not args.open_from_management:
+        publish_url, _category_id = resolve_1688_publish_url(
+            {
+                **payload,
+                "workflow": {
+                    **(payload.get("workflow") or {}),
+                    "pending_draft_id": expected_draft_id,
+                },
             },
-        },
-        mode="draft",
-    )
+            mode="draft",
+        )
+        if args.publish_url:
+            publish_url = _validate_publish_url_override(args.publish_url, expected_draft_id)
+            entry_evidence = {
+                "entry_mode": "saved_publish_url",
+                "publish_url": publish_url,
+            }
     browser_class = SkuOfflineBrowser if args.open_from_management else BrowserRPA
     browser = browser_class(operator_config.get("browser", {}), PROJECT_ROOT)
     browser.open()
-    entry_evidence: dict[str, object] = {"entry_mode": "direct_draft_url"}
+    boot_network_probe_installed = _install_draft_boot_network_probe(browser)
     try:
         if args.open_from_management:
             entry_evidence = _open_draft_from_management(
@@ -233,6 +369,7 @@ def main() -> int:
         try:
             _wait_for_inspection_runtime(browser, timeout_seconds=180)
         except TimeoutException as exc:
+            boot_network_records = _collect_draft_boot_network_records(browser)
             diagnostic = browser.driver.execute_script(
                 """
                 return {
@@ -262,6 +399,8 @@ def main() -> int:
                 "body_text": str((diagnostic or {}).get("body_text") or ""),
                 "error_type": type(exc).__name__,
                 "error": str(exc),
+                "boot_network_probe_installed": boot_network_probe_installed,
+                "boot_network_records": boot_network_records,
                 "screenshot_path": str(screenshot_path) if screenshot_saved else "",
                 "draft_saved": False,
                 "offer_submitted": False,
@@ -317,6 +456,7 @@ def main() -> int:
         buyer_protection = browser._draft_selected_buyer_protection()
         buyer_schedule = browser._draft_selected_buyer_protection_schedule()
         assist_messages = browser._collect_assist_messages()
+        boot_network_records = _collect_draft_boot_network_records(browser)
     finally:
         browser.close()
 
@@ -365,6 +505,8 @@ def main() -> int:
             "detail_image_count": expected_detail_count,
         },
         "submit_reapply_required_fields": reapply_fields,
+        "boot_network_probe_installed": boot_network_probe_installed,
+        "boot_network_records": boot_network_records,
         "draft_saved": False,
         "offer_submitted": False,
     }

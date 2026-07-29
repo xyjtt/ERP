@@ -10,7 +10,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 from selenium.common.exceptions import (
     ElementClickInterceptedException,
@@ -6103,7 +6103,8 @@ class BrowserRPA:
             return
 
         patch_mode = str(context.get("draft_request_patch_mode", "full")).strip().lower() or "full"
-        apply_patch = patch_mode not in {"capture_only"}
+        apply_patch = patch_mode == "full"
+        apply_identity_patch = patch_mode == "identity_only"
         buyer_protection_value = self._resolve_context_preferred_value(
             context=context,
             source=str(patch_config.get("buyer_protection_source", "")).strip(),
@@ -6171,6 +6172,7 @@ class BrowserRPA:
             "detailHtml": detail_image_html or detail_text_html,
             "patchMode": patch_mode,
             "applyPatch": apply_patch,
+            "applyIdentityPatch": apply_identity_patch,
         }
         self.driver.execute_script(
             """
@@ -6295,6 +6297,39 @@ class BrowserRPA:
               record.responseText = message;
               record.responseJson = { success: false, message };
               return message;
+            };
+
+            const rewriteRequestUrlIdentity = (rawUrl) => {
+              const text = String(rawUrl || '').trim();
+              const expected = String(window.__codexDraftPatchConfig.expectedDraftId || '').trim();
+              const enabled = Boolean(window.__codexDraftPatchConfig.applyIdentityPatch);
+              if (!text || !expected || !enabled || !isDraftSubmitUrl(text)) {
+                return text;
+              }
+              try {
+                const parsed = new URL(text, window.location.href);
+                parsed.searchParams.set('draftId', expected);
+                return parsed.toString();
+              } catch (error) {
+                return text;
+              }
+            };
+
+            const patchDraftIdentityObject = (root) => {
+              const expected = String(window.__codexDraftPatchConfig.expectedDraftId || '').trim();
+              if (!expected || !root || typeof root !== 'object' || Array.isArray(root)) {
+                return false;
+              }
+              const globalModel = root.global;
+              if (!globalModel || typeof globalModel !== 'object' || Array.isArray(globalModel)) {
+                return false;
+              }
+              const systemParam = globalModel.systemParam;
+              if (!systemParam || typeof systemParam !== 'object' || Array.isArray(systemParam)) {
+                return false;
+              }
+              systemParam.draftId = expected;
+              return true;
             };
 
             const normalizeIbankUrl = (rawValue) => {
@@ -7466,26 +7501,37 @@ class BrowserRPA:
             const rewriteRequestBody = (body) => {
               const patchSnapshot = getPatchSnapshot();
               const applyPatch = Boolean(window.__codexDraftPatchConfig.applyPatch);
+              const applyIdentityPatch = Boolean(window.__codexDraftPatchConfig.applyIdentityPatch);
               const patchMode = String(window.__codexDraftPatchConfig.patchMode || '').trim() || 'full';
               const meta = {
                 patchSnapshot,
                 bodyType: typeof body,
                 rewritten: false,
                 patchApplied: applyPatch,
+                identityPatchApplied: false,
                 patchMode,
               };
               if (body == null) {
                 return { body, meta };
               }
-              if (!applyPatch) {
+              if (!applyPatch && !applyIdentityPatch) {
                 return { body, meta };
               }
+
+              const patchParsedValue = (parsedValue) => {
+                if (applyPatch) {
+                  patchDraftObject(parsedValue, patchSnapshot);
+                }
+                if (applyIdentityPatch && patchDraftIdentityObject(parsedValue)) {
+                  meta.identityPatchApplied = true;
+                }
+              };
 
               if (typeof body === 'string') {
                 try {
                   const parsedJson = JSON.parse(body);
-                  patchDraftObject(parsedJson, patchSnapshot);
-                  meta.rewritten = true;
+                  patchParsedValue(parsedJson);
+                  meta.rewritten = applyPatch || meta.identityPatchApplied;
                   return { body: JSON.stringify(parsedJson), meta };
                 } catch (error) {
                   // Fall through to URLSearchParams parsing.
@@ -7504,9 +7550,9 @@ class BrowserRPA:
                     }
                     try {
                       const parsedValue = JSON.parse(trimmedValue);
-                      patchDraftObject(parsedValue, patchSnapshot);
+                      patchParsedValue(parsedValue);
                       params.set(key, JSON.stringify(parsedValue));
-                      changed = true;
+                      changed = applyPatch || meta.identityPatchApplied;
                     } catch (error) {
                       continue;
                     }
@@ -7533,9 +7579,9 @@ class BrowserRPA:
                   }
                   try {
                     const parsedValue = JSON.parse(trimmedValue);
-                    patchDraftObject(parsedValue, patchSnapshot);
+                    patchParsedValue(parsedValue);
                     cloned.append(key, JSON.stringify(parsedValue));
-                    changed = true;
+                    changed = applyPatch || meta.identityPatchApplied;
                   } catch (error) {
                     cloned.append(key, rawValue);
                   }
@@ -7547,12 +7593,30 @@ class BrowserRPA:
               return { body, meta };
             };
 
+            window.__codexDraftIdentityPatchProbe = (rawUrl, body) => {
+              const rewritten = rewriteRequestBody(body);
+              return {
+                url: rewriteRequestUrlIdentity(rawUrl),
+                body: rewritten.body,
+                meta: rewritten.meta,
+              };
+            };
+
             const installXHRPatch = () => {
               const originalOpen = XMLHttpRequest.prototype.open;
               const originalSend = XMLHttpRequest.prototype.send;
               XMLHttpRequest.prototype.open = function(method, url) {
-                this.__codexDraftMeta = { method, url };
-                return originalOpen.apply(this, arguments);
+                const originalUrl = String(url || '');
+                const requestUrl = rewriteRequestUrlIdentity(originalUrl);
+                this.__codexDraftMeta = {
+                  method,
+                  url: requestUrl,
+                  originalUrl,
+                  identityUrlPatched: requestUrl !== originalUrl,
+                };
+                const args = Array.from(arguments);
+                args[1] = requestUrl;
+                return originalOpen.apply(this, args);
               };
               XMLHttpRequest.prototype.send = function(body) {
                 const meta = this.__codexDraftMeta || {};
@@ -7565,6 +7629,8 @@ class BrowserRPA:
                   transport: 'xhr',
                   method: String(meta.method || ''),
                   url,
+                  originalUrl: String(meta.originalUrl || url),
+                  identityUrlPatched: Boolean(meta.identityUrlPatched),
                   originalBodyPreview: previewValue(body),
                 };
                 const rewritten = rewriteRequestBody(body);
@@ -7599,9 +7665,17 @@ class BrowserRPA:
               window.fetch = function() {
                 const args = Array.from(arguments);
                 const input = args[0];
-                const url = typeof input === 'string' ? input : String((input && input.url) || '');
-                if (!isDraftSubmitUrl(url)) {
+                const originalUrl = typeof input === 'string' ? input : String((input && input.url) || '');
+                if (!isDraftSubmitUrl(originalUrl)) {
                   return originalFetch.apply(window, args);
+                }
+                const url = rewriteRequestUrlIdentity(originalUrl);
+                if (url !== originalUrl) {
+                  if (typeof input === 'string') {
+                    args[0] = url;
+                  } else if (typeof Request !== 'undefined' && input instanceof Request) {
+                    args[0] = new Request(url, input);
+                  }
                 }
 
                 const requestInit = args[1] || {};
@@ -7609,6 +7683,8 @@ class BrowserRPA:
                   transport: 'fetch',
                   method: String(requestInit.method || 'GET'),
                   url,
+                  originalUrl,
+                  identityUrlPatched: url !== originalUrl,
                   originalBodyPreview: previewValue(requestInit.body),
                 };
                 const rewritten = rewriteRequestBody(requestInit.body);
@@ -10107,7 +10183,7 @@ class BrowserRPA:
         normalized_modes: list[str] = []
         for item in raw_modes:
             text = str(item or "").strip().lower()
-            if text not in {"full", "capture_only"}:
+            if text not in {"full", "capture_only", "identity_only"}:
                 continue
             if text not in normalized_modes:
                 normalized_modes.append(text)
@@ -10290,6 +10366,78 @@ class BrowserRPA:
         context["draft_submit_reapply_evidence"] = evidence
         return required_fields
 
+    def _reopen_saved_draft_from_server(
+        self,
+        publish_config: dict[str, Any],
+        context: dict[str, Any],
+        *,
+        wait_seconds: float,
+    ) -> None:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        saved_url = str(self.driver.current_url or context.get("current_url") or "").strip()
+        parsed = urlparse(saved_url)
+        query = parse_qs(parsed.query)
+        saved_draft_id = str(
+            (query.get("draftId") or query.get("offerDraftId") or [""])[0]
+        ).strip()
+        expected_draft_id = str(publish_config.get("expected_draft_id") or "").strip()
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname != "offer-new.1688.com"
+            or parsed.path != "/popular/publish.htm"
+            or not saved_draft_id
+            or not str((query.get("catId") or [""])[0]).strip()
+            or (expected_draft_id and saved_draft_id != expected_draft_id)
+        ):
+            raise PublishValidationError(
+                "draft_verify blocked: saved URL does not identify the expected draft and category."
+            )
+
+        context["draft_server_reopen_url"] = saved_url
+        context["draft_server_reopen_draft_id"] = saved_draft_id
+        official_entry_url = (
+            "https://offer.1688.com/offer/post/fillProductInfo.htm?"
+            + urlencode({"operator": "draft2offer", "offerDraftId": saved_draft_id})
+        )
+        context["draft_server_reopen_entry_url"] = official_entry_url
+        self.driver.get("about:blank")
+        self.driver.get(official_entry_url)
+        self._pause(max(0.2, wait_seconds))
+        body_text = str(
+            self.driver.execute_script(
+                "return String((document.body && document.body.innerText) || '').slice(0, 4000);"
+            )
+            or ""
+        )
+        if "SYS_ERROR" in body_text or ("出错啦" in body_text and "系统错误" in body_text):
+            context["draft_server_reopen_fatal_page"] = body_text
+            raise PublishValidationError(
+                "draft_verify blocked: official draft reopen returned SYS_ERROR."
+            )
+        self._wait_for_publish_runtime_ready(
+            timeout_seconds=max(30.0, float(publish_config.get("runtime_ready_timeout_seconds", 180) or 180))
+        )
+        reopened_url = str(self.driver.current_url or "").strip()
+        reopened_parsed = urlparse(reopened_url)
+        reopened_query = parse_qs(reopened_parsed.query)
+        reopened_draft_id = str(
+            (reopened_query.get("draftId") or reopened_query.get("offerDraftId") or [""])[0]
+        ).strip()
+        reopened_operator = str((reopened_query.get("operator") or [""])[0]).strip()
+        if (
+            reopened_parsed.scheme != "https"
+            or reopened_parsed.hostname != "offer-new.1688.com"
+            or not reopened_parsed.path.endswith("/publish.htm")
+            or reopened_draft_id != saved_draft_id
+            or reopened_operator != "draft2offer"
+        ):
+            raise PublishValidationError(
+                "draft_verify blocked: official draft reopen changed the saved draft identity."
+            )
+        context["draft_verify_server_reopened"] = True
+        context["draft_verify_server_reopened_url"] = reopened_url
+
     def _verify_saved_draft(self, publish_config: dict[str, Any], context: dict[str, Any]) -> None:
         verification = publish_config.get("draft_verification", {})
         if not verification or not verification.get("enabled", True):
@@ -10299,7 +10447,15 @@ class BrowserRPA:
 
         self._pause(float(verification.get("settle_seconds", 1.2)))
         refreshed = False
-        if verification.get("refresh_after_save", True):
+        if verification.get("server_reopen_after_save", False):
+            refresh_wait_seconds = float(verification.get("refresh_wait_seconds", 4))
+            self._reopen_saved_draft_from_server(
+                publish_config,
+                context,
+                wait_seconds=refresh_wait_seconds,
+            )
+            refreshed = True
+        elif verification.get("refresh_after_save", True):
             refresh_wait_seconds = float(verification.get("refresh_wait_seconds", 4))
             try:
                 self.driver.refresh()
@@ -10846,10 +11002,13 @@ class BrowserRPA:
               firstStateImage.downloadUrl ||
               ''
             ).trim();
-            const domImages = Array.from(document.querySelectorAll('#guid-primaryPicture img'));
-            const domImage = domImages.find((item) => String(item.getAttribute('src') || '').trim()) || null;
-            const slot = document.querySelector('#guid-primaryPicture .picture-sort-item');
+            const slot = document.querySelector(
+              '#guid-primaryPicture .picture-sort-list .picture-sort-item'
+            );
             const wrapper = slot ? slot.querySelector('.module-picture-cover-wrapper') : null;
+            const domImage = wrapper
+              ? wrapper.querySelector('.picture-cover-content img, img')
+              : null;
             const domPresent = Boolean(
               wrapper &&
               !(wrapper.className || '').includes('cover-empty') &&

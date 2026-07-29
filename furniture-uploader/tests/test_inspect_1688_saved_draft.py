@@ -60,6 +60,33 @@ class FakeBrowser:
 
 
 class InspectSavedDraftTests(unittest.TestCase):
+    def test_boot_network_probe_fails_closed_when_cdp_is_unavailable(self) -> None:
+        browser = SimpleNamespace(driver=FakeDriver())
+        self.assertFalse(inspector._install_draft_boot_network_probe(browser))
+        self.assertEqual(inspector._collect_draft_boot_network_records(browser), [])
+
+    def test_publish_url_override_requires_matching_draft_and_category(self) -> None:
+        url = (
+            "https://offer-new.1688.com/popular/publish.htm?"
+            "catId=122942001&operator=new&draftId=draft-1"
+        )
+        self.assertEqual(inspector._validate_publish_url_override(url, "draft-1"), url)
+        with self.assertRaisesRegex(ValueError, "expected draft and category"):
+            inspector._validate_publish_url_override(
+                "https://offer-new.1688.com/popular/publish.htm?catId=122942001&draftId=other",
+                "draft-1",
+            )
+        with self.assertRaisesRegex(ValueError, "expected draft and category"):
+            inspector._validate_publish_url_override(
+                "https://example.com/popular/publish.htm?catId=122942001&draftId=draft-1",
+                "draft-1",
+            )
+        with self.assertRaisesRegex(ValueError, "expected draft and category"):
+            inspector._validate_publish_url_override(
+                "https://offer-new.1688.com/popular/publish.htm?draftId=draft-1",
+                "draft-1",
+            )
+
     def test_management_inspection_gate_does_not_require_new_listing_clearance(self) -> None:
         inspector._assert_management_inspection_gate(
             {
@@ -202,7 +229,7 @@ class InspectSavedDraftTests(unittest.TestCase):
                     inspector,
                     "resolve_1688_publish_url",
                     return_value=("https://offer.1688.com/draft", "category-1"),
-                ),
+                ) as resolve_publish_url,
                 patch.object(
                     sys,
                     "argv",
@@ -220,6 +247,7 @@ class InspectSavedDraftTests(unittest.TestCase):
 
             evidence = json.loads(output_path.read_text(encoding="utf-8"))
             self.assertEqual(exit_code, 3)
+            resolve_publish_url.assert_not_called()
             self.assertEqual(evidence["entry"], management_entry)
             self.assertEqual(evidence["requested_url"], management_entry["clicked_href"])
 

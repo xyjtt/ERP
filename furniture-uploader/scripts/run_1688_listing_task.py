@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -38,6 +40,8 @@ def build_parser() -> argparse.ArgumentParser:
         choices=[
             "preflight",
             "resume",
+            "rebuild",
+            "invalidate-draft",
             "draft",
             "approve",
             "reject",
@@ -72,6 +76,11 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="failure-context JSON containing contiguous completed picker batches, including a full checkpoint",
     )
+    parser.add_argument(
+        "--deletion-evidence",
+        default="",
+        help="verified deletion report for every corrupt historical draft; required for rebuild",
+    )
     parser.add_argument("--offer-url", default="", help="verified offer URL for writeback")
     parser.add_argument(
         "--draft-evidence",
@@ -93,6 +102,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.getenv("YYDD_1688_RUNTIME_ROOT", "D:/script_1688"),
         help="1688 runtime root used by the external secret provider",
     )
+    parser.add_argument("--lock-wait-seconds", type=int, default=0)
+    parser.add_argument("--lock-stale-seconds", type=int, default=21600)
+    parser.add_argument("--lock-poll-seconds", type=float, default=5.0)
     return parser
 
 
@@ -131,6 +143,40 @@ def _load_listing_audit_repository(shared_runtime_root: str) -> ListingAuditRepo
     return repository
 
 
+def _resolve_listing_account_lock_path(args: argparse.Namespace, payload: dict) -> tuple[Path, str]:
+    account_key = str(((payload.get("shop") or {}).get("account_key") or "")).strip()
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", account_key):
+        raise ValueError("listing payload requires a valid shop.account_key for browser locking")
+    runtime_root = Path(args.shared_runtime_root).resolve()
+    return runtime_root / "artifacts" / "locks" / f"ali1688_account_{account_key}.lock", account_key
+
+
+def _build_listing_account_lock(args: argparse.Namespace, payload: dict):
+    lock_path, account_key = _resolve_listing_account_lock_path(args, payload)
+    runtime_root = Path(args.shared_runtime_root).resolve()
+    lock_module = runtime_root / "src" / "runtime" / "global_lock.py"
+    if not lock_module.exists():
+        raise FileNotFoundError(f"Shared 1688 runtime lock module not found: {lock_module}")
+    if str(runtime_root) not in sys.path:
+        sys.path.insert(0, str(runtime_root))
+
+    from src.runtime.global_lock import GlobalFileLock
+
+    return GlobalFileLock(
+        lock_path,
+        stale_after_seconds=args.lock_stale_seconds,
+        wait_timeout_seconds=args.lock_wait_seconds,
+        poll_interval_seconds=args.lock_poll_seconds,
+        metadata={
+            "cycle": "1688_listing_task",
+            "task_id": str(payload.get("task_id") or ""),
+            "account_key": account_key,
+            "mode": str(args.mode or ""),
+            "payload": str(Path(args.payload).resolve()),
+        },
+    )
+
+
 def main() -> int:
     args = build_parser().parse_args()
     payload = json.loads(Path(args.payload).read_text(encoding="utf-8-sig"))
@@ -149,13 +195,19 @@ def main() -> int:
             event = "capacity_reverified"
         elif current_state == "blocked" and last_event == "review_rejected":
             event = "review_repair_resumed"
+        elif current_state == "blocked" and last_event == "draft_verification_failed":
+            event = "draft_verification_repair_resumed"
         else:
             event = "execution_resumed"
         operator_field = "verified_by" if event == "capacity_reverified" else "resumed_by"
         reason = (
             "review_required_fields_repair"
             if event == "review_repair_resumed"
-            else "image_album_capacity_verified"
+            else (
+                "server_draft_fields_missing"
+                if event == "draft_verification_repair_resumed"
+                else "image_album_capacity_verified"
+            )
         )
         workflow = payload.get("workflow") or {}
         resume_draft_id = str(
@@ -170,6 +222,63 @@ def main() -> int:
                 operator_field: args.operator,
                 "reason": reason,
                 "draft_id": resume_draft_id,
+                "capacity_probe": capacity_probe,
+            },
+        )
+        repository = _load_listing_audit_repository(args.shared_runtime_root)
+        repository.upsert_task(updated)
+        repository.record_latest_event(updated, operator_name=args.operator)
+        _write_result(updated, args.output)
+        return 0
+    if args.mode == "invalidate-draft":
+        if not args.draft_inspection:
+            raise ValueError("--draft-inspection is required for invalidate-draft")
+        inspection = json.loads(Path(args.draft_inspection).read_text(encoding="utf-8-sig"))
+        checks = inspection.get("checks") or {}
+        missing_checks = sorted(str(name) for name, passed in checks.items() if passed is not True)
+        current_draft_id = str(
+            args.draft_id
+            or ((payload.get("workflow") or {}).get("draft") or {}).get("draft_id")
+            or ""
+        ).strip()
+        if str(inspection.get("task_id") or "").strip() != str(payload.get("task_id") or "").strip():
+            raise ValueError("draft inspection task_id does not match payload")
+        if str(inspection.get("draft_id") or "").strip() != current_draft_id:
+            raise ValueError("draft inspection draft_id does not match payload")
+        if str(inspection.get("status") or "").strip() != "failed" or not missing_checks:
+            raise ValueError("invalidate-draft requires a failed independent inspection")
+        updated = advance_listing_state(
+            payload,
+            "draft_verification_failed",
+            evidence={
+                "reason": "server_draft_fields_missing",
+                "draft_id": current_draft_id,
+                "inspection_status": "failed",
+                "inspection_checked_at": str(inspection.get("checked_at") or "").strip(),
+                "missing_checks": missing_checks,
+            },
+        )
+        repository = _load_listing_audit_repository(args.shared_runtime_root)
+        repository.upsert_task(updated)
+        repository.record_latest_event(updated, operator_name=args.operator)
+        _write_result(updated, args.output)
+        return 0
+    if args.mode == "rebuild":
+        if not args.deletion_evidence or not args.capacity_evidence:
+            raise ValueError("--deletion-evidence and --capacity-evidence are required for rebuild")
+        deletion_evidence = json.loads(
+            Path(args.deletion_evidence).read_text(encoding="utf-8-sig")
+        )
+        capacity_probe = json.loads(
+            Path(args.capacity_evidence).read_text(encoding="utf-8-sig")
+        )
+        updated = advance_listing_state(
+            payload,
+            "authorized_draft_rebuild_resumed",
+            evidence={
+                "authorized_by": args.operator,
+                "reason": "authorized_corrupt_draft_rebuild",
+                "deletion_evidence": deletion_evidence,
                 "capacity_probe": capacity_probe,
             },
         )
@@ -259,63 +368,65 @@ def main() -> int:
     operator_config = load_json_with_local_override(config_dir / "operator_config.json")
     category_config = load_json_with_local_override(config_dir / "furniture_categories.json")
     browser = BrowserRPA(operator_config.get("browser", {}), PROJECT_ROOT)
-    execution_id = repository.start_execution(task_id=str(payload.get("task_id") or ""), mode=args.mode)
-    try:
-        browser.open()
-        if not args.skip_login:
-            browser.run_system_workflow(system_config, {})
-        updated, _context = execute_browser_task(
-            execution_payload,
-            mode=args.mode,
-            browser=browser,
-            platform_config=platform_config,
-            category_config=category_config,
-            project_root=PROJECT_ROOT,
-        )
-        updated = restore_execution_only_detail_images(updated, payload)
-    except ImageAlbumFullError as exc:
-        context = dict(browser.last_result_context or {})
-        evidence = {
-            "reason": "image_album_full",
-            "message": str(exc),
-            "draft_id": str(((payload.get("workflow") or {}).get("pending_draft_id") or "")),
-            "failed_album_values": list(context.get("detail_images_failed_album_values") or []),
-            "platform_message": str(context.get("detail_images_album_full_message") or ""),
-            "shop_skip_remaining": True,
-        }
-        updated = advance_listing_state(payload, "execution_blocked", evidence=evidence)
-        repository.upsert_task(updated)
-        repository.record_latest_event(updated, operator_name=args.operator)
-        repository.finish_execution(
-            execution_id=execution_id,
-            status="blocked",
-            result=updated,
-            error_code="IMAGE_ALBUM_FULL",
-            error_summary=str(exc),
-        )
-        _write_result(updated, args.output)
-        return 2
-    except Exception as exc:
-        context = dict(browser.last_result_context or {})
-        failure_context_path = _write_failure_context(
-            args.output,
-            payload=payload,
-            context=context,
-            error=exc,
-        )
-        repository.finish_execution(
-            execution_id=execution_id,
-            status="failed",
-            error_code=type(exc).__name__,
-            error_summary=(
-                f"{exc}; failure_context={failure_context_path}"
-                if failure_context_path
-                else str(exc)
-            ),
-        )
-        raise
-    finally:
-        browser.close()
+    with ExitStack() as stack:
+        stack.enter_context(_build_listing_account_lock(args, payload))
+        execution_id = repository.start_execution(task_id=str(payload.get("task_id") or ""), mode=args.mode)
+        try:
+            browser.open()
+            if not args.skip_login:
+                browser.run_system_workflow(system_config, {})
+            updated, _context = execute_browser_task(
+                execution_payload,
+                mode=args.mode,
+                browser=browser,
+                platform_config=platform_config,
+                category_config=category_config,
+                project_root=PROJECT_ROOT,
+            )
+            updated = restore_execution_only_detail_images(updated, payload)
+        except ImageAlbumFullError as exc:
+            context = dict(browser.last_result_context or {})
+            evidence = {
+                "reason": "image_album_full",
+                "message": str(exc),
+                "draft_id": str(((payload.get("workflow") or {}).get("pending_draft_id") or "")),
+                "failed_album_values": list(context.get("detail_images_failed_album_values") or []),
+                "platform_message": str(context.get("detail_images_album_full_message") or ""),
+                "shop_skip_remaining": True,
+            }
+            updated = advance_listing_state(payload, "execution_blocked", evidence=evidence)
+            repository.upsert_task(updated)
+            repository.record_latest_event(updated, operator_name=args.operator)
+            repository.finish_execution(
+                execution_id=execution_id,
+                status="blocked",
+                result=updated,
+                error_code="IMAGE_ALBUM_FULL",
+                error_summary=str(exc),
+            )
+            _write_result(updated, args.output)
+            return 2
+        except Exception as exc:
+            context = dict(browser.last_result_context or {})
+            failure_context_path = _write_failure_context(
+                args.output,
+                payload=payload,
+                context=context,
+                error=exc,
+            )
+            repository.finish_execution(
+                execution_id=execution_id,
+                status="failed",
+                error_code=type(exc).__name__,
+                error_summary=(
+                    f"{exc}; failure_context={failure_context_path}"
+                    if failure_context_path
+                    else str(exc)
+                ),
+            )
+            raise
+        finally:
+            browser.close()
     repository.upsert_task(updated)
     repository.record_latest_event(updated, operator_name=args.operator)
     repository.finish_execution(execution_id=execution_id, status="success", result=updated)

@@ -1,5 +1,15 @@
 # DIRECT 1688 Progress
 
+## 2026-07-29 Managed Update (Independent Draft Acceptance Result)
+
+- User-authorized deletion removed the two corrupt historical CTG0286 drafts. One replacement draft was created: `6a69bee6e4b01cad1b297a52`.
+- Product management was verified on `tab=all`: shop `木刻理想`, 4 total drafts, one target row, and the target row's official `offerDraftId` link.
+- Request identity repair reached HTTP 200 with the expected ID, but independent persistence acceptance failed every business field. The official row link returns `SYS_ERROR`; startup network capture records no publish-page XHR/fetch before the error.
+- Old and non-target draft controls also return `SYS_ERROR`, so deleting/recreating the target again is not justified.
+- Code now rejects saved `operator=new` URLs for repair execution and post-save acceptance. Both repair and verification reopen through the official `draft2offer` entry and fail closed on `SYS_ERROR`.
+- Development verification passes: listing `421/421`, title engine `89 passed, 3 subtests passed`, 12 JSON files valid, and `git diff --check` clean.
+- Formal audit is corrected to `blocked/rejected` with no Offer. Approval, submit, writeback, and executor deployment remain pending platform recovery and a passed independent inspection.
+
 ## 2026-07-29 Managed Update (Existing-Draft Recovery Guard)
 
 - Replaced the synthetic `offer-new ... draftId=` repair URL with the platform's formal `fillProductInfo ... offerDraftId=` entry.

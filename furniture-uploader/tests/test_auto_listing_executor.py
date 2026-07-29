@@ -5,6 +5,7 @@ import sys
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -12,6 +13,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RPA_ROOT = PROJECT_ROOT / "rpa"
 if str(RPA_ROOT) not in sys.path:
     sys.path.insert(0, str(RPA_ROOT))
+SCRIPTS_ROOT = PROJECT_ROOT / "scripts"
+if str(SCRIPTS_ROOT) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_ROOT))
 
 from auto_listing import ListingContractError, advance_listing_state
 from auto_listing_executor import (
@@ -32,9 +36,22 @@ from auto_listing_executor import (
     resolve_1688_publish_url,
 )
 from test_auto_listing import sample_payload
+from run_1688_listing_task import _resolve_listing_account_lock_path
 
 
 class AutoListingExecutorTests(unittest.TestCase):
+    def test_listing_lock_is_scoped_to_the_payload_account(self) -> None:
+        payload = sample_payload()
+        payload["shop"]["account_key"] = "muke_lixiang"
+
+        lock_path, account_key = _resolve_listing_account_lock_path(
+            SimpleNamespace(shared_runtime_root=str(PROJECT_ROOT / "runtime")),
+            payload,
+        )
+
+        self.assertEqual(account_key, "muke_lixiang")
+        self.assertEqual(lock_path.name, "ali1688_account_muke_lixiang.lock")
+
     def test_browser_execution_is_disabled_by_default(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             with self.assertRaisesRegex(ListingContractError, "ENABLE_1688_LISTING_EXECUTION"):
@@ -208,6 +225,43 @@ class AutoListingExecutorTests(unittest.TestCase):
         self.assertIn("operator=draft2offer", url)
         self.assertIn("offerDraftId=draft-repair-123", url)
         self.assertTrue(url.startswith("https://offer.1688.com/offer/post/fillProductInfo.htm?"))
+
+    def test_draft_repair_uses_official_entry_even_with_saved_publish_url(self) -> None:
+        payload = sample_payload()
+        payload["product"]["category"] = "bedside_table"
+        payload["workflow"]["pending_draft_id"] = "draft-repair-123"
+        saved_url = (
+            "https://offer-new.1688.com/popular/publish.htm?"
+            "catId=122942001&saleChannel=default&operator=new&draftId=draft-repair-123"
+        )
+        payload["workflow"]["draft"] = {
+            "draft_id": "draft-repair-123",
+            "publish_url": saved_url,
+        }
+
+        url, category_id = resolve_1688_publish_url(payload, mode="draft")
+
+        self.assertEqual(category_id, "122942001")
+        self.assertIn("operator=draft2offer", url)
+        self.assertIn("offerDraftId=draft-repair-123", url)
+        self.assertTrue(url.startswith("https://offer.1688.com/offer/post/fillProductInfo.htm?"))
+
+    def test_draft_repair_does_not_trust_saved_publish_url_for_another_draft(self) -> None:
+        payload = sample_payload()
+        payload["product"]["category"] = "bedside_table"
+        payload["workflow"]["pending_draft_id"] = "draft-repair-123"
+        payload["workflow"]["draft"] = {
+            "draft_id": "draft-repair-123",
+            "publish_url": (
+                "https://offer-new.1688.com/popular/publish.htm?"
+                "catId=122942001&operator=new&draftId=draft-other"
+            ),
+        }
+
+        url, _category_id = resolve_1688_publish_url(payload, mode="draft")
+
+        self.assertIn("offerDraftId=draft-repair-123", url)
+        self.assertNotIn("draft-other", url)
 
     def test_draft_repair_steps_skip_existing_specs_and_core_fields(self) -> None:
         publish = {

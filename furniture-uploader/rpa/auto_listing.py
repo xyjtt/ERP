@@ -45,6 +45,7 @@ def validate_image_capacity_probe(
     probe: dict[str, Any],
     *,
     expected_draft_id: str,
+    allow_new_listing: bool = False,
     now: datetime | None = None,
 ) -> list[str]:
     errors: list[str] = []
@@ -68,7 +69,10 @@ def validate_image_capacity_probe(
     if bool(probe.get("draft_saved")) or bool(probe.get("offer_submitted")):
         errors.append("capacity probe must not save or submit the listing")
     draft_id = str(probe.get("draft_id") or "").strip()
-    if not expected_draft_id or draft_id != expected_draft_id:
+    if allow_new_listing:
+        if draft_id:
+            errors.append("new-listing capacity probe must not be bound to an existing draft_id")
+    elif not expected_draft_id or draft_id != expected_draft_id:
         errors.append("capacity probe draft_id must match pending_draft_id")
 
     checked_at_raw = str(probe.get("checked_at") or "").strip()
@@ -373,6 +377,7 @@ def advance_listing_state(payload: dict[str, Any], event: str, *, evidence: dict
     evidence = evidence or {}
     transitions = {
         (STATE_DRAFT_PENDING, "draft_saved"): STATE_DRAFT_PENDING_REVIEW,
+        (STATE_DRAFT_PENDING_REVIEW, "draft_verification_failed"): STATE_BLOCKED,
         (STATE_DRAFT_PENDING_REVIEW, "review_approved"): STATE_SUBMIT_PENDING,
         (STATE_DRAFT_PENDING_REVIEW, "review_rejected"): STATE_BLOCKED,
         (STATE_SUBMIT_PENDING, "submit_succeeded"): STATE_SUBMITTED,
@@ -382,6 +387,8 @@ def advance_listing_state(payload: dict[str, Any], event: str, *, evidence: dict
         (STATE_SUBMIT_PENDING, "execution_blocked"): STATE_BLOCKED,
         (STATE_BLOCKED, "execution_resumed"): STATE_DRAFT_PENDING,
         (STATE_BLOCKED, "review_repair_resumed"): STATE_DRAFT_PENDING,
+        (STATE_BLOCKED, "draft_verification_repair_resumed"): STATE_DRAFT_PENDING,
+        (STATE_BLOCKED, "authorized_draft_rebuild_resumed"): STATE_DRAFT_PENDING,
         (STATE_DRAFT_PENDING, "capacity_reverified"): STATE_DRAFT_PENDING,
     }
     next_state = transitions.get((current, event))
@@ -394,6 +401,77 @@ def advance_listing_state(payload: dict[str, Any], event: str, *, evidence: dict
     if event == "offer_written_back" and not evidence.get("offer_url"):
         raise ListingContractError("offer_url is required for writeback")
     review_repair_draft_id = ""
+    verification_repair_draft_id = ""
+    if event == "draft_verification_failed":
+        workflow = payload.get("workflow") or {}
+        current_draft_id = str(((workflow.get("draft") or {}).get("draft_id") or "")).strip()
+        evidence_draft_id = str(evidence.get("draft_id") or "").strip()
+        missing_checks = [str(item or "").strip() for item in list(evidence.get("missing_checks") or [])]
+        missing_checks = [item for item in missing_checks if item]
+        if not current_draft_id or evidence_draft_id != current_draft_id:
+            raise ListingContractError("draft verification failure must match the current draft_id")
+        if str(evidence.get("reason") or "").strip() != "server_draft_fields_missing":
+            raise ListingContractError("draft verification failure requires a server field failure reason")
+        if str(evidence.get("inspection_status") or "").strip() != "failed" or not missing_checks:
+            raise ListingContractError("draft verification failure requires failed independent checks")
+    if event == "draft_verification_repair_resumed":
+        workflow = payload.get("workflow") or {}
+        if str(workflow.get("last_event") or "").strip() != "draft_verification_failed":
+            raise ListingContractError("draft verification repair requires the latest verification failure")
+        current_draft_id = str(((workflow.get("draft") or {}).get("draft_id") or "")).strip()
+        failed_draft_id = str(((workflow.get("last_event_evidence") or {}).get("draft_id") or "")).strip()
+        requested_draft_id = str(evidence.get("draft_id") or "").strip()
+        verification_repair_draft_id = requested_draft_id or failed_draft_id or current_draft_id
+        if not current_draft_id or verification_repair_draft_id != current_draft_id:
+            raise ListingContractError("draft verification repair must reuse the failed draft_id")
+        if str(evidence.get("reason") or "").strip() != "server_draft_fields_missing":
+            raise ListingContractError("draft verification repair requires a server field failure reason")
+        if not str(evidence.get("resumed_by") or "").strip():
+            raise ListingContractError("resumed_by is required for draft verification repair")
+        probe_errors = validate_image_capacity_probe(
+            dict(evidence.get("capacity_probe") or {}),
+            expected_draft_id=verification_repair_draft_id,
+        )
+        if probe_errors:
+            raise ListingContractError("invalid draft verification repair capacity probe: " + "; ".join(probe_errors))
+    if event == "authorized_draft_rebuild_resumed":
+        workflow = payload.get("workflow") or {}
+        if str(workflow.get("last_event") or "").strip() != "review_rejected":
+            raise ListingContractError("draft rebuild requires the latest event to be review_rejected")
+        if str(evidence.get("reason") or "").strip() != "authorized_corrupt_draft_rebuild":
+            raise ListingContractError("draft rebuild requires explicit corrupt-draft authorization")
+        if not str(evidence.get("authorized_by") or "").strip():
+            raise ListingContractError("authorized_by is required for draft rebuild")
+        known_draft_ids = {
+            str(((item.get("evidence") or {}).get("draft_id") or "")).strip()
+            for item in list(workflow.get("event_history") or [])
+            if isinstance(item, dict) and str(item.get("event") or "").strip() == "draft_saved"
+        }
+        known_draft_ids.discard("")
+        deletion_evidence = dict(evidence.get("deletion_evidence") or {})
+        deleted_draft_ids = {
+            str(item or "").strip()
+            for item in list(deletion_evidence.get("deleted_draft_ids") or [])
+            if str(item or "").strip()
+        }
+        remaining_target_ids = {
+            str(item or "").strip()
+            for item in list(deletion_evidence.get("remaining_target_ids") or [])
+            if str(item or "").strip()
+        }
+        if deletion_evidence.get("status") != "passed":
+            raise ListingContractError("draft rebuild requires passed deletion evidence")
+        if not known_draft_ids or not known_draft_ids.issubset(deleted_draft_ids):
+            raise ListingContractError("deletion evidence must cover every historical draft_id")
+        if known_draft_ids & remaining_target_ids:
+            raise ListingContractError("historical draft_id remains visible after deletion")
+        probe_errors = validate_image_capacity_probe(
+            dict(evidence.get("capacity_probe") or {}),
+            expected_draft_id="",
+            allow_new_listing=True,
+        )
+        if probe_errors:
+            raise ListingContractError("invalid new-listing image capacity probe: " + "; ".join(probe_errors))
     if event in {"execution_resumed", "review_repair_resumed", "capacity_reverified"}:
         workflow = payload.get("workflow") or {}
         blocked_reason = str((workflow.get("last_event_evidence") or {}).get("reason") or "").strip()
@@ -446,6 +524,21 @@ def advance_listing_state(payload: dict[str, Any], event: str, *, evidence: dict
     workflow["event_history"] = event_history
     if event == "review_repair_resumed":
         workflow["pending_draft_id"] = review_repair_draft_id
+    elif event == "draft_verification_failed":
+        workflow["pending_draft_id"] = str(evidence.get("draft_id") or "").strip()
+        draft = workflow.setdefault("draft", {})
+        draft["post_save_verified"] = False
+        draft["repair_scope"] = "full"
+        draft["missing_checks"] = list(evidence.get("missing_checks") or [])
+    elif event == "draft_verification_repair_resumed":
+        workflow["pending_draft_id"] = verification_repair_draft_id
+        draft = workflow.setdefault("draft", {})
+        draft["post_save_verified"] = False
+        draft["repair_scope"] = "full"
+    elif event == "authorized_draft_rebuild_resumed":
+        workflow["rebuild"] = dict(evidence)
+        workflow.pop("draft", None)
+        workflow.pop("pending_draft_id", None)
     if event == "draft_saved":
         workflow["draft"] = dict(evidence)
         workflow.pop("pending_draft_id", None)

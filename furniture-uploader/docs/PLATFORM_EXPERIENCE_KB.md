@@ -1,5 +1,13 @@
 # Platform Experience Knowledge Base
 
+## 2026-07-29 Managed Update (Independent Draft Persistence)
+
+- A successful `draftSubmit` response, matching response ID, and same-session page reload are necessary but not sufficient. Persistent acceptance requires a fresh official `draft2offer` reopen and exact full-field checks.
+- Never use `offer-new ... operator=new&catId=...&draftId=...` as repair execution or persistence evidence. It can render a valid empty form for the expected ID while the official draft entry is unusable.
+- `SYS_ERROR` can be returned in the initial publish HTML before any XHR/fetch request. Capture URL, body text, operation code, screenshot, and boot-network records, then classify the draft entry as unavailable.
+- Use non-target draft controls before diagnosing one draft as corrupt. For `木刻理想`, the target and two control drafts all returned `SYS_ERROR`, which indicates account/platform draft-entry failure.
+- On an independent-field failure, write `draft_verification_failed` to the formal audit and block approval/submit. Do not preserve a false `draft_pending_review` state from an earlier same-session check.
+
 ## 2026-07-29 Managed Update (1688 Draft Identity and Recovery Links)
 
 - Existing-draft editing should start from `https://offer.1688.com/offer/post/fillProductInfo.htm?operator=draft2offer&offerDraftId=<id>`, then verify the final URL and `SellPublishSdk` state expose the same ID.

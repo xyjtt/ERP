@@ -1,5 +1,13 @@
 # Project Evolution
 
+## 2026-07-29 - Draft Acceptance Became Independently Verifiable
+
+- User-authorized cleanup reduced CTG0286 to one replacement draft, `6a69bee6e4b01cad1b297a52`.
+- Identity-patched save reached HTTP 200, but a fresh browser proved that the saved business fields were absent and the official management link returned `SYS_ERROR`.
+- Repair execution and post-save verification now always use the platform's official `draft2offer` entry; saved new-listing URLs are retained only as diagnostics.
+- The independent inspector can follow the actual `tab=all` row link, fail fast on the platform error page, and capture publish-boot network evidence without saving or submitting.
+- Formal workflow correction changed the task from false `draft_pending_review` to `blocked`. This prevents approval, submit, Offer writeback, and executor deployment from advancing on a same-session false positive.
+
 ## 2026-07-29 - Draft Recovery Became Identity-Bound
 
 - Draft repair moved from reconstructing a publish URL to using the platform's own `offerDraftId` edit entry.

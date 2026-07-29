@@ -59,6 +59,84 @@ class BrowserRPAHelperTests(unittest.TestCase):
 
         self.assertIsNone(self.browser.driver)
 
+    def test_reopen_saved_draft_from_server_discards_current_page_state(self) -> None:
+        saved_url = (
+            "https://offer-new.1688.com/popular/publish.htm?"
+            "catId=122942001&operator=new&draftId=draft-1"
+        )
+
+        class ReopenDriver(FakeDriver):
+            def __init__(self) -> None:
+                super().__init__(current_url=saved_url)
+                self.visited: list[str] = []
+
+            def get(self, url: str) -> None:
+                self.visited.append(url)
+                if "fillProductInfo.htm" in url:
+                    self.current_url = (
+                        "https://offer-new.1688.com/popular/publish.htm?"
+                        "draftId=draft-1&operator=draft2offer"
+                    )
+                else:
+                    self.current_url = url
+
+        driver = ReopenDriver()
+        self.browser.driver = driver
+        context: dict[str, object] = {}
+        with (
+            patch.object(self.browser, "_pause"),
+            patch.object(self.browser, "_wait_for_publish_runtime_ready"),
+        ):
+            self.browser._reopen_saved_draft_from_server(
+                {"expected_draft_id": "draft-1"},
+                context,
+                wait_seconds=0,
+            )
+
+        self.assertEqual(driver.visited[0], "about:blank")
+        self.assertIn("fillProductInfo.htm", driver.visited[1])
+        self.assertIn("offerDraftId=draft-1", driver.visited[1])
+        self.assertTrue(context.get("draft_verify_server_reopened"))
+        self.assertEqual(context.get("draft_server_reopen_draft_id"), "draft-1")
+        self.assertEqual(context.get("draft_verify_server_reopened_url"), driver.current_url)
+
+    def test_reopen_saved_draft_rejects_official_sys_error_page(self) -> None:
+        saved_url = (
+            "https://offer-new.1688.com/popular/publish.htm?"
+            "catId=122942001&operator=new&draftId=draft-1"
+        )
+
+        class SysErrorDriver(FakeDriver):
+            def get(self, url: str) -> None:
+                self.current_url = url
+
+            def execute_script(self, script: str, *args: object) -> str:
+                return "出错啦！ 系统错误,请稍后重试 错误码：SYS_ERROR"
+
+        self.browser.driver = SysErrorDriver(current_url=saved_url)
+        with patch.object(self.browser, "_pause"):
+            with self.assertRaisesRegex(PublishValidationError, "official draft reopen returned SYS_ERROR"):
+                self.browser._reopen_saved_draft_from_server(
+                    {"expected_draft_id": "draft-1"},
+                    {},
+                    wait_seconds=0,
+                )
+
+    def test_reopen_saved_draft_requires_category_and_matching_identity(self) -> None:
+        self.browser.driver = FakeDriver(
+            current_url=(
+                "https://offer-new.1688.com/popular/publish.htm?"
+                "operator=new&draftId=draft-other"
+            )
+        )
+
+        with self.assertRaisesRegex(PublishValidationError, "expected draft and category"):
+            self.browser._reopen_saved_draft_from_server(
+                {"expected_draft_id": "draft-1"},
+                {},
+                wait_seconds=0,
+            )
+
     def test_build_picker_album_name_uses_prefix(self) -> None:
         album_name = self.browser._build_picker_album_name({"auto_album_name_prefix": "DETAIL"})
         self.assertTrue(album_name.startswith("DETAIL_"))
@@ -1336,6 +1414,37 @@ class BrowserRPAHelperTests(unittest.TestCase):
         self.assertTrue(state["square"])
         self.assertEqual(state["width"], 1067)
 
+    def test_draft_main_image_state_scopes_dom_image_to_first_product_slot(self) -> None:
+        class MainImageStateDriver(FakeDriver):
+            def __init__(self) -> None:
+                super().__init__()
+                self.script = ""
+
+            def execute_script(self, script: str, *args: object) -> object:
+                self.script = script
+                return {
+                    "present": True,
+                    "square": True,
+                    "width": 800,
+                    "height": 800,
+                    "url": "https://cbu01.alicdn.com/img/ibank/main-square.jpg",
+                }
+
+        driver = MainImageStateDriver()
+        self.browser.driver = driver
+
+        self.browser._draft_main_image_state()
+
+        self.assertIn(
+            "#guid-primaryPicture .picture-sort-list .picture-sort-item",
+            driver.script,
+        )
+        self.assertIn(".picture-cover-content img, img", driver.script)
+        self.assertNotIn(
+            "document.querySelectorAll('#guid-primaryPicture img')",
+            driver.script,
+        )
+
     def test_prepare_main_image_slot_reuses_existing_square_image(self) -> None:
         class SquareImageDriver(FakeDriver):
             def execute_script(self, script: str, *args: object) -> object:
@@ -2457,6 +2566,15 @@ class BrowserRPAHelperTests(unittest.TestCase):
             "",
         )
 
+    def test_resolve_draft_request_patch_modes_accepts_identity_only(self) -> None:
+        modes = self.browser._resolve_draft_request_patch_modes(
+            {
+                "draft_request_patch": {"enabled": True},
+                "draft_request_patch_retry_modes": ["identity_only", "capture_only", "invalid"],
+            }
+        )
+        self.assertEqual(modes, ["identity_only", "capture_only"])
+
     def test_is_draft_submit_backend_reject_error(self) -> None:
         self.assertTrue(
             self.browser._is_draft_submit_backend_reject_error(
@@ -2501,9 +2619,43 @@ class BrowserRPAHelperTests(unittest.TestCase):
         self.assertIsInstance(payload, dict)
         self.assertEqual(payload.get("patchMode"), "capture_only")
         self.assertEqual(payload.get("applyPatch"), False)
+        self.assertEqual(payload.get("applyIdentityPatch"), False)
         self.assertEqual(payload.get("quotationTypeText"), "按产品规格报价")
         self.assertEqual(payload.get("unitText"), "件")
         self.assertEqual(payload.get("minBeginAmount"), "1")
+
+    def test_install_draft_request_patch_identity_only_changes_identity_fields(self) -> None:
+        class PatchDriver(FakeDriver):
+            def __init__(self) -> None:
+                super().__init__()
+                self.last_script = ""
+                self.last_args: tuple[object, ...] = ()
+
+            def execute_script(self, script: str, *args: object) -> object:
+                self.last_script = script
+                self.last_args = args
+                return None
+
+        driver = PatchDriver()
+        self.browser.driver = driver
+        self.browser._install_draft_request_patch(
+            {
+                "expected_draft_id": "draft-existing-1",
+                "draft_request_patch": {"enabled": True},
+            },
+            {
+                "draft_request_patch_mode": "identity_only",
+                "title": "must remain native",
+            },
+        )
+
+        payload = driver.last_args[0]
+        self.assertEqual(payload.get("patchMode"), "identity_only")
+        self.assertEqual(payload.get("applyPatch"), False)
+        self.assertEqual(payload.get("applyIdentityPatch"), True)
+        self.assertIn("systemParam.draftId = expected", driver.last_script)
+        self.assertIn("searchParams.set('draftId', expected)", driver.last_script)
+        self.assertIn("__codexDraftIdentityPatchProbe", driver.last_script)
 
     def test_install_draft_request_patch_includes_expected_draft_identity(self) -> None:
         class PatchDriver(FakeDriver):

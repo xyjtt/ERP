@@ -1,5 +1,16 @@
 # Project Memory
 
+## 2026-07-29 Managed Update (CTG0286 Independent Persistence Gate)
+
+- User-authorized cleanup deleted corrupt drafts `6a635fcee4b0eda6ebbdf340` and `6a6976c1e4b09c827f2edbc9`. The only CTG0286 draft is now `6a69bee6e4b01cad1b297a52`; do not create another draft while it remains present.
+- The product-management `tab=all` page shows 4 total drafts and exactly one row for the target ID under shop `木刻理想`.
+- A patched `draftSubmit` returned HTTP 200 and the expected ID, but a fresh independent browser reopened the saved URL with empty title, price, inventory, images, specifications, and logistics. The official management-row link returned `SYS_ERROR` before any publish-page XHR/fetch request.
+- Two non-target control drafts, including the oldest visible draft, also returned `SYS_ERROR` from their official management links. This establishes an account/platform draft-entry blocker rather than a target selector or tab error.
+- Draft execution and post-save verification must use the official `fillProductInfo.htm?operator=draft2offer&offerDraftId=...` entry. A same-session reload of the `operator=new&catId=...` URL is not persistence evidence.
+- Formal `JSReportReplica.app` state is `workflow_state=blocked`, `approval_status=rejected`; latest audit event is `draft_verification_failed` by `codex-listing-independent-verifier`. No submit, Offer ID, or writeback occurred.
+- Development verification passes: listing `421/421`, title engine `89 passed, 3 subtests passed`, 12 JSON files valid, Python compile and `git diff --check` clean.
+- Approval, submit, executor deployment, and another delete/rebuild are prohibited until the official draft entry loads and an independent full-field inspection passes.
+
 ## 2026-07-29 Managed Update (CTG0286 Draft Identity Recovery)
 
 - CTG0286 recovery is limited to the two historical draft IDs already present in workflow evidence: `6a635fcee4b0eda6ebbdf340` and `6a6976c1e4b09c827f2edbc9`. Do not create a third draft and do not delete either draft automatically.

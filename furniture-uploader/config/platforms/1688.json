@@ -128,8 +128,7 @@
       "必填项未填写"
     ],
     "draft_request_patch_retry_modes": [
-      "full",
-      "capture_only"
+      "identity_only"
     ],
     "draft_buyer_protection_allow_fallback": false,
     "submit_reapply_nonpersistent_fields": [
@@ -143,6 +142,7 @@
     ],
     "draft_verification": {
       "enabled": true,
+      "server_reopen_after_save": true,
       "refresh_after_save": true,
       "settle_seconds": 1.2,
       "refresh_wait_seconds": 4,

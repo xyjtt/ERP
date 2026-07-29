@@ -305,6 +305,155 @@ class AutoListingContractTests(unittest.TestCase):
                 },
             )
 
+    def test_authorized_rebuild_requires_all_historical_drafts_deleted(self) -> None:
+        first = advance_listing_state(
+            sample_payload(),
+            "draft_saved",
+            evidence={"draft_id": "draft-old", "draft_url": "https://draft.invalid/old"},
+        )
+        rejected = advance_listing_state(first, "review_rejected", evidence={"rejected_by": "reviewer"})
+        resumed = advance_listing_state(
+            rejected,
+            "review_repair_resumed",
+            evidence={
+                "resumed_by": "operator",
+                "reason": "review_required_fields_repair",
+                "draft_id": "draft-old",
+                "capacity_probe": {
+                    "status": "passed",
+                    "probe_count": 2,
+                    "uploaded_count": 2,
+                    "remote_hosts": ["cbu01.alicdn.com"],
+                    "draft_id": "draft-old",
+                    "checked_at": datetime.now(timezone.utc).isoformat(),
+                    "draft_saved": False,
+                    "offer_submitted": False,
+                },
+            },
+        )
+        second = advance_listing_state(
+            resumed,
+            "draft_saved",
+            evidence={"draft_id": "draft-new", "draft_url": "https://draft.invalid/new"},
+        )
+        rejected_again = advance_listing_state(
+            second,
+            "review_rejected",
+            evidence={"rejected_by": "reviewer"},
+        )
+        capacity_probe = {
+            "status": "passed",
+            "probe_count": 2,
+            "uploaded_count": 2,
+            "remote_hosts": ["cbu01.alicdn.com"],
+            "draft_id": "",
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+            "draft_saved": False,
+            "offer_submitted": False,
+        }
+
+        with self.assertRaisesRegex(ListingContractError, "every historical draft_id"):
+            advance_listing_state(
+                rejected_again,
+                "authorized_draft_rebuild_resumed",
+                evidence={
+                    "authorized_by": "user-approved",
+                    "reason": "authorized_corrupt_draft_rebuild",
+                    "deletion_evidence": {
+                        "status": "passed",
+                        "deleted_draft_ids": ["draft-new"],
+                        "remaining_target_ids": [],
+                    },
+                    "capacity_probe": capacity_probe,
+                },
+            )
+
+        rebuilt = advance_listing_state(
+            rejected_again,
+            "authorized_draft_rebuild_resumed",
+            evidence={
+                "authorized_by": "user-approved",
+                "reason": "authorized_corrupt_draft_rebuild",
+                "deletion_evidence": {
+                    "status": "passed",
+                    "deleted_draft_ids": ["draft-old", "draft-new"],
+                    "remaining_target_ids": [],
+                },
+                "capacity_probe": capacity_probe,
+            },
+        )
+
+        self.assertEqual(rebuilt["workflow"]["state"], STATE_DRAFT_PENDING)
+        self.assertEqual(rebuilt["workflow"]["last_event"], "authorized_draft_rebuild_resumed")
+        self.assertNotIn("draft", rebuilt["workflow"])
+        self.assertNotIn("pending_draft_id", rebuilt["workflow"])
+
+    def test_failed_server_inspection_can_only_resume_the_same_draft(self) -> None:
+        saved = advance_listing_state(
+            sample_payload(),
+            "draft_saved",
+            evidence={
+                "draft_id": "draft-current",
+                "draft_url": "https://draft.invalid/current",
+                "publish_url": (
+                    "https://offer-new.1688.com/popular/publish.htm?"
+                    "catId=122942001&operator=new&draftId=draft-current"
+                ),
+                "post_save_verified": True,
+            },
+        )
+        failed = advance_listing_state(
+            saved,
+            "draft_verification_failed",
+            evidence={
+                "reason": "server_draft_fields_missing",
+                "draft_id": "draft-current",
+                "inspection_status": "failed",
+                "missing_checks": ["title", "main_image_present"],
+            },
+        )
+
+        self.assertEqual(failed["workflow"]["state"], STATE_BLOCKED)
+        self.assertEqual(failed["workflow"]["pending_draft_id"], "draft-current")
+        self.assertEqual(failed["workflow"]["draft"]["repair_scope"], "full")
+        self.assertFalse(failed["workflow"]["draft"]["post_save_verified"])
+
+        capacity_probe = {
+            "status": "passed",
+            "probe_count": 2,
+            "uploaded_count": 2,
+            "remote_hosts": ["cbu01.alicdn.com"],
+            "draft_id": "draft-current",
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+            "draft_saved": False,
+            "offer_submitted": False,
+        }
+        with self.assertRaisesRegex(ListingContractError, "reuse the failed draft_id"):
+            advance_listing_state(
+                failed,
+                "draft_verification_repair_resumed",
+                evidence={
+                    "resumed_by": "operator",
+                    "reason": "server_draft_fields_missing",
+                    "draft_id": "draft-other",
+                    "capacity_probe": {**capacity_probe, "draft_id": "draft-other"},
+                },
+            )
+
+        resumed = advance_listing_state(
+            failed,
+            "draft_verification_repair_resumed",
+            evidence={
+                "resumed_by": "operator",
+                "reason": "server_draft_fields_missing",
+                "draft_id": "draft-current",
+                "capacity_probe": capacity_probe,
+            },
+        )
+        self.assertEqual(resumed["workflow"]["state"], STATE_DRAFT_PENDING)
+        self.assertEqual(resumed["workflow"]["pending_draft_id"], "draft-current")
+        self.assertEqual(resumed["workflow"]["draft"]["repair_scope"], "full")
+
     def test_execution_blocked_records_image_album_capacity_gate(self) -> None:
         blocked = advance_listing_state(
             sample_payload(),
