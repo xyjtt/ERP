@@ -24,6 +24,14 @@ from stop_sale_audit import hydrate_dingtalk_credentials
 from stop_sale_audit import resolve_stop_sale_app_config
 from sku_replace_audit import SkuReplaceAuditRepository
 from config_loader import load_json_with_local_override
+from cross_project_runtime import (
+    RuntimeLeaseGuard,
+    RuntimeLeaseRepository,
+    resolve_build_sha,
+    resolve_executor_binding,
+)
+from operation_saga import OperationSagaRepository
+from sku_operation_saga import build_saga_operations, persist_ali1688_results
 from sku_offline_main import resolve_store_account_binding
 from sku_offline_tasks import (
     dedupe_offline_tasks,
@@ -70,6 +78,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--lock-stale-seconds", type=int, default=21600)
     parser.add_argument("--lock-poll-seconds", type=float, default=10.0)
+    parser.add_argument("--runtime-lease-wait-seconds", type=float, default=4800)
+    parser.add_argument("--runtime-lease-poll-seconds", type=float, default=5.0)
     parser.add_argument("--jushuitan-lock-wait-seconds", type=int, default=3600)
     parser.add_argument("--1688-timeout-seconds", dest="timeout_1688_seconds", type=int, default=2700)
     parser.add_argument("--jushuitan-timeout-seconds", dest="timeout_jushuitan_seconds", type=int, default=1200)
@@ -120,23 +130,27 @@ def build_jushuitan_command(
     results_dir: Path,
 ) -> list[str]:
     command = [
-        "npm.cmd" if sys.platform == "win32" else "npm",
-        "run",
-        "sync:1688",
-        "--",
-        "--mode",
-        args.mode,
-        "--file",
+        sys.executable,
+        str(PROJECT_ROOT / "scripts" / "run_1688_jushuitan_outbox_worker.py"),
+        "--action",
+        "sync",
+        "--shared-runtime-root",
+        str(Path(args.shared_runtime_root).resolve()),
+        "--jushuitan-root",
+        str(Path(getattr(args, "jushuitan_root", DEFAULT_JUSHUITAN_ROOT)).resolve()),
+        "--timeout-seconds",
+        str(getattr(args, "timeout_jushuitan_seconds", 1200)),
+        "--limit",
+        str(args.limit if args.limit > 0 else 10000),
+        "--handoff-out",
         str(handoff_path),
         "--results-dir",
-        str(results_dir),
+        str(results_dir.resolve()),
     ]
     if args.run_id:
         command.extend(["--run-id", args.run_id])
     if args.mode == "execute":
         command.append("--yes")
-    if args.no_notify:
-        command.append("--no-notify")
     return command
 
 
@@ -249,6 +263,8 @@ def run(args: argparse.Namespace) -> int:
         raise ValueError("lock wait values must be non-negative")
     if args.crawler_task_wait_seconds < 0 or args.crawler_task_poll_seconds <= 0:
         raise ValueError("crawler task wait must be non-negative and poll must be positive")
+    if args.runtime_lease_wait_seconds < 0 or args.runtime_lease_poll_seconds <= 0:
+        raise ValueError("runtime lease wait must be non-negative and poll must be positive")
     if args.timeout_1688_seconds <= 0 or args.timeout_jushuitan_seconds <= 0:
         raise ValueError("stage timeouts must be positive")
     if args.mode == "execute" and not args.no_notify:
@@ -277,6 +293,9 @@ def run(args: argparse.Namespace) -> int:
     audit_tasks: list[Any] = []
     account_key = ""
     store_name = ""
+    runtime_guard: RuntimeLeaseGuard | None = None
+    saga_repository: OperationSagaRepository | None = None
+    saga_operations = []
     if args.mode == "execute":
         audit_config = resolve_stop_sale_app_config(args.shared_runtime_root)
         audit_repository = SkuReplaceAuditRepository(audit_config)
@@ -291,6 +310,40 @@ def run(args: argparse.Namespace) -> int:
         if not audit_tasks:
             raise ValueError("No executable SKU replacement tasks were selected")
         account_key, store_name = resolve_pipeline_account(args, audit_tasks)
+        system_config = load_json_with_local_override(
+            PROJECT_ROOT / "config" / "systems" / "1688_sku_replace.json"
+        )
+        store_binding = resolve_store_account_binding(system_config, store_name)
+        binding = resolve_executor_binding(
+            account_key,
+            fallback_profile_ref=str(store_binding.get("browser_profile_dir") or ""),
+            fallback_cdp_port=int(store_binding.get("cdp_port") or 0),
+        )
+        build_sha = resolve_build_sha(PROJECT_ROOT.parent)
+        saga_repository = OperationSagaRepository(audit_config)
+        saga_contract = saga_repository.check_contract()
+        if not saga_contract.get("ready"):
+            raise RuntimeError(
+                "ERP operation saga tables are missing: "
+                + ", ".join(str(item) for item in saga_contract.get("missing_tables") or [])
+            )
+        saga_operations = build_saga_operations(
+            "sku_replace",
+            run_id,
+            account_key,
+            audit_tasks,
+        )
+        runtime_guard = RuntimeLeaseGuard(
+            RuntimeLeaseRepository(audit_config),
+            binding=binding,
+            task_type="sku_replace",
+            run_id=run_id,
+            request_key=f"sku_replace:{run_id}:{account_key}",
+            build_sha=build_sha,
+            component="erp-sku-replace",
+            wait_timeout_seconds=args.runtime_lease_wait_seconds,
+            poll_interval_seconds=args.runtime_lease_poll_seconds,
+        )
         if audit_repository.count_recent_active_runs(
             args.active_run_max_age_minutes,
             store_name=store_name,
@@ -346,19 +399,62 @@ def run(args: argparse.Namespace) -> int:
                 if audit_started and audit_repository is not None
                 else None
             )
-            emit_pipeline_event(
-                run_id,
-                "1688_replace_stage_started",
-                timeout_seconds=args.timeout_1688_seconds,
-            )
-            stage_1688 = run_stage_command(
-                build_1688_command(args, handoff_path),
-                cwd=PROJECT_ROOT,
-                timeout_seconds=args.timeout_1688_seconds,
-                stage="1688_replace",
-                heartbeat=heartbeat,
-            )
-            return_1688 = stage_1688.returncode
+            if args.mode == "execute":
+                if runtime_guard is None or saga_repository is None:
+                    raise RuntimeError("execute mode requires runtime lease and Saga repositories")
+                with runtime_guard:
+                    saga_repository.prepare_many(
+                        saga_operations,
+                        owner_token=runtime_guard.owner_token,
+                        account_fencing_token=runtime_guard.account_fencing_token,
+                        browser_slot_key=runtime_guard.browser_slot_key,
+                        browser_slot_fencing_token=runtime_guard.browser_slot_fencing_token,
+                    )
+                    command_environment = os.environ.copy()
+                    command_environment.update(runtime_guard.environment())
+                    emit_pipeline_event(
+                        run_id,
+                        "1688_replace_stage_started",
+                        timeout_seconds=args.timeout_1688_seconds,
+                        account_fencing_token=runtime_guard.account_fencing_token,
+                        browser_slot_key=runtime_guard.browser_slot_key,
+                        browser_slot_fencing_token=runtime_guard.browser_slot_fencing_token,
+                    )
+                    stage_1688 = run_stage_command(
+                        build_1688_command(args, handoff_path),
+                        cwd=PROJECT_ROOT,
+                        timeout_seconds=args.timeout_1688_seconds,
+                        stage="1688_replace",
+                        env=command_environment,
+                        heartbeat=runtime_guard.assert_active,
+                        heartbeat_interval_seconds=10,
+                    )
+                    return_1688 = stage_1688.returncode
+                    runtime_guard.assert_active()
+                    replace_records_now = load_jsonl_records(report_path)
+                    persist_ali1688_results(
+                        saga_repository,
+                        task_type="sku_replace",
+                        operations=saga_operations,
+                        records=replace_records_now,
+                        account_fencing_token=runtime_guard.account_fencing_token,
+                    )
+                    if heartbeat is not None:
+                        heartbeat()
+            else:
+                emit_pipeline_event(
+                    run_id,
+                    "1688_replace_stage_started",
+                    timeout_seconds=args.timeout_1688_seconds,
+                )
+                stage_1688 = run_stage_command(
+                    build_1688_command(args, handoff_path),
+                    cwd=PROJECT_ROOT,
+                    timeout_seconds=args.timeout_1688_seconds,
+                    stage="1688_replace",
+                    heartbeat=heartbeat,
+                )
+                return_1688 = stage_1688.returncode
             emit_pipeline_event(run_id, "1688_replace_stage_finished", return_code=return_1688)
             handoff_count = count_handoff_records(handoff_path)
             if handoff_count > 0:
@@ -384,7 +480,7 @@ def run(args: argparse.Namespace) -> int:
                         cwd=jushuitan_root,
                         timeout_seconds=args.timeout_jushuitan_seconds,
                         stage="jushuitan_sync_by_link",
-                        env=build_jushuitan_environment(handoff_path),
+                        env=os.environ.copy(),
                         heartbeat=heartbeat,
                     )
                     return_jushuitan = stage_jst.returncode

@@ -29,6 +29,13 @@ from auto_listing_executor import (
 from config_loader import load_json_with_local_override
 from exceptions import ImageAlbumFullError
 from listing_audit import ListingAuditRepository
+from cross_project_runtime import (
+    RuntimeLeaseGuard,
+    RuntimeLeaseRepository,
+    resolve_build_sha,
+    resolve_executor_binding,
+)
+from operation_saga import OperationSagaRepository, SagaOperation, build_operation_key
 from stop_sale_audit import resolve_stop_sale_app_config
 
 
@@ -105,6 +112,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lock-wait-seconds", type=int, default=0)
     parser.add_argument("--lock-stale-seconds", type=int, default=21600)
     parser.add_argument("--lock-poll-seconds", type=float, default=5.0)
+    parser.add_argument("--runtime-lease-wait-seconds", type=float, default=4800)
+    parser.add_argument("--runtime-lease-poll-seconds", type=float, default=5.0)
     return parser
 
 
@@ -368,9 +377,56 @@ def main() -> int:
     operator_config = load_json_with_local_override(config_dir / "operator_config.json")
     category_config = load_json_with_local_override(config_dir / "furniture_categories.json")
     browser = BrowserRPA(operator_config.get("browser", {}), PROJECT_ROOT)
+    app_config = resolve_stop_sale_app_config(args.shared_runtime_root)
+    saga_repository = OperationSagaRepository(app_config)
+    saga_contract = saga_repository.check_contract()
+    if not saga_contract.get("ready"):
+        raise RuntimeError(
+            "ERP operation saga tables are missing: "
+            + ", ".join(str(item) for item in saga_contract.get("missing_tables") or [])
+        )
+    task_id = str(payload.get("task_id") or "").strip()
+    account_key = str(((payload.get("shop") or {}).get("account_key") or "")).strip()
+    operation_key = build_operation_key("listing", account_key, task_id)
+    build_sha = resolve_build_sha(PROJECT_ROOT.parent)
+    binding = resolve_executor_binding(account_key)
     with ExitStack() as stack:
         stack.enter_context(_build_listing_account_lock(args, payload))
-        execution_id = repository.start_execution(task_id=str(payload.get("task_id") or ""), mode=args.mode)
+        runtime_guard = stack.enter_context(
+            RuntimeLeaseGuard(
+                RuntimeLeaseRepository(app_config),
+                binding=binding,
+                task_type="listing",
+                run_id=task_id,
+                request_key=operation_key,
+                build_sha=build_sha,
+                component="erp-listing",
+                wait_timeout_seconds=args.runtime_lease_wait_seconds,
+                poll_interval_seconds=args.runtime_lease_poll_seconds,
+            )
+        )
+        browser.set_runtime_action_guard(runtime_guard.assert_active)
+        runtime_guard.register_owned_browser_closer(browser.close)
+        saga_repository.prepare(
+            SagaOperation(
+                operation_key=operation_key,
+                run_id=task_id,
+                task_type="listing",
+                account_key=account_key,
+                business_key=task_id,
+                payload={
+                    "task_id": task_id,
+                    "mode": args.mode,
+                    "shop_name": str(((payload.get("shop") or {}).get("shop_name") or "")),
+                    "company_sku": str(((payload.get("source") or {}).get("company_sku") or "")),
+                },
+            ),
+            owner_token=runtime_guard.owner_token,
+            account_fencing_token=runtime_guard.account_fencing_token,
+            browser_slot_key=runtime_guard.browser_slot_key,
+            browser_slot_fencing_token=runtime_guard.browser_slot_fencing_token,
+        )
+        execution_id = repository.start_execution(task_id=task_id, mode=args.mode)
         try:
             browser.open()
             if not args.skip_login:
@@ -384,6 +440,20 @@ def main() -> int:
                 project_root=PROJECT_ROOT,
             )
             updated = restore_execution_only_detail_images(updated, payload)
+            runtime_guard.assert_active()
+            updated["runtime_lease"] = {
+                "protocol_version": 1,
+                "build_sha": build_sha,
+                "account_fencing_token": runtime_guard.account_fencing_token,
+                "browser_slot_key": runtime_guard.browser_slot_key,
+                "browser_slot_fencing_token": runtime_guard.browser_slot_fencing_token,
+            }
+            saga_repository.record_ali1688_result(
+                operation_key=operation_key,
+                account_fencing_token=runtime_guard.account_fencing_token,
+                status="draft_saved" if args.mode == "draft" else "submit_succeeded",
+                evidence={"workflow": updated.get("workflow") or {}, "runtime": updated["runtime_lease"]},
+            )
         except ImageAlbumFullError as exc:
             context = dict(browser.last_result_context or {})
             evidence = {

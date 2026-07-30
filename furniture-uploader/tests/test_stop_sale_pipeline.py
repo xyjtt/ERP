@@ -30,6 +30,8 @@ class StopSalePipelineTests(unittest.TestCase):
             no_notify=True,
             shared_lock_path="",
             shared_runtime_root="D:/script_1688",
+            timeout_jushuitan_seconds=1200,
+            run_id="",
         )
 
     def test_preview_commands_do_not_include_live_confirmation(self) -> None:
@@ -50,7 +52,8 @@ class StopSalePipelineTests(unittest.TestCase):
 
         self.assertIn("--yes", command_1688)
         self.assertIn("--yes", command_jushuitan)
-        self.assertIn("--no-notify", command_jushuitan)
+        self.assertTrue(command_jushuitan[1].endswith("run_1688_jushuitan_outbox_worker.py"))
+        self.assertEqual(command_jushuitan[command_jushuitan.index("--action") + 1], "cleanup")
 
     def test_shared_lock_is_scoped_to_1688_account(self) -> None:
         args = self.build_args("execute")

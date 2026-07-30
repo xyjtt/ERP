@@ -24,6 +24,14 @@ if str(RPA_ROOT) not in sys.path:
     sys.path.insert(0, str(RPA_ROOT))
 
 from config_loader import load_json_with_local_override
+from cross_project_runtime import (
+    RuntimeLeaseGuard,
+    RuntimeLeaseRepository,
+    resolve_build_sha,
+    resolve_executor_binding,
+)
+from operation_saga import OperationSagaRepository, SagaOperation
+from sku_operation_saga import build_saga_operations, persist_ali1688_results
 from sku_offline_main import resolve_store_account_binding
 from sku_offline_tasks import dedupe_offline_tasks, filter_offline_tasks, load_offline_tasks
 from stop_sale_audit import (
@@ -212,6 +220,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--lock-stale-seconds", type=int, default=21600)
     parser.add_argument("--lock-poll-seconds", type=float, default=10.0)
+    parser.add_argument("--runtime-lease-wait-seconds", type=float, default=4800)
+    parser.add_argument("--runtime-lease-poll-seconds", type=float, default=5.0)
     parser.add_argument("--jushuitan-lock-wait-seconds", type=int, default=3600)
     parser.add_argument(
         "--active-stop-sale-max-age-minutes",
@@ -306,24 +316,28 @@ def build_jushuitan_command(
     results_dir: Path | None = None,
 ) -> list[str]:
     command = [
-        "npm.cmd" if sys.platform == "win32" else "npm",
-        "run",
-        "cleanup:1688",
-        "--",
-        "--mode",
-        args.mode,
-        "--file",
+        sys.executable,
+        str(PROJECT_ROOT / "scripts" / "run_1688_jushuitan_outbox_worker.py"),
+        "--action",
+        "cleanup",
+        "--shared-runtime-root",
+        str(Path(args.shared_runtime_root).resolve()),
+        "--jushuitan-root",
+        str(jushuitan_root.resolve()),
+        "--timeout-seconds",
+        str(args.timeout_jushuitan_seconds),
+        "--limit",
+        str(args.limit if args.limit > 0 else 10000),
+        "--handoff-out",
         str(handoff_path),
     ]
     run_id = str(getattr(args, "run_id", "") or "").strip()
     if run_id:
         command.extend(["--run-id", run_id])
     if results_dir is not None:
-        command.extend(["--results-dir", str(results_dir)])
+        command.extend(["--results-dir", str(results_dir.resolve())])
     if args.mode == "execute":
         command.append("--yes")
-    if args.no_notify:
-        command.append("--no-notify")
     return command
 
 
@@ -682,6 +696,9 @@ def run_pipeline(
     account_key: str = "",
     jushuitan_lock: Any = None,
     jushuitan_lock_path: str = "",
+    runtime_guard: RuntimeLeaseGuard | None = None,
+    saga_repository: OperationSagaRepository | None = None,
+    saga_operations: list[SagaOperation] | None = None,
 ) -> int:
     handoff_path = pipeline_dir / f"{run_id}.jushuitan.jsonl"
     summary_path = pipeline_dir / f"{run_id}.summary.json"
@@ -719,8 +736,6 @@ def run_pipeline(
             if execute_guard is not None:
                 execute_guard()
 
-        command_1688 = build_1688_command(args, handoff_path)
-        emit_pipeline_event(run_id, "1688_stage_started", timeout_seconds=args.timeout_1688_seconds)
         audit_heartbeat = (
             (
                 lambda: run_audit_heartbeat_process(
@@ -732,16 +747,64 @@ def run_pipeline(
             if audit_started and audit_repository is not None
             else None
         )
-        result_1688 = run_stage_command(
-            command_1688,
-            cwd=PROJECT_ROOT,
-            timeout_seconds=args.timeout_1688_seconds,
-            stage="1688",
-            heartbeat=audit_heartbeat,
-        )
-        result_1688_return_code = result_1688.returncode
+        if args.mode == "execute" and runtime_guard is not None:
+            if saga_repository is None:
+                raise RuntimeError("execute mode requires the Saga repository")
+            with runtime_guard:
+                saga_repository.prepare_many(
+                    saga_operations or [],
+                    owner_token=runtime_guard.owner_token,
+                    account_fencing_token=runtime_guard.account_fencing_token,
+                    browser_slot_key=runtime_guard.browser_slot_key,
+                    browser_slot_fencing_token=runtime_guard.browser_slot_fencing_token,
+                )
+                command_environment = os.environ.copy()
+                command_environment.update(runtime_guard.environment())
+                command_1688 = build_1688_command(args, handoff_path)
+                emit_pipeline_event(
+                    run_id,
+                    "1688_stage_started",
+                    timeout_seconds=args.timeout_1688_seconds,
+                    account_fencing_token=runtime_guard.account_fencing_token,
+                    browser_slot_key=runtime_guard.browser_slot_key,
+                    browser_slot_fencing_token=runtime_guard.browser_slot_fencing_token,
+                )
+                result_1688 = run_stage_command(
+                    command_1688,
+                    cwd=PROJECT_ROOT,
+                    timeout_seconds=args.timeout_1688_seconds,
+                    stage="1688",
+                    env=command_environment,
+                    heartbeat=runtime_guard.assert_active,
+                    heartbeat_interval_seconds=10,
+                )
+                result_1688_return_code = result_1688.returncode
+                runtime_guard.assert_active()
+                offline_records = load_jsonl_records(offline_report_path)
+                persist_ali1688_results(
+                    saga_repository,
+                    task_type="stop_sale",
+                    operations=saga_operations or [],
+                    records=offline_records,
+                    account_fencing_token=runtime_guard.account_fencing_token,
+                )
+                if audit_heartbeat is not None:
+                    audit_heartbeat()
+        else:
+            # Direct unit-level calls keep the legacy path. The CLI main always
+            # supplies runtime_guard for execute mode.
+            command_1688 = build_1688_command(args, handoff_path)
+            emit_pipeline_event(run_id, "1688_stage_started", timeout_seconds=args.timeout_1688_seconds)
+            result_1688 = run_stage_command(
+                command_1688,
+                cwd=PROJECT_ROOT,
+                timeout_seconds=args.timeout_1688_seconds,
+                stage="1688",
+                heartbeat=audit_heartbeat,
+            )
+            result_1688_return_code = result_1688.returncode
+            offline_records = load_jsonl_records(offline_report_path)
         emit_pipeline_event(run_id, "1688_stage_finished", return_code=result_1688_return_code)
-        offline_records = load_jsonl_records(offline_report_path)
 
         handoff_count = count_handoff_records(handoff_path)
         if result_1688_return_code == 0 and handoff_count > 0:
@@ -766,7 +829,7 @@ def run_pipeline(
                     cwd=jushuitan_root,
                     timeout_seconds=args.timeout_jushuitan_seconds,
                     stage="jushuitan",
-                    env=build_jushuitan_environment(handoff_path),
+                    env=os.environ.copy(),
                     heartbeat=audit_heartbeat,
                 )
             jushuitan_return_code = result_jushuitan.returncode
@@ -910,6 +973,8 @@ def main() -> int:
         raise ValueError("Shared lock timing values must be positive (wait may be zero)")
     if args.jushuitan_lock_wait_seconds < 0:
         raise ValueError("--jushuitan-lock-wait-seconds must be non-negative")
+    if args.runtime_lease_wait_seconds < 0 or args.runtime_lease_poll_seconds <= 0:
+        raise ValueError("runtime lease wait must be non-negative and poll must be positive")
     if args.timeout_1688_seconds <= 0 or args.timeout_jushuitan_seconds <= 0:
         raise ValueError("Stage timeout values must be positive")
     if args.active_stop_sale_max_age_minutes <= 0:
@@ -937,6 +1002,9 @@ def main() -> int:
     audit_tasks: list[Any] = []
     account_key = ""
     store_name = ""
+    runtime_guard: RuntimeLeaseGuard | None = None
+    saga_repository: OperationSagaRepository | None = None
+    saga_operations: list[SagaOperation] = []
     if args.mode == "execute":
         try:
             audit_config = resolve_stop_sale_app_config(args.shared_runtime_root)
@@ -951,6 +1019,40 @@ def main() -> int:
             if not audit_tasks:
                 raise ValueError("No executable stop-sale tasks were selected for execute mode.")
             account_key, store_name = resolve_pipeline_account(args, audit_tasks)
+            system_config = load_json_with_local_override(
+                PROJECT_ROOT / "config" / "systems" / "1688_sku_offline.json"
+            )
+            store_binding = resolve_store_account_binding(system_config, store_name)
+            binding = resolve_executor_binding(
+                account_key,
+                fallback_profile_ref=str(store_binding.get("browser_profile_dir") or ""),
+                fallback_cdp_port=int(store_binding.get("cdp_port") or 0),
+            )
+            build_sha = resolve_build_sha(PROJECT_ROOT.parent)
+            saga_repository = OperationSagaRepository(audit_config)
+            saga_contract = saga_repository.check_contract()
+            if not saga_contract.get("ready"):
+                raise RuntimeError(
+                    "ERP operation saga tables are missing: "
+                    + ", ".join(str(item) for item in saga_contract.get("missing_tables") or [])
+                )
+            saga_operations = build_saga_operations(
+                "stop_sale",
+                run_id,
+                account_key,
+                audit_tasks,
+            )
+            runtime_guard = RuntimeLeaseGuard(
+                RuntimeLeaseRepository(audit_config),
+                binding=binding,
+                task_type="stop_sale",
+                run_id=run_id,
+                request_key=f"stop_sale:{run_id}:{account_key}",
+                build_sha=build_sha,
+                component="erp-stop-sale",
+                wait_timeout_seconds=args.runtime_lease_wait_seconds,
+                poll_interval_seconds=args.runtime_lease_poll_seconds,
+            )
         except Exception as exc:
             notify_execute_startup_failure(
                 run_id=run_id,
@@ -998,6 +1100,9 @@ def main() -> int:
                 account_key=account_key,
                 jushuitan_lock=jushuitan_lock,
                 jushuitan_lock_path=jushuitan_lock_path,
+                runtime_guard=runtime_guard,
+                saga_repository=saga_repository,
+                saga_operations=saga_operations,
             )
     except Exception as exc:
         if timeout_error is not None and isinstance(exc, timeout_error) and not pipeline_invoked:

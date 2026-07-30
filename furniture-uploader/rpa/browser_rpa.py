@@ -9,7 +9,7 @@ import re
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import parse_qs, urlencode, urlparse
 
 from selenium.common.exceptions import (
@@ -54,8 +54,17 @@ class BrowserRPA:
         self.last_screenshot_path = ""
         self.last_html_snapshot_path = ""
         self.last_result_context: dict[str, Any] = {}
+        self._runtime_action_guard: Callable[[], None] | None = None
+
+    def set_runtime_action_guard(self, guard: Callable[[], None] | None) -> None:
+        self._runtime_action_guard = guard
+
+    def _assert_runtime_action_allowed(self) -> None:
+        if self._runtime_action_guard is not None:
+            self._runtime_action_guard()
 
     def open(self) -> None:
+        self._assert_runtime_action_allowed()
         debugger_address = str(self.browser_config.get("debugger_address", "")).strip()
         browser_binary_path = str(
             self.browser_config.get("browser_binary_path", self.browser_config.get("chrome_binary_path", ""))
@@ -342,6 +351,7 @@ class BrowserRPA:
     ) -> dict[str, Any]:
         if not self.driver:
             raise RuntimeError("Browser has not been opened.")
+        self._assert_runtime_action_allowed()
 
         publish_config = platform_config.get("publish", {})
         publish_url = platform_config.get("publish_url")
@@ -357,6 +367,7 @@ class BrowserRPA:
                 )
                 context["reused_current_publish_page"] = reused_publish_page
                 if not reused_publish_page:
+                    self._assert_runtime_action_allowed()
                     try:
                         self.driver.get(publish_url)
                     except TimeoutException as exc:
@@ -429,6 +440,7 @@ class BrowserRPA:
                     self._ensure_required_cat_props_before_draft_save(publish_config, context)
                     self._ensure_buyer_protection_ship_time_before_draft_save(publish_config, context)
                     try:
+                        self._assert_runtime_action_allowed()
                         self._save_draft_once(publish_config, context)
                     except PublishSubmitError as exc:
                         if self._is_draft_submit_store_blocked_error(exc, context):
@@ -557,6 +569,7 @@ class BrowserRPA:
                         self._pause(retry_wait_seconds)
                 print(f"[INFO] Saved draft for product: {product.title}")
             elif final_action_mode == "submit":
+                self._assert_runtime_action_allowed()
                 submit_selector = publish_config.get("submit_selector", {})
                 if not self._selector_is_configured(submit_selector):
                     raise ValueError("Auto submit is enabled but submit_selector is not configured.")
@@ -615,6 +628,7 @@ class BrowserRPA:
 
     def _run_publish_steps(self, steps: list[dict[str, Any]], context: dict[str, Any]) -> None:
         for step in steps:
+            self._assert_runtime_action_allowed()
             step_name = str(step.get("name", "")).strip() or "unnamed_step"
             action = step.get("action", "").strip()
             if not action:

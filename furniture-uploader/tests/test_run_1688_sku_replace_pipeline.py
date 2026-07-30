@@ -81,7 +81,8 @@ class Run1688SkuReplacePipelineTests(unittest.TestCase):
             Path("results"),
         )
 
-        self.assertIn("sync:1688", command)
+        self.assertTrue(command[1].endswith("run_1688_jushuitan_outbox_worker.py"))
+        self.assertEqual(command[command.index("--action") + 1], "sync")
         self.assertIn("--yes", command)
 
     def test_jushuitan_environment_points_legacy_schema_to_handoff(self) -> None:
