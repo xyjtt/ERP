@@ -161,8 +161,15 @@ def resolve_1688_publish_url(payload: dict[str, Any], *, mode: str = "draft") ->
     if pending_draft_id:
         if not re.fullmatch(r"[A-Za-z0-9_-]+", pending_draft_id):
             raise ListingContractError("draft repair requires a valid pending_draft_id")
-        query = urlencode({"operator": "draft2offer", "offerDraftId": pending_draft_id})
-        return f"https://offer.1688.com/offer/post/fillProductInfo.htm?{query}", category_id
+        query = urlencode(
+            {
+                "catId": category_id,
+                "saleChannel": "default",
+                "operator": "draft2offer",
+                "draftId": pending_draft_id,
+            }
+        )
+        return f"https://offer-new.1688.com/popular/publish.htm?{query}", category_id
     query = urlencode(
         {
             "catId": category_id,
@@ -606,6 +613,8 @@ def execute_browser_task(
             ),
             "publish_url": str(context.get("current_url") or context.get("platform_link_url") or ""),
             "draft_response_status": context.get("draft_submit_response_status"),
+            "draft_response_draft_id": context.get("draft_submit_response_draft_id"),
+            "draft_identity_evidence": context.get("draft_submit_identity_evidence"),
             "detail_image_delivery_mode": context.get("detail_images_delivery_mode"),
             "detail_image_count": context.get("draft_description_image_count"),
             "post_save_verified": True,

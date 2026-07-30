@@ -1554,15 +1554,25 @@ class BrowserRPA:
         value = context.get(source, "")
 
         if source == "detail_images":
-            return [str(item) for item in context.get("detail_images_list", [])]
+            values = [str(item) for item in context.get("detail_images_list", [])]
+            return self._limit_file_values(step, values)
 
         if isinstance(value, list):
-            return [str(item).strip() for item in value if str(item).strip()]
+            values = [str(item).strip() for item in value if str(item).strip()]
+            return self._limit_file_values(step, values)
 
         if not value:
             return []
 
-        return [item.strip() for item in str(value).split("|") if item.strip()]
+        values = [item.strip() for item in str(value).split("|") if item.strip()]
+        return self._limit_file_values(step, values)
+
+    def _limit_file_values(self, step: dict[str, Any], values: list[str]) -> list[str]:
+        try:
+            maximum = max(0, int(step.get("max_files", 0) or 0))
+        except (TypeError, ValueError):
+            maximum = 0
+        return values[:maximum] if maximum else values
 
     def _sanitize_inputs(self, step: dict[str, Any]) -> int:
         if not self.driver:
@@ -4563,15 +4573,16 @@ class BrowserRPA:
         require_remote_url = bool(step.get("bridge_require_remote_url", True))
 
         uploaded_urls: list[str] = []
-        for value in values:
+        for image_index, value in enumerate(values):
+            current_slot_index = slot_index + image_index
             data_url = self._encode_file_as_data_url(value)
-            self._clear_primary_picture_bridge_slot(bridge_selector, slot_index)
+            self._clear_primary_picture_bridge_slot(bridge_selector, current_slot_index)
             self._pause(clear_wait_seconds)
 
             result = self._invoke_primary_picture_bridge_upload(
                 bridge_selector,
                 data_url,
-                slot_index,
+                current_slot_index,
             )
             if not result.get("ok"):
                 raise ValueError(
@@ -4585,7 +4596,7 @@ class BrowserRPA:
                     str(
                         self._read_primary_picture_bridge_slot(
                             bridge_selector,
-                            slot_index,
+                            current_slot_index,
                         ).get("url", "")
                     ).strip()
                     or (
@@ -4593,14 +4604,14 @@ class BrowserRPA:
                         and str(
                             self._read_primary_picture_bridge_slot(
                                 bridge_selector,
-                                slot_index,
+                                current_slot_index,
                             ).get("key", "")
                         ).strip()
                     )
                 )
             )
 
-            slot_state = self._read_primary_picture_bridge_slot(bridge_selector, slot_index)
+            slot_state = self._read_primary_picture_bridge_slot(bridge_selector, current_slot_index)
             remote_url = str(slot_state.get("url", "")).strip()
             remote_key = str(slot_state.get("key", "")).strip()
             if require_remote_url and not remote_url:
@@ -4612,7 +4623,7 @@ class BrowserRPA:
             uploaded_urls.append(remote_url)
 
             if clear_after_upload:
-                self._clear_primary_picture_bridge_slot(bridge_selector, slot_index)
+                self._clear_primary_picture_bridge_slot(bridge_selector, current_slot_index)
                 self._pause(clear_wait_seconds)
 
         return uploaded_urls
@@ -6117,8 +6128,9 @@ class BrowserRPA:
             return
 
         patch_mode = str(context.get("draft_request_patch_mode", "full")).strip().lower() or "full"
+        expected_draft_id = str(publish_config.get("expected_draft_id", "")).strip()
         apply_patch = patch_mode == "full"
-        apply_identity_patch = patch_mode == "identity_only"
+        apply_identity_patch = bool(expected_draft_id) and patch_mode in {"full", "identity_only"}
         buyer_protection_value = self._resolve_context_preferred_value(
             context=context,
             source=str(patch_config.get("buyer_protection_source", "")).strip(),
@@ -6157,7 +6169,7 @@ class BrowserRPA:
         detail_text_html = self._build_tinymce_html(str(context.get("description", "")).strip())
         config_payload = {
             "captureBodyChars": max(256, int(patch_config.get("capture_body_chars", 4000) or 4000)),
-            "expectedDraftId": str(publish_config.get("expected_draft_id", "")).strip(),
+            "expectedDraftId": expected_draft_id,
             "buyerProtectionServiceName": buyer_protection_value,
             "buyerProtectionServiceCode": buyer_protection_code,
             "buyerProtectionStepTemplate": buyer_protection_steps,
@@ -6323,6 +6335,8 @@ class BrowserRPA:
               try {
                 const parsed = new URL(text, window.location.href);
                 parsed.searchParams.set('draftId', expected);
+                parsed.searchParams.set('edit', 'true');
+                parsed.searchParams.set('isItemEdit', 'true');
                 return parsed.toString();
               } catch (error) {
                 return text;
@@ -6343,7 +6357,107 @@ class BrowserRPA:
                 return false;
               }
               systemParam.draftId = expected;
+              systemParam.edit = true;
+              systemParam.isItemEdit = true;
               return true;
+            };
+
+            const collectDraftIdentityEvidence = (rawUrl, body) => {
+              const normalizeFlag = (value) => {
+                if (typeof value === 'boolean') return value;
+                const text = String(value == null ? '' : value).trim().toLowerCase();
+                if (text === 'true' || text === '1') return true;
+                if (text === 'false' || text === '0') return false;
+                return text;
+              };
+              const emptyIdentity = () => ({
+                draftId: '',
+                edit: '',
+                isItemEdit: '',
+                operator: '',
+              });
+              const urlIdentity = emptyIdentity();
+              const bodyIdentity = emptyIdentity();
+              const assignIdentity = (target, rawKey, rawValue) => {
+                const key = String(rawKey || '').trim().toLowerCase();
+                if (!key) return;
+                if (['draftid', 'offerdraftid', 'draft_id'].includes(key)) {
+                  const value = String(rawValue == null ? '' : rawValue).trim();
+                  if (value && !target.draftId) target.draftId = value;
+                } else if (key === 'edit' && target.edit === '') {
+                  target.edit = normalizeFlag(rawValue);
+                } else if (key === 'isitemedit' && target.isItemEdit === '') {
+                  target.isItemEdit = normalizeFlag(rawValue);
+                } else if (['operator', 'operatorname'].includes(key) && !target.operator) {
+                  target.operator = String(rawValue == null ? '' : rawValue).trim();
+                }
+              };
+              const visited = new WeakSet();
+              const inspectBody = (value) => {
+                if (value == null) return;
+                if (typeof value === 'string') {
+                  const text = value.trim();
+                  if (!text) return;
+                  if (text.startsWith('{') || text.startsWith('[')) {
+                    try {
+                      inspectBody(JSON.parse(text));
+                      return;
+                    } catch (error) {
+                      // Fall through to form-value parsing.
+                    }
+                  }
+                  try {
+                    const params = new URLSearchParams(text);
+                    Array.from(params.entries()).forEach(([key, entryValue]) => {
+                      assignIdentity(bodyIdentity, key, entryValue);
+                      if (String(entryValue || '').trim() !== text) inspectBody(entryValue);
+                    });
+                  } catch (error) {
+                    return;
+                  }
+                  return;
+                }
+                if (typeof URLSearchParams !== 'undefined' && value instanceof URLSearchParams) {
+                  Array.from(value.entries()).forEach(([key, entryValue]) => {
+                    assignIdentity(bodyIdentity, key, entryValue);
+                    inspectBody(entryValue);
+                  });
+                  return;
+                }
+                if (typeof FormData !== 'undefined' && value instanceof FormData) {
+                  Array.from(value.entries()).forEach(([key, entryValue]) => {
+                    if (typeof entryValue !== 'string') return;
+                    assignIdentity(bodyIdentity, key, entryValue);
+                    inspectBody(entryValue);
+                  });
+                  return;
+                }
+                if (typeof value !== 'object' || visited.has(value)) return;
+                visited.add(value);
+                Object.entries(value).forEach(([key, entryValue]) => {
+                  assignIdentity(bodyIdentity, key, entryValue);
+                  inspectBody(entryValue);
+                });
+              };
+              try {
+                const parsed = new URL(String(rawUrl || ''), window.location.href);
+                Array.from(parsed.searchParams.entries()).forEach(([key, value]) => {
+                  assignIdentity(urlIdentity, key, value);
+                });
+              } catch (error) {
+                // A malformed URL is represented by empty URL identity evidence.
+              }
+              inspectBody(body);
+              const effective = emptyIdentity();
+              Object.keys(effective).forEach((key) => {
+                effective[key] = bodyIdentity[key] !== '' ? bodyIdentity[key] : urlIdentity[key];
+              });
+              return {
+                expectedDraftId: String(window.__codexDraftPatchConfig.expectedDraftId || '').trim(),
+                url: urlIdentity,
+                body: bodyIdentity,
+                effective,
+              };
             };
 
             const normalizeIbankUrl = (rawValue) => {
@@ -7651,6 +7765,7 @@ class BrowserRPA:
                 record.patch = rewritten.meta;
                 record.patchedBodyPreview = previewValue(rewritten.body);
                 record.expectedDraftId = String(window.__codexDraftPatchConfig.expectedDraftId || '').trim();
+                record.draftIdentityEvidence = collectDraftIdentityEvidence(url, rewritten.body);
                 record.requestDraftIdentityPresent = requestCarriesExpectedDraftId(url, rewritten.body);
                 if (!record.requestDraftIdentityPresent) {
                   const message = markMissingDraftIdentity(record);
@@ -7705,6 +7820,7 @@ class BrowserRPA:
                 record.patch = rewritten.meta;
                 record.patchedBodyPreview = previewValue(rewritten.body);
                 record.expectedDraftId = String(window.__codexDraftPatchConfig.expectedDraftId || '').trim();
+                record.draftIdentityEvidence = collectDraftIdentityEvidence(url, rewritten.body);
                 record.requestDraftIdentityPresent = requestCarriesExpectedDraftId(url, rewritten.body);
                 if (!record.requestDraftIdentityPresent) {
                   const message = markMissingDraftIdentity(record);
@@ -7793,6 +7909,9 @@ class BrowserRPA:
 
         context["draft_submit_trace_present"] = True
         context["draft_submit_trace"] = latest_record
+        identity_evidence = latest_record.get("draftIdentityEvidence") or {}
+        if isinstance(identity_evidence, dict) and identity_evidence:
+            context["draft_submit_identity_evidence"] = identity_evidence
 
         raw_status = latest_record.get("status", 0)
         try:
@@ -7824,6 +7943,25 @@ class BrowserRPA:
             raise PublishSubmitError(f"draft_submit backend rejected request: {message}")
 
         expected_draft_id = str(publish_config.get("expected_draft_id") or "").strip()
+        patch_mode = str(context.get("draft_request_patch_mode") or "").strip().lower()
+        if expected_draft_id and patch_mode == "identity_only":
+            effective_identity = (
+                identity_evidence.get("effective")
+                if isinstance(identity_evidence, dict)
+                else None
+            )
+            if not isinstance(effective_identity, dict):
+                raise PublishSubmitError(
+                    "draft_submit existing-draft request lacks structured identity evidence"
+                )
+            if str(effective_identity.get("draftId") or "").strip() != expected_draft_id:
+                raise PublishSubmitError(
+                    "draft_submit existing-draft request does not carry the expected draft identity"
+                )
+            if effective_identity.get("edit") is not True or effective_identity.get("isItemEdit") is not True:
+                raise PublishSubmitError(
+                    "draft_submit existing-draft request is missing edit=true/isItemEdit=true"
+                )
         if expected_draft_id and isinstance(response_json, dict):
             def find_draft_id(value: Any) -> str:
                 if isinstance(value, dict):
@@ -8761,14 +8899,31 @@ class BrowserRPA:
 
         if verification.get("require_main_image", True):
             main_image_present = self._draft_main_image_present()
-            main_image_state = {"present": main_image_present}
-            if verification.get("require_square_main_image", False):
+            minimum_main_image_count = max(
+                1,
+                int(verification.get("minimum_main_image_count", 1) or 1),
+            )
+            main_image_state = {
+                "present": main_image_present,
+                "count": 1 if main_image_present else 0,
+            }
+            if verification.get("require_square_main_image", False) or minimum_main_image_count > 1:
                 main_image_state = self._draft_main_image_state()
                 main_image_present = bool(main_image_state.get("present"))
+            main_image_count = int(
+                main_image_state.get("count") or (1 if main_image_present else 0)
+            )
             context["draft_main_image_state_pre_save"] = main_image_state
             context["draft_main_image_pre_save"] = main_image_present
+            context["draft_main_image_count_pre_save"] = main_image_count
+            context["draft_main_image_count_expected_pre_save"] = minimum_main_image_count
             if not main_image_present:
                 raise PublishValidationError("draft save blocked: main image is empty before save.")
+            if main_image_count < minimum_main_image_count:
+                raise PublishValidationError(
+                    "draft save blocked: main images are incomplete before save "
+                    f"({main_image_count}/{minimum_main_image_count})."
+                )
             if verification.get("require_square_main_image", False) and not bool(main_image_state.get("square")):
                 raise PublishValidationError("draft save blocked: first main image is not square before save.")
 
@@ -10508,16 +10663,23 @@ class BrowserRPA:
             0.1,
             float(verification.get("main_image_poll_seconds", 0.8) or 0.8),
         )
+        minimum_main_image_count = max(
+            1,
+            int(verification.get("minimum_main_image_count", 1) or 1),
+        )
         require_square_main_image = bool(verification.get("require_square_main_image", False))
         main_image_state = self._draft_main_image_state()
         main_image_state["present"] = self._draft_main_image_present()
+        main_image_state["count"] = int(
+            main_image_state.get("count") or (1 if main_image_state.get("present") else 0)
+        )
         if refreshed and main_image_wait_seconds > 0:
             wait_deadline = time.monotonic() + main_image_wait_seconds
             wait_attempts = 0
             while time.monotonic() < wait_deadline:
                 main_image_ready = bool(main_image_state.get("present")) and (
                     not require_square_main_image or bool(main_image_state.get("square"))
-                )
+                ) and int(main_image_state.get("count") or 0) >= minimum_main_image_count
                 if main_image_ready:
                     break
                 wait_attempts += 1
@@ -10525,9 +10687,14 @@ class BrowserRPA:
                 self._pause(min(main_image_poll_seconds, max(0.0, remaining)))
                 main_image_state = self._draft_main_image_state()
                 main_image_state["present"] = self._draft_main_image_present()
+                main_image_state["count"] = int(
+                    main_image_state.get("count") or (1 if main_image_state.get("present") else 0)
+                )
             context["draft_main_image_wait_attempts"] = wait_attempts
         context["draft_main_image_state"] = main_image_state
         context["draft_main_image_present"] = bool(main_image_state.get("present"))
+        context["draft_main_image_count"] = int(main_image_state.get("count") or 0)
+        context["draft_main_image_count_expected"] = minimum_main_image_count
         context["draft_main_image_square"] = bool(main_image_state.get("square"))
         context["draft_description_present"] = self._draft_description_present()
         context["draft_description_image_count"] = self._draft_description_image_count()
@@ -10577,8 +10744,12 @@ class BrowserRPA:
                 )
                 main_image_state = self._draft_main_image_state()
                 main_image_state["present"] = self._draft_main_image_present()
+                main_image_state["count"] = int(
+                    main_image_state.get("count") or (1 if main_image_state.get("present") else 0)
+                )
                 context["draft_main_image_state"] = main_image_state
                 context["draft_main_image_present"] = bool(main_image_state.get("present"))
+                context["draft_main_image_count"] = int(main_image_state.get("count") or 0)
                 context["draft_main_image_square"] = bool(main_image_state.get("square"))
                 context["draft_description_present"] = self._draft_description_present()
                 context["draft_description_image_count"] = self._draft_description_image_count()
@@ -10610,6 +10781,15 @@ class BrowserRPA:
 
         if verification.get("require_main_image", True) and not context["draft_main_image_present"]:
             raise PublishValidationError("draft_verify blocked: main image did not persist after save.")
+
+        if (
+            verification.get("require_main_image", True)
+            and context["draft_main_image_count"] < minimum_main_image_count
+        ):
+            raise PublishValidationError(
+                "draft_verify blocked: main images did not persist after save "
+                f"({context['draft_main_image_count']}/{minimum_main_image_count})."
+            )
 
         if require_square_main_image and not context.get("draft_main_image_square", False):
             raise PublishValidationError("draft_verify blocked: main image is not square after save.")
@@ -10742,6 +10922,7 @@ class BrowserRPA:
 
         if verification.get("require_logistics_dimensions", False):
             dimension_map = dict(context.get("draft_logistics_dimensions", {}) or {})
+            strict_logistics_persist = bool(verification.get("strict_logistics_persist", False))
             trace_dimensions, trace_dimension_source = self._extract_draft_trace_logistics_dimensions(
                 context.get("draft_submit_trace")
             )
@@ -10767,18 +10948,19 @@ class BrowserRPA:
                     ("height", str(context.get("height_cm", "")).strip()),
                     ("weight", str(context.get("weight_g", "")).strip()),
                 ]
-            trace_applied = False
-            for name, expected in required_fields:
-                if not expected or str(dimension_map.get(name, "")).strip():
-                    continue
-                trace_value = str(trace_dimensions.get(name, "")).strip()
-                if not trace_value:
-                    continue
-                dimension_map[name] = trace_value
-                trace_applied = True
-            if trace_applied:
-                context["draft_logistics_dimensions"] = dimension_map
-                context["draft_logistics_dimensions_source"] = "draft_submit_trace"
+            if not strict_logistics_persist:
+                trace_applied = False
+                for name, expected in required_fields:
+                    if not expected or str(dimension_map.get(name, "")).strip():
+                        continue
+                    trace_value = str(trace_dimensions.get(name, "")).strip()
+                    if not trace_value:
+                        continue
+                    dimension_map[name] = trace_value
+                    trace_applied = True
+                if trace_applied:
+                    context["draft_logistics_dimensions"] = dimension_map
+                    context["draft_logistics_dimensions_source"] = "draft_submit_trace"
             missing_fields = [
                 name
                 for name, expected in required_fields
@@ -10788,6 +10970,18 @@ class BrowserRPA:
                 raise PublishValidationError(
                     "draft_verify blocked: logistics dimensions missing after save -> "
                     + ",".join(missing_fields)
+                )
+            mismatched_fields = []
+            for name, expected in required_fields:
+                if not expected:
+                    continue
+                normalizer = self._normalize_weight_value if name == "weight" else self._normalize_dimension_value
+                if normalizer(str(dimension_map.get(name, "")).strip()) != normalizer(expected):
+                    mismatched_fields.append(name)
+            if mismatched_fields:
+                raise PublishValidationError(
+                    "draft_verify blocked: logistics dimensions changed after save -> "
+                    + ",".join(mismatched_fields)
                 )
 
         if verification.get("require_buyer_protection", False):
@@ -10997,7 +11191,7 @@ class BrowserRPA:
             const imageList = Array.isArray(primaryValue.imageList)
               ? primaryValue.imageList
               : (Array.isArray(props.imageList) ? props.imageList : []);
-            const firstStateImage = imageList.find((item) => {
+            const stateImages = imageList.filter((item) => {
                if (!item || typeof item !== 'object') return false;
                const url =
                  item.url ||
@@ -11007,7 +11201,8 @@ class BrowserRPA:
                  item.downloadUrl ||
                  '';
                return String(url || '').trim().length > 0;
-            }) || {};
+            });
+            const firstStateImage = stateImages[0] || {};
             const firstStateUrl = String(
               firstStateImage.url ||
               firstStateImage.imageUrl ||
@@ -11016,9 +11211,10 @@ class BrowserRPA:
               firstStateImage.downloadUrl ||
               ''
             ).trim();
-            const slot = document.querySelector(
+            const slots = Array.from(document.querySelectorAll(
               '#guid-primaryPicture .picture-sort-list .picture-sort-item'
-            );
+            ));
+            const slot = slots[0] || null;
             const wrapper = slot ? slot.querySelector('.module-picture-cover-wrapper') : null;
             const domImage = wrapper
               ? wrapper.querySelector('.picture-cover-content img, img')
@@ -11029,6 +11225,9 @@ class BrowserRPA:
               domImage &&
               domImage.getAttribute('src')
             );
+            const domImages = slots
+              .map((item) => item.querySelector('.picture-cover-content img, img'))
+              .filter((item) => item && String(item.getAttribute('src') || '').trim());
             const width = Number(
               firstStateImage.imageWidth ||
               firstStateImage.width ||
@@ -11046,6 +11245,7 @@ class BrowserRPA:
               domPresent,
               statePresent,
               present: Boolean(domPresent || statePresent),
+              count: Math.max(stateImages.length, domImages.length),
               square: Boolean(width > 0 && height > 0 && width === height),
               width,
               height,
@@ -11057,8 +11257,10 @@ class BrowserRPA:
             result = dict(payload)
             if "present" not in result:
                 result["present"] = bool(result.get("domPresent") or result.get("statePresent"))
+            if "count" not in result:
+                result["count"] = 1 if result.get("present") else 0
             return result
-        return {"present": bool(payload), "square": False}
+        return {"present": bool(payload), "count": 1 if payload else 0, "square": False}
 
     def _draft_main_image_present(self) -> bool:
         return bool(self._draft_main_image_state().get("present"))
@@ -11069,36 +11271,21 @@ class BrowserRPA:
         if not bool(step.get("ensure_square_first_image", False)):
             return False
 
-        state = self.driver.execute_script(
-            """
-            const sdk = window.SellPublishSdk;
-            const runtimeState = sdk && sdk.engine && sdk.engine.getJsonState ? sdk.engine.getJsonState() : {};
-            const primaryProps = ((((runtimeState || {}).components || {}).primaryPicture || {}).props) || {};
-            const primaryValue = primaryProps && typeof primaryProps.value === 'object' && primaryProps.value
-              ? primaryProps.value
-              : {};
-            const imageList = Array.isArray(primaryValue.imageList)
-              ? primaryValue.imageList
-              : (Array.isArray(primaryProps.imageList) ? primaryProps.imageList : []);
-            const firstItem = imageList.find((item) => item && typeof item === 'object' && String(item.url || '').trim()) || null;
-            const domImage = document.querySelector('#guid-primaryPicture .picture-sort-item img');
-            const width = Number((firstItem && (firstItem.imageWidth || firstItem.width)) || (domImage && domImage.naturalWidth) || 0);
-            const height = Number((firstItem && (firstItem.imageHeight || firstItem.height)) || (domImage && domImage.naturalHeight) || 0);
-            const url = String((firstItem && firstItem.url) || (domImage && domImage.src) || '').trim();
-            return {
-              present: Boolean(url),
-              square: Boolean(url && width > 0 && height > 0 && width === height),
-              width,
-              height,
-              url,
-            };
-            """
-        )
+        state = self._draft_main_image_state()
         state = state if isinstance(state, dict) else {}
+        state_count = int(state.get("count") or (1 if state.get("present") else 0))
+        minimum_image_count = max(1, int(step.get("minimum_image_count", 1) or 1))
+        state["count"] = state_count
         context["main_image_existing_state"] = state
         if not bool(state.get("present")):
             return False
         if bool(state.get("square")):
+            if state_count < minimum_image_count:
+                context["main_image_existing_count_incomplete"] = {
+                    "actual": state_count,
+                    "expected": minimum_image_count,
+                }
+                return False
             existing_url = str(state.get("url", "")).strip()
             if existing_url:
                 context["main_image_uploaded_urls"] = [existing_url]

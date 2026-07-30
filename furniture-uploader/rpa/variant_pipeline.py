@@ -224,6 +224,8 @@ def build_products_from_variants(
                     "platform_category": variant.platform_category,
                     "main_image": local_main_images[0] if local_main_images else "",
                     "main_image_remote": remote_main_images[0] if remote_main_images else "",
+                    "main_images": local_main_images,
+                    "main_images_remote": remote_main_images,
                     "detail_images": "|".join(local_detail_images),
                     "detail_images_remote": "|".join(remote_detail_images),
                     "description": variant.description or variant.sell_points,

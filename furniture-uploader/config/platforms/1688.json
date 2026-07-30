@@ -128,13 +128,11 @@
       "必填项未填写"
     ],
     "draft_request_patch_retry_modes": [
+      "full",
       "identity_only"
     ],
     "draft_buyer_protection_allow_fallback": false,
-    "submit_reapply_nonpersistent_fields": [
-      "send_address",
-      "buyer_protection"
-    ],
+    "submit_reapply_nonpersistent_fields": [],
     "submit_blocking_assist_keywords": [
       "必填",
       "请填写",
@@ -148,6 +146,7 @@
       "refresh_wait_seconds": 4,
       "require_title": true,
       "require_main_image": true,
+      "minimum_main_image_count": 4,
       "require_description": true,
       "main_image_wait_seconds": 30,
       "main_image_poll_seconds": 0.8,
@@ -157,6 +156,26 @@
       "minimum_description_image_count": 1,
       "require_send_address": true,
       "strict_send_address_persist": true,
+      "require_logistics_dimensions": true,
+      "strict_logistics_persist": true,
+      "required_logistics_fields": [
+        {
+          "name": "length",
+          "source": "length_cm"
+        },
+        {
+          "name": "width",
+          "source": "width_cm"
+        },
+        {
+          "name": "height",
+          "source": "height_cm"
+        },
+        {
+          "name": "weight",
+          "source": "weight_g"
+        }
+      ],
       "require_buyer_protection": true,
       "strict_buyer_protection_persist": true,
       "buyer_protection_source": "buyer_protection_ship_time",
@@ -507,7 +526,9 @@
       {
         "name": "main_image",
         "action": "picker_upload",
-        "source": "main_image",
+        "source": "main_images",
+        "max_files": 4,
+        "minimum_image_count": 4,
         "upload_via_react_bridge": true,
         "bridge_selector": {
           "by": "css",

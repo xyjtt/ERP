@@ -287,3 +287,12 @@
 - The gate uses Windows Credential Manager and selects an installed SQL Server driver, so both executor ODBC 17 and development Native Client 10 are supported.
 - Real CTG028601N1416V01 source checks passed on both machines with `enabled=1`, `stock_disabled=0`, `other_5=销售`, and `item_type=成品`.
 - Listing regression is `382/382`; title engine remains `89 passed, 3 subtests passed`. CTG0286 draft repair and independent page inspection are still pending browser-mutex clearance.
+
+## 2026-07-30 Draft Field Persistence Fix (Code Complete, Live Pending)
+
+- Fix round for the CTG0286 draft fields that returned HTTP 200 but did not persist (main images 1/4, 24-hour shipping, send address, logistics dimensions).
+- `1688.json`: retry modes `full -> identity_only`, `minimum_main_image_count=4`, strict logistics persistence with required field sources, empty `submit_reapply_nonpersistent_fields`.
+- `browser_rpa.py`: full mode injects draft edit identity when `expected_draft_id` exists; bridge upload advances per slot; pre-save/post-refresh main-image count gates; strict logistics value match after refresh.
+- `inspect_1688_saved_draft.py`: real-field acceptance for main image count, send address, and `24小时发货/essxsfh`; reapply-record fallback removed.
+- Local validation: listing `432/432`; title engine `89/89`; doctor `status: ok`.
+- Not done: live draft repair, independent saved-draft inspection, approval, submit, executor deployment. See `docs/handoff/1688_LISTING_DRAFT_FIELD_PERSISTENCE_HANDOFF_2026-07-30.md`.
