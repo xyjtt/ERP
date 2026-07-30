@@ -1,0 +1,86 @@
+{
+  "schema_version": "listing_task_payload_v1",
+  "task_id": "1688-listing-SAMPLE-SKU-1",
+  "platform": "1688",
+  "shop": {
+    "shop_name": "trial-shop",
+    "account_key": "trial-account"
+  },
+  "source": {
+    "novelty_type": "new_spu",
+    "novelty_note": "\u8d27\u53f7\uff1a\u65b0 SPU",
+    "source_table": "JSDataMiddlePlatform.dbo.jst_sku",
+    "enabled": 1,
+    "stock_disabled": 0,
+    "lifecycle_field": "other_5",
+    "lifecycle_status": "\u9500\u552e",
+    "company_sku": "SAMPLE-SKU-1",
+    "company_spu": "SAMPLE-SPU-1",
+    "duplicate_check": {
+      "status": "clear",
+      "checked_at": "2026-07-22T00:00:00+08:00",
+      "evidence": "sample-only"
+    }
+  },
+  "product": {
+    "sku_code": "SAMPLE-SKU-1",
+    "spu_code": "SAMPLE-SPU-1",
+    "product_name": "sample cabinet 50x40x49",
+    "category": "cabinet",
+    "selected_title": "sample cabinet storage furniture",
+    "selected_title_metadata": {
+      "score_status": "complete",
+      "score_version": "keyword_score_40_30_30_v1"
+    }
+  },
+  "pricing": {
+    "price_rule_version": "jst_sale_price_multiplier_temp_v1",
+    "sale_price": "130.00",
+    "price_multiplier": "2.5",
+    "temporary_price_raw": "325.00",
+    "publish_price": "325.0",
+    "rounding_policy": "ceiling_1dp"
+  },
+  "inventory": {
+    "quantity": 999,
+    "quantity_source": "business_default"
+  },
+  "images": {
+    "source": "yidian",
+    "standard_model_spu": "SAMPLE-MODEL-1",
+    "resource_type": "task-detail",
+    "material_id": "sample-material-1",
+    "uploaded_at": "2026-07-21T00:00:00Z",
+    "selection_policy": "latest_complete",
+    "main_urls": ["https://example.invalid/main.jpg"],
+    "sku_urls": ["https://example.invalid/sku.jpg"],
+    "detail_urls": ["https://example.invalid/detail.jpg"]
+  },
+  "sku": {
+    "naming_source": "JianSun.dbo.jst_sku.name",
+    "sales_specifications": {
+      "sku_name": "sample cabinet 50x40x49",
+      "raw_properties_value": "black;50x40x49",
+      "match_method": "jst_sku_name_and_properties_value"
+    },
+    "rows": [
+      {
+        "sku_code": "SAMPLE-SKU-1",
+        "sku_name": "sample cabinet 50x40x49",
+        "price": "325.0",
+        "quantity": 999
+      }
+    ]
+  },
+  "workflow": {
+    "state": "draft_pending",
+    "approval_required": true,
+    "batch_count_unit": "1688_spu_link",
+    "independent_link_required": true,
+    "submit_mode": "single_offer"
+  },
+  "preflight": {
+    "status": "passed",
+    "checks": []
+  }
+}

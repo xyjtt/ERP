@@ -30,6 +30,41 @@
 - 本地验证：Python `286 passed, 5 subtests`；聚水潭 TypeScript `check`、`18/18`、`build` 通过；两条样本端到端 preview 通过。
 - `2026-07-23` 正式源只读 preview：568 条加载，526 条格式合法，26 条重复，500 条可执行，42 条因 `运营自行组合替换` 被拒绝；尚未执行真实 1688 替换或聚水潭立即下载。
 - 尚未完成 live 验收：未获得业务批准的真实旧 SKU -> 新 SKU canary 映射，因此没有点击 1688 发布或聚水潭“立即下载”。
+## 2026-07-30 Managed Update (24-Hour Shipping Contract)
+
+- User-confirmed buyer-protection shipping time is fixed to `24小时发货`; the live 1688 service code is `essxsfh`.
+- Publish UI default, draft page-state patch, `draftSubmit` request patch, post-save verification, and submit reconciliation now share the same name/code contract.
+- A normal user Edge session can open target draft `6a69bee6e4b01cad1b297a52`, but the dedicated `muke_lixiang` automation profile still receives first-page `SYS_ERROR`. Do not save or submit through that profile until its authenticated session is refreshed and independently rechecked.
+
+## 2026-07-29 Managed Update (CTG0286 Independent Persistence Gate)
+
+- User-authorized cleanup deleted corrupt drafts `6a635fcee4b0eda6ebbdf340` and `6a6976c1e4b09c827f2edbc9`. The only CTG0286 draft is now `6a69bee6e4b01cad1b297a52`; do not create another draft while it remains present.
+- The product-management `tab=all` page shows 4 total drafts and exactly one row for the target ID under shop `木刻理想`.
+- A patched `draftSubmit` returned HTTP 200 and the expected ID, but a fresh independent browser reopened the saved URL with empty title, price, inventory, images, specifications, and logistics. The official management-row link returned `SYS_ERROR` before any publish-page XHR/fetch request.
+- Two non-target control drafts, including the oldest visible draft, also returned `SYS_ERROR` from their official management links. This establishes an account/platform draft-entry blocker rather than a target selector or tab error.
+- Draft execution and post-save verification must use the official `fillProductInfo.htm?operator=draft2offer&offerDraftId=...` entry. A same-session reload of the `operator=new&catId=...` URL is not persistence evidence.
+- Formal `JSReportReplica.app` state is `workflow_state=blocked`, `approval_status=rejected`; latest audit event is `draft_verification_failed` by `codex-listing-independent-verifier`. No submit, Offer ID, or writeback occurred.
+- Development verification passes: listing `421/421`, title engine `89 passed, 3 subtests passed`, 12 JSON files valid, Python compile and `git diff --check` clean.
+- Approval, submit, executor deployment, and another delete/rebuild are prohibited until the official draft entry loads and an independent full-field inspection passes.
+
+## 2026-07-29 Managed Update (CTG0286 Draft Identity Recovery)
+
+- CTG0286 recovery is limited to the two historical draft IDs already present in workflow evidence: `6a635fcee4b0eda6ebbdf340` and `6a6976c1e4b09c827f2edbc9`. Do not create a third draft and do not delete either draft automatically.
+- Draft repair now opens the platform's `fillProductInfo.htm?operator=draft2offer&offerDraftId=...` entry and verifies the expected draft ID before save. The `draftSubmit` request and response must carry the same ID; a missing or different ID fails closed.
+- The product-management draft box currently contains 5 rows and proves both target IDs still exist. It exposes the exact formal `offerDraftId` edit link for each row; old-draft title text is `--`, while the newer row shows the target title.
+- A real click on the old draft's row link opened the correct ID and still rendered 1688 `SYS_ERROR` with a complete page and `SellPublishSdk` present. This is platform-unavailable evidence, not proof that the draft was deleted.
+- The product-management draft probe records every visible draft row, every row/page link and `href`, related `data-*` attributes, and extracted `draftId/offerDraftId` values. Independent inspection supports the same real management-link click path and fails fast on explicit platform error pages.
+- The fresh source lifecycle gate passed at `2026-07-29 13:42 +08:00`. Development verification is `400/400` listing tests plus `89 passed, 3 subtests passed` for the title engine; doctor, Python compile, and 12 JSON files also pass.
+- Real draft repair, refreshed field acceptance, approval, one submit, Offer ID verification, audit, and Offer writeback remain blocked by the 1688 error page. Do not create a third draft or delete either historical draft; recovery now requires platform availability or an explicit human decision to change that policy.
+
+## 2026-07-28 Managed Update (CTG0286 Pre-Save Field Convergence)
+
+- Scope remains the existing draft `6a635fcee4b0eda6ebbdf340` for SKU `CTG028601N1416V01`; creating a second draft and submitting an Offer remain prohibited.
+- Live evidence showed that detail-image batch reloads can clear the title, main image, committed color/size specs, and logistics fields after their original publish steps complete.
+- Draft save now converges nonpersistent fields before the request: restore a missing/non-square main image, reset and reapply mismatched committed specs, then reapply the exact payload title before patching price, quantity, and description.
+- The pre-save gate now requires the exact payload title, exact committed spec values, a square first main image when configured, and all uploaded detail-image URLs represented in the description.
+- A fully uploaded contiguous detail-image checkpoint can now be resumed without uploading the same 48 assets again; the save path only rewrites the description HTML from the recorded CDN URLs.
+- Validation: `380/380` unit tests passed; Python compile, all 11 JSON config files, `doctor`, and `git diff --check` passed. Live draft repair and formal audit are still required for business acceptance.
 
 ## 2026-03-31 Managed Update (T-005 Draft System-Error Isolation Round-2)
 
@@ -272,3 +307,29 @@
 - 每个店铺继续使用独立 Profile、run id、批次日志、审计结果和异常汇总；最终管理器汇总按原始店铺顺序稳定输出。
 - 开发机验证：共享运行时 Python `659/659`、ERP Python `339/339`、聚水潭 TypeScript `18/18`，`check` 和 `build` 均通过。`doctor` 为 `ok`，2026-07-28 正式数据只读 preview 去重后 117 条（乐畅 9、工莱 56、沃来 17、淘淘 35）。
 - 当前尚未部署执行机，也未完成乐畅、工莱各 1 条双账号真实 Canary；上述结果不代表真实页面或业务验收完成。
+## 2026-07-28 CTG0286 Draft Integrity Update
+
+- The executor draft `6a635fcee4b0eda6ebbdf340` exposed an invalid forced-save path: title, main image, color, size, and logistics fields were cleared even though the draft request returned HTTP 200.
+- Live read-only evidence confirmed that the 1688 color specification accepts direct Chinese text entry followed by Tab. It does not require an exact match in the standard color suggestion list.
+- Development now blocks draft save before dispatch when title, main image, required detail images, color, or size is missing. Post-save refresh verification remains required.
+- Development validation: listing tests `371/371`; title engine `89 passed, 3 subtests passed`.
+- This is not executor or business acceptance. Deploy the clean commit without preserving the executor's temporary forced-save implementation, then repair only the existing CTG0286 draft and independently inspect it.
+
+## 2026-07-28 CTG0286 Independent Draft Acceptance Hardening
+
+- Independent saved-draft inspection now requires exact persisted specification values, not merely non-empty fields.
+- For CTG028601N1416V01, the acceptance contract is color `胡桃色` and size `48/40/50`; stale values such as `红色100` fail review.
+- Development validation after this change: listing tests `373/373`; doctor `status: ok` with the two pre-existing empty-selector warnings only.
+
+## 2026-07-29 Source Lifecycle Gate
+
+- Use `scripts/query_1688_listing_source.py` for the fresh pre-browser source check.
+- Credentials stay in Windows Credential Manager under the listing-owned reference `YYDD/1688/database/listing-source`; never persist them in code, payloads, or evidence files.
+- The script must resolve an installed SQL Server driver rather than assuming ODBC Driver 17 exists.
+- A passed source row is only a prerequisite. It does not authorize a second CTG0286 draft or prove draft/Offer acceptance.
+
+## 2026-07-28 CTG0286 Specification Commit Correction
+
+- Enter was disproved on the real publish page: it left `胡桃色` in the resident input and did not create a committed specification item.
+- Tab creates the non-resident item, exposes the image-plus/delete controls, and creates the next empty resident input.
+- The implementation now uses Tab for both color and size and verifies only committed non-resident values. Full listing regression is `375/375`.

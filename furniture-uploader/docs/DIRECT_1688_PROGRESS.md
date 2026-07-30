@@ -25,6 +25,40 @@
 - 正式源 preview 已支持逐行拒绝：`2026-07-23` 加载 568 条，500 条可执行，42 条非 SKU 占位值拒绝，26 条重复；拒绝项写 CSV/JSON 并尝试钉钉通知。
 - 正式验收库 `JSReportReplica.app.ali1688_sku_replace_run/item` 已创建并通过契约检查。
 - 本地回归全部通过；下一节点是业务提供一条可真实替换的受控映射后，执行 1688 + 聚水潭单条 live canary。
+## 2026-07-30 Managed Update (24-Hour Shipping Requirement)
+
+- Buyer-protection shipping time is now `24小时发货` with platform code `essxsfh` across field entry, draft persistence, request patching, submit reapply, and reconciliation gates.
+- The user's normal Edge session opens the target draft successfully. The dedicated automation profile still returns `SYS_ERROR`, so real repair/save/submit remains blocked on automation-session refresh rather than field selectors.
+
+## 2026-07-29 Managed Update (Independent Draft Acceptance Result)
+
+- User-authorized deletion removed the two corrupt historical CTG0286 drafts. One replacement draft was created: `6a69bee6e4b01cad1b297a52`.
+- Product management was verified on `tab=all`: shop `木刻理想`, 4 total drafts, one target row, and the target row's official `offerDraftId` link.
+- Request identity repair reached HTTP 200 with the expected ID, but independent persistence acceptance failed every business field. The official row link returns `SYS_ERROR`; startup network capture records no publish-page XHR/fetch before the error.
+- Old and non-target draft controls also return `SYS_ERROR`, so deleting/recreating the target again is not justified.
+- Code now rejects saved `operator=new` URLs for repair execution and post-save acceptance. Both repair and verification reopen through the official `draft2offer` entry and fail closed on `SYS_ERROR`.
+- Development verification passes: listing `421/421`, title engine `89 passed, 3 subtests passed`, 12 JSON files valid, and `git diff --check` clean.
+- Formal audit is corrected to `blocked/rejected` with no Offer. Approval, submit, writeback, and executor deployment remain pending platform recovery and a passed independent inspection.
+
+## 2026-07-29 Managed Update (Existing-Draft Recovery Guard)
+
+- Replaced the synthetic `offer-new ... draftId=` repair URL with the platform's formal `fillProductInfo ... offerDraftId=` entry.
+- Added three identity gates: verify the loaded page ID, require the outgoing `draftSubmit` request to carry the expected ID, and reject a response with a missing or different draft ID.
+- Explicit review repair may rebind only to a draft ID already recorded by a historical `draft_saved` event. CTG0286 therefore permits the two known IDs only and prohibits a third draft.
+- Independent inspection can target a specified historical draft and now emits a structured `unavailable` report plus screenshot when the publish runtime does not load.
+- The management-page probe now preserves row text, links, `href` values, `data-*` attributes, and extracted draft identifiers from the draft tab.
+- Current live finding: the draft box has 5 rows and contains both historical IDs. The old row's real “继续发布商品” click opens the correct ID but still renders `SYS_ERROR`, so the form cannot be inspected or repaired.
+- Development gates pass: listing `400/400`; title engine `89 passed, 3 subtests passed`; doctor `ok`; Python compile and 12 JSON files valid. No real save, approval, submit, Offer, or writeback was completed by this result.
+- Current blocker requires platform recovery or an explicit human policy decision. Creating a third draft, deleting either historical draft, approving without refreshed field evidence, and blind submit remain prohibited.
+
+## 2026-07-28 Managed Update (CTG0286 Pre-Save Repair)
+
+- Reproduced a real draft-save blocker after all image batches completed: the page had re-rendered with an empty title, empty committed specs, no visible main image, and empty logistics inputs.
+- Added an idempotent pre-save repair order: main image, committed specs, title, then price/inventory/description state patch.
+- Specification reads now ignore the resident editor input and accept only `.value-select-item:not(.resident) input` values; Tab remains the confirmed commit key.
+- Save is blocked unless title/specs exactly match the task payload, the configured square-main-image requirement passes, and the description contains every uploaded detail URL.
+- Complete contiguous detail-upload checkpoints are reusable, so the next repair can rebuild the description from all 48 recorded CDN URLs without uploading them again.
+- Development verification passed `380/380`. Executor deployment, one guarded reuse of draft `6a635fcee4b0eda6ebbdf340`, read-only inspection, and formal audit remain pending.
 
 ## 2026-03-31 Managed Update (T-005 Draft System-Error Isolation Round-2)
 
@@ -227,3 +261,29 @@
 - 回归结果：共享 Python `659/659`，ERP Python `339/339`，聚水潭 `check`、`18/18`、`build` 全部通过。
 - 开发机只读验收：`doctor=ok`；2026-07-28 preview 为 127 条加载、10 条重复、117 条选中，四店分布 9/56/17/35。
 - 当前节点：代码与开发机自动化验证完成；执行机部署、乐畅/工莱各 1 条双账号真实 Canary 和正式批次尚未完成。
+## 2026-07-28 Development Update: Required Draft Fields
+
+- Replaced exact dropdown color matching with direct Chinese text entry plus Tab and committed-item verification.
+- Color and size are both required and are checked before draft save and after refresh.
+- Draft save is also blocked before dispatch when title, main image, or the configured minimum detail-image count is missing.
+- Current development verification: listing `371/371`; title engine `89 passed, 3 subtests passed`; compile and JSON checks passed.
+- Remaining work: controlled executor deployment, fresh browser mutex/capacity/source checks, repair of draft `6a635fcee4b0eda6ebbdf340`, and independent real-page inspection. No submit is authorized by this development result.
+
+## 2026-07-28 CTG0286 Independent Inspection Gate
+
+- `inspect_1688_saved_draft.py` now compares persisted color and size with the payload's exact expected values.
+- A non-empty but wrong color or size no longer passes the post-save independent review.
+- Local regression is `373/373`; live draft repair and real-page inspection remain required before business acceptance.
+
+## 2026-07-28 Live Specification Commit Correction
+
+- A real CTG0286 page probe proved that Enter leaves text in the resident input and does not create a SKU specification item.
+- Direct Chinese color and size values must be committed with Tab; verification now ignores resident input text and accepts only non-resident committed items.
+- Full listing regression after the correction is `375/375`. Real draft repair and refreshed-page inspection remain required.
+
+## 2026-07-29 Listing Source Gate Compatibility
+
+- Added the version-controlled read-only source gate `scripts/query_1688_listing_source.py`.
+- The gate uses Windows Credential Manager and selects an installed SQL Server driver, so both executor ODBC 17 and development Native Client 10 are supported.
+- Real CTG028601N1416V01 source checks passed on both machines with `enabled=1`, `stock_disabled=0`, `other_5=销售`, and `item_type=成品`.
+- Listing regression is `382/382`; title engine remains `89 passed, 3 subtests passed`. CTG0286 draft repair and independent page inspection are still pending browser-mutex clearance.

@@ -1,0 +1,69 @@
+{
+    "title_rules": {
+        "max_length": 30,
+        "min_length": 10,
+        "absolute_min_length": 2,
+        "core_word_positions": {
+            "first": {
+                "min": 0,
+                "max": 10,
+                "description": "核心词必须出现在标题前10个字内"
+            },
+            "second": {
+                "min": 20,
+                "max": 25,
+                "description": "核心词需再次出现在第20-25字位置"
+            }
+        }
+    },
+    "word_rules": {
+        "no_duplicate_roots": true,
+        "max_duplicate_count": 1,
+        "forbidden_words": ["的", "了", "在", "是", "我", "有", "和", "就", "不", "人", "都", "一", "一个", "上", "也", "很", "到", "说", "要", "去", "你", "会", "着", "没有", "看", "好", "自己", "这"],
+        "priority_weights": {
+            "search_heat": 0.4,
+            "inverse_competition": 0.3,
+            "product_fit": 0.3
+        }
+    },
+    "category_rules": {
+        "furniture": {
+            "forbidden_suffixes": ["用品", "杂物"],
+            "preferred_prefixes": ["实木", "布艺", "皮艺", "铁艺", "竹艺"],
+            "max_brand_length": 4
+        },
+        "electronics": {
+            "forbidden_suffixes": ["旧货", "二手"],
+            "preferred_prefixes": ["智能", "无线", "便携", "迷你", "大容量"],
+            "max_brand_length": 6
+        },
+        "clothing": {
+            "forbidden_suffixes": ["仿品", "A货"],
+            "preferred_prefixes": ["新款", "韩版", "欧美", "日系", "休闲"],
+            "max_brand_length": 8
+        },
+        "general": {
+            "forbidden_suffixes": [],
+            "preferred_prefixes": ["热销", "爆款", "新款", "正品", "厂家直销"],
+            "max_brand_length": 6
+        }
+    },
+    "category_aliases": {
+        "furniture": ["家具", "家居", "沙发", "桌椅", "柜类", "床"],
+        "electronics": ["电子", "电器", "数码", "家电"],
+        "clothing": ["服装", "女装", "男装", "童装", "衣服"]
+    },
+    "seo_weights": {
+        "keyword_density": 0.25,
+        "position_score": 0.30,
+        "length_score": 0.20,
+        "readability_score": 0.15,
+        "uniqueness_score": 0.10
+    },
+    "generation_params": {
+        "beam_width": 3,
+        "max_iterations": 100,
+        "temperature": 0.7,
+        "min_score_threshold": 0.6
+    }
+}

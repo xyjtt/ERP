@@ -3,13 +3,14 @@ from __future__ import annotations
 import base64
 import html
 import json
+import math
 import mimetypes
 import re
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 from selenium.common.exceptions import (
     ElementClickInterceptedException,
@@ -25,7 +26,13 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.select import Select
 from selenium.webdriver.support.ui import WebDriverWait
 
-from exceptions import MatchCandidateInvalidError, ProductMatchNotFoundError, PublishSubmitError, PublishValidationError
+from exceptions import (
+    ImageAlbumFullError,
+    MatchCandidateInvalidError,
+    ProductMatchNotFoundError,
+    PublishSubmitError,
+    PublishValidationError,
+)
 from parser import ProductRecord, strip_emoji
 from webdriver_factory import open_webdriver
 
@@ -73,10 +80,20 @@ class BrowserRPA:
         page_load_timeout = float(self.browser_config.get("page_load_timeout_seconds", 60))
         if page_load_timeout > 0:
             self.driver.set_page_load_timeout(page_load_timeout)
+        script_timeout = float(self.browser_config.get("script_timeout_seconds", 15))
+        if script_timeout > 0:
+            self.driver.set_script_timeout(script_timeout)
+        if self.attached_to_existing_browser:
+            self._switch_to_existing_business_page()
+            self._prune_duplicate_automation_tabs()
 
     def close(self) -> None:
         if self.driver:
             if self.attached_to_existing_browser and self.browser_config.get("keep_browser_open_on_close", True):
+                try:
+                    self._prune_duplicate_automation_tabs()
+                except Exception:
+                    pass
                 self.driver = None
                 return
             driver = self.driver
@@ -85,6 +102,173 @@ class BrowserRPA:
                 driver.quit()
             except Exception as exc:
                 print(f"[WARN] Browser driver was already unavailable during close: {exc}")
+
+    def _switch_to_existing_business_page(self) -> bool:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        fallback_handle = ""
+        preferred_handle = ""
+        preferred_priority = -1
+        for handle in list(self.driver.window_handles):
+            try:
+                self.driver.switch_to.window(handle)
+                current_url = str(self.driver.current_url or "").strip()
+            except Exception:
+                continue
+            if not fallback_handle:
+                fallback_handle = handle
+            lowered = current_url.lower()
+            if not lowered.startswith(("http://", "https://")):
+                continue
+            if "ntp.msn." in lowered or "edge/ntp" in lowered:
+                continue
+            priority = self._business_page_priority(lowered)
+            if priority > preferred_priority:
+                preferred_handle = handle
+                preferred_priority = priority
+        if preferred_handle:
+            try:
+                self.driver.switch_to.window(preferred_handle)
+                return True
+            except Exception:
+                return False
+        if fallback_handle:
+            try:
+                self.driver.switch_to.window(fallback_handle)
+            except Exception:
+                return False
+        return False
+
+    def _business_page_priority(self, current_url: str) -> int:
+        lowered = str(current_url or "").strip().lower()
+        if "offer-new.1688.com/popular/publish.htm" in lowered:
+            return 300
+        if "offer.1688.com/offer/post/fillproductinfo.htm" in lowered:
+            return 250
+        if "work.1688.com/" in lowered:
+            return 150
+        if "1688.com" in lowered:
+            return 100
+        return 10
+
+    @staticmethod
+    def _automation_tab_kind(current_url: str) -> str:
+        lowered = str(current_url or "").strip().lower()
+        if "offer-new.1688.com/popular/publish.htm" in lowered:
+            return "publish"
+        if "offer.1688.com/offer/post/fillproductinfo.htm" in lowered:
+            return "publish"
+        if "offer-new.1688.com/select.htm" in lowered:
+            return "category"
+        if "work.1688.com/" in lowered and "shasngpinguanlinew" in lowered:
+            return "management"
+        if "offer.1688.com/app/pages-group/manage-home" in lowered:
+            return "management"
+        return ""
+
+    @staticmethod
+    def _management_tab_priority(current_url: str) -> int:
+        try:
+            query = parse_qs(urlparse(str(current_url or "")).query, keep_blank_values=True)
+        except Exception:
+            return 0
+        tab = str((query.get("tab") or [""])[0]).strip().lower()
+        keyword = str((query.get("q") or [""])[0]).strip()
+        offer_id = str((query.get("filterOfferId") or [""])[0]).strip()
+        if tab == "all" and not keyword and not offer_id:
+            return 100
+        if tab == "all":
+            return 50
+        return 0
+
+    def _prune_duplicate_automation_tabs(self) -> int:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        try:
+            original_handle = self.driver.current_window_handle
+            handles = list(self.driver.window_handles)
+        except Exception:
+            return 0
+
+        entries: list[dict[str, str]] = []
+        for handle in handles:
+            try:
+                self.driver.switch_to.window(handle)
+                current_url = str(self.driver.current_url or "").strip()
+            except Exception:
+                continue
+            entries.append(
+                {
+                    "handle": handle,
+                    "url": current_url,
+                    "kind": self._automation_tab_kind(current_url),
+                }
+            )
+
+        publish_entries = [item for item in entries if item["kind"] == "publish"]
+        management_entries = [item for item in entries if item["kind"] == "management"]
+        category_entries = [item for item in entries if item["kind"] == "category"]
+
+        keep_publish = next(
+            (item["handle"] for item in publish_entries if item["handle"] == original_handle),
+            publish_entries[0]["handle"] if publish_entries else "",
+        )
+        keep_management = ""
+        if management_entries:
+            keep_management = max(
+                management_entries,
+                key=lambda item: (
+                    self._management_tab_priority(item["url"]),
+                    int(item["handle"] == original_handle),
+                ),
+            )["handle"]
+        keep_category = ""
+        if not keep_publish and category_entries:
+            keep_category = next(
+                (item["handle"] for item in category_entries if item["handle"] == original_handle),
+                category_entries[0]["handle"],
+            )
+
+        keep_handles = {item for item in (keep_publish, keep_management, keep_category) if item}
+        close_handles = [
+            item["handle"]
+            for item in entries
+            if item["kind"] in {"publish", "management", "category"}
+            and item["handle"] not in keep_handles
+        ]
+        closed_count = 0
+        for handle in close_handles:
+            try:
+                self.driver.switch_to.window(handle)
+                self.driver.close()
+                closed_count += 1
+            except Exception:
+                continue
+
+        try:
+            remaining_handles = list(self.driver.window_handles)
+        except Exception:
+            return closed_count
+        target_handle = original_handle if original_handle in remaining_handles else ""
+        if not target_handle:
+            retained_entries = [
+                item
+                for item in entries
+                if item["handle"] in keep_handles and item["handle"] in remaining_handles
+            ]
+            if retained_entries:
+                target_handle = max(
+                    retained_entries,
+                    key=lambda item: self._business_page_priority(item["url"]),
+                )["handle"]
+            elif remaining_handles:
+                target_handle = remaining_handles[0]
+        if target_handle:
+            try:
+                self.driver.switch_to.window(target_handle)
+            except Exception:
+                pass
+        return closed_count
 
     def reset_runtime_artifacts(self) -> None:
         self.last_screenshot_path = ""
@@ -162,12 +346,27 @@ class BrowserRPA:
         publish_config = platform_config.get("publish", {})
         publish_url = platform_config.get("publish_url")
         context = self._build_context(platform_config["platform"], product, category_config)
+        context["publish_url"] = str(publish_url or "").strip()
         self.last_result_context = context
 
         try:
             if publish_url and publish_config.get("open_each_product", True):
-                self.driver.get(publish_url)
-                self._pause(self.browser_config.get("page_load_wait_seconds", 2))
+                reused_publish_page = self._can_reuse_current_publish_page(
+                    str(publish_url),
+                    publish_config,
+                )
+                context["reused_current_publish_page"] = reused_publish_page
+                if not reused_publish_page:
+                    try:
+                        self.driver.get(publish_url)
+                    except TimeoutException as exc:
+                        context["publish_navigation_timeout"] = str(exc)
+                    self._pause(self.browser_config.get("page_load_wait_seconds", 2))
+                self._wait_for_publish_runtime_ready(
+                    timeout_seconds=float(publish_config.get("runtime_ready_timeout_seconds", 180) or 180)
+                )
+            self._assert_expected_publish_category(publish_config, context)
+            self._assert_expected_publish_draft(publish_config, context)
 
             print(
                 f"[INFO] Ready to publish {product.title} to {platform_config['platform']} "
@@ -180,6 +379,8 @@ class BrowserRPA:
                 self._ensure_draft_send_address_selected(context)
                 self._ensure_draft_required_delivery_service(context)
                 self._apply_draft_page_state_patch(publish_config, context)
+            elif final_action_mode == "submit":
+                self._prepare_and_verify_submit_required_fields(publish_config, context)
             self._check_publish_error_state(
                 publish_config.get("pre_submit_error_detection", {}),
                 context=context,
@@ -221,6 +422,7 @@ class BrowserRPA:
                 backend_reject_consecutive_count = 0
                 for verify_attempt in range(max_verify_attempts):
                     context["draft_verify_attempt"] = verify_attempt + 1
+                    self._ensure_core_publish_fields_before_draft_save(publish_config, context)
                     self._ensure_draft_send_address_selected(context)
                     self._ensure_draft_required_delivery_service(context)
                     self._ensure_draft_logistics_dimensions_before_save(publish_config, context)
@@ -229,6 +431,9 @@ class BrowserRPA:
                     try:
                         self._save_draft_once(publish_config, context)
                     except PublishSubmitError as exc:
+                        if self._is_draft_submit_store_blocked_error(exc, context):
+                            self._mark_store_blocked_for_draft_save(context, exc)
+                            raise
                         if verify_attempt >= max_verify_attempts - 1:
                             raise
                         if not self._should_retry_draft_submit(exc):
@@ -313,7 +518,11 @@ class BrowserRPA:
                         else:
                             context["draft_verify_retry_mode"] = "buyer_protection_ship_time_repair"
                         context["draft_verify_retry_reason"] = str(exc)
-                        fallback_service = self._resolve_fallback_buyer_protection_service()
+                        fallback_service = {}
+                        if publish_config.get("draft_buyer_protection_allow_fallback", False):
+                            fallback_service = self._resolve_fallback_buyer_protection_service()
+                        else:
+                            context["draft_buyer_protection_fallback_allowed"] = False
                         fallback_service_name = str(fallback_service.get("service_name", "")).strip()
                         fallback_service_code = str(fallback_service.get("service_code", "")).strip()
                         if fallback_service_name:
@@ -336,6 +545,7 @@ class BrowserRPA:
                                 )
                         self._ensure_draft_send_address_selected(context)
                         self._ensure_draft_required_delivery_service(context)
+                        self._ensure_core_publish_fields_before_draft_save(publish_config, context)
                         self._ensure_draft_logistics_dimensions_before_save(publish_config, context)
                         self._ensure_required_cat_props_before_draft_save(publish_config, context)
                         self._ensure_buyer_protection_ship_time_before_draft_save(publish_config, context)
@@ -359,7 +569,11 @@ class BrowserRPA:
                     exception_cls=PublishSubmitError,
                 )
                 trace_detected = self._assert_submit_request_trace(publish_config, context)
-                if not trace_detected:
+                success_navigation_detected = self._submit_success_navigation_detected(
+                    publish_config,
+                    context,
+                )
+                if not trace_detected and not success_navigation_detected:
                     context["submit_retry_mode"] = "dispatch_event_click"
                     self._dispatch_click_with_events(submit_selector)
                     self._pause(1.0)
@@ -370,7 +584,11 @@ class BrowserRPA:
                         exception_cls=PublishSubmitError,
                     )
                     trace_detected = self._assert_submit_request_trace(publish_config, context)
-                if not trace_detected:
+                    success_navigation_detected = self._submit_success_navigation_detected(
+                        publish_config,
+                        context,
+                    )
+                if not trace_detected and not success_navigation_detected:
                     raise PublishSubmitError(
                         "Submit button was clicked but no submit request was captured. "
                         "The page likely blocked submit due to hidden validation or disabled state."
@@ -383,6 +601,12 @@ class BrowserRPA:
             self._record_page_metadata(context)
             self.last_result_context = context
             return context
+        except ImageAlbumFullError as exc:
+            self._mark_image_album_full(context, exc)
+            self._record_page_metadata(context)
+            self.last_result_context = context
+            self._capture_screenshot(product.title)
+            raise
         except Exception:
             self._record_page_metadata(context)
             self.last_result_context = context
@@ -450,12 +674,14 @@ class BrowserRPA:
                         if step.get("required", False):
                             raise
                         print(f"[WARN] Skip optional step '{step_name}' because category selection timed out.")
+                        self._recover_publish_form_after_category_step(context)
                         completed = True
                         break
                 if not completed:
                     if step.get("required", False):
                         raise TimeoutException(f"Required category step '{step_name}' did not complete.")
                     print(f"[WARN] Skip optional step '{step_name}' because category selection did not complete.")
+                    self._recover_publish_form_after_category_step(context)
                 self._pause(self.browser_config.get("action_wait_seconds", 0.5))
                 continue
 
@@ -549,6 +775,9 @@ class BrowserRPA:
                                 raise ValueError(f"Required picker_upload value missing for step '{step.get('name')}'")
                             completed = True
                             break
+                        if step_name == "main_image" and self._prepare_main_image_slot(step, context):
+                            completed = True
+                            break
                         self._run_picker_upload(step, selector, values, context)
                     elif action == "picker_url_upload":
                         values = self._resolve_file_values(step, context)
@@ -607,6 +836,33 @@ class BrowserRPA:
                     completed = True
                     break
                 except TimeoutException:
+                    if action == "picker_upload" and step_name == "main_image":
+                        bridge_values = values if isinstance(locals().get("values"), list) else []
+                        if bridge_values:
+                            try:
+                                uploaded_urls = self._upload_images_via_primary_picture_bridge(
+                                    {
+                                        **step,
+                                        "bridge_selector": step.get(
+                                            "bridge_selector",
+                                            {"by": "css", "value": "#guid-primaryPicture"},
+                                        ),
+                                    },
+                                    selector,
+                                    bridge_values,
+                                    context,
+                                )
+                                if uploaded_urls:
+                                    context["main_image_uploaded_urls"] = uploaded_urls
+                            except Exception as bridge_error:
+                                print(
+                                    "[WARN] Main image picker timeout; bridge fallback failed: "
+                                    f"{bridge_error}"
+                                )
+                        if self._draft_main_image_present():
+                            print("[WARN] Main image picker timed out; bridge fallback confirmed image on page.")
+                            completed = True
+                            break
                     if (
                         action in {"input", "textarea"}
                         and step_name == "quantity"
@@ -732,25 +988,33 @@ class BrowserRPA:
         if not self.driver:
             raise RuntimeError("Browser has not been opened.")
 
-        length_value = self._resolve_context_preferred_value(
-            context=context,
-            source=str(step.get("length_source", "length_cm")).strip(),
-            default_value=str(step.get("length_default", "")).strip(),
+        length_value = self._normalize_dimension_value(
+            self._resolve_context_preferred_value(
+                context=context,
+                source=str(step.get("length_source", "length_cm")).strip(),
+                default_value=str(step.get("length_default", "")).strip(),
+            )
         )
-        width_value = self._resolve_context_preferred_value(
-            context=context,
-            source=str(step.get("width_source", "width_cm")).strip(),
-            default_value=str(step.get("width_default", "")).strip(),
+        width_value = self._normalize_dimension_value(
+            self._resolve_context_preferred_value(
+                context=context,
+                source=str(step.get("width_source", "width_cm")).strip(),
+                default_value=str(step.get("width_default", "")).strip(),
+            )
         )
-        height_value = self._resolve_context_preferred_value(
-            context=context,
-            source=str(step.get("height_source", "height_cm")).strip(),
-            default_value=str(step.get("height_default", "")).strip(),
+        height_value = self._normalize_dimension_value(
+            self._resolve_context_preferred_value(
+                context=context,
+                source=str(step.get("height_source", "height_cm")).strip(),
+                default_value=str(step.get("height_default", "")).strip(),
+            )
         )
-        weight_value = self._resolve_context_preferred_value(
-            context=context,
-            source=str(step.get("weight_source", "weight_g")).strip(),
-            default_value=str(step.get("weight_default", "")).strip(),
+        weight_value = self._normalize_weight_value(
+            self._resolve_context_preferred_value(
+                context=context,
+                source=str(step.get("weight_source", "weight_g")).strip(),
+                default_value=str(step.get("weight_default", "")).strip(),
+            )
         )
 
         payload = self.driver.execute_script(
@@ -765,6 +1029,8 @@ class BrowserRPA:
               applied: 0,
               reason: '',
               columns: {},
+              statePatched: false,
+              statePatchedFields: [],
             };
 
             const values = {
@@ -781,6 +1047,16 @@ class BrowserRPA:
             }
 
             const norm = (value) => String(value || '').replace(/\\s+/g, '').trim();
+            const parsePositiveNumber = (value) => {
+              const text = String(value == null ? '' : value).trim();
+              if (!text) return null;
+              const normalized = text.replace(/,/g, '');
+              const parsed = Number(normalized);
+              if (!Number.isFinite(parsed) || parsed <= 0) {
+                return null;
+              }
+              return parsed;
+            };
             const isVisible = (node) => {
               if (!node) return false;
               const style = window.getComputedStyle(node);
@@ -802,11 +1078,82 @@ class BrowserRPA:
               inputNode.dispatchEvent(new Event('blur', { bubbles: true }));
               return true;
             };
+            const patchOfficialLogisticsState = () => {
+              const sdk = window.SellPublishSdk;
+              const engine = sdk && sdk.engine ? sdk.engine : null;
+              const core =
+                (engine && engine.formilyCore) ||
+                (engine && engine._engine && engine._engine._core) ||
+                null;
+              if (!core || typeof core.changeElementValue !== 'function') {
+                return;
+              }
+              const runtimeState = engine && typeof engine.getJsonState === 'function' ? engine.getJsonState() : {};
+              const components = (runtimeState && runtimeState.components) || {};
+              const props = ((components.officialLogistics || {}).props) || {};
+              const currentValue = props.value && typeof props.value === 'object' ? props.value : {};
+              const nextValue = JSON.parse(JSON.stringify(currentValue || {}));
+              const offerInfo = nextValue.offerInfo && typeof nextValue.offerInfo === 'object' ? nextValue.offerInfo : {};
+              const nextOfferInfo = { ...(offerInfo || {}) };
+              let changed = false;
+              const applyField = (field, rawValue) => {
+                const parsed = parsePositiveNumber(rawValue);
+                if (parsed == null) {
+                  return;
+                }
+                nextOfferInfo[field] = parsed;
+                if (!result.statePatchedFields.includes(field)) {
+                  result.statePatchedFields.push(field);
+                }
+                changed = true;
+              };
+              applyField('length', lengthValue);
+              applyField('width', widthValue);
+              applyField('height', heightValue);
+              applyField('weight', weightValue);
+              if (!changed) {
+                return;
+              }
+              nextValue.offerInfo = nextOfferInfo;
+              core.changeElementValue('officialLogistics', nextValue, { isDepth: false });
+              result.statePatched = true;
+            };
+
+            patchOfficialLogisticsState();
+
+            const runtimeStateAfterPatch =
+              (window.SellPublishSdk &&
+                window.SellPublishSdk.engine &&
+                typeof window.SellPublishSdk.engine.getJsonState === 'function')
+                ? window.SellPublishSdk.engine.getJsonState()
+                : {};
+            const runtimeComponentsAfterPatch = (runtimeStateAfterPatch && runtimeStateAfterPatch.components) || {};
+            const officialLogisticsPropsAfterPatch =
+              ((runtimeComponentsAfterPatch.officialLogistics || {}).props) || {};
+            const officialLogisticsValueAfterPatch =
+              officialLogisticsPropsAfterPatch.value && typeof officialLogisticsPropsAfterPatch.value === 'object'
+                ? officialLogisticsPropsAfterPatch.value
+                : {};
+            const logisticsMode = String(
+              (officialLogisticsValueAfterPatch.showLogisticsCategory || officialLogisticsPropsAfterPatch.showLogisticsCategory || '')
+            )
+              .trim()
+              .toLowerCase();
+            if (logisticsMode === 'item') {
+              result.reason = result.statePatched ? 'state_only_item_mode' : 'item_mode_without_state_patch';
+              if (result.statePatched) {
+                result.applied = Math.max(result.applied, result.statePatchedFields.length);
+              }
+              return result;
+            }
 
             const root = document.querySelector('#guid-officialLogistics') || document;
             const tableCandidates = Array.from(root.querySelectorAll('table')).filter(isVisible);
             if (tableCandidates.length === 0) {
-              result.reason = 'table_not_found';
+              result.reason = result.statePatched ? 'state_only' : 'table_not_found';
+              if (result.statePatched) {
+                result.applied = Math.max(result.applied, result.statePatchedFields.length);
+              }
               return result;
             }
 
@@ -828,7 +1175,10 @@ class BrowserRPA:
                 tableCandidates[0];
             }
             if (!targetTable) {
-              result.reason = 'target_table_missing';
+              result.reason = result.statePatched ? 'state_only' : 'target_table_missing';
+              if (result.statePatched) {
+                result.applied = Math.max(result.applied, result.statePatchedFields.length);
+              }
               return result;
             }
 
@@ -869,7 +1219,10 @@ class BrowserRPA:
               targetTable.querySelector('tbody tr') ||
               targetTable.querySelector('.next-table-body tr');
             if (!bodyRow) {
-              result.reason = 'body_row_missing';
+              result.reason = result.statePatched ? 'state_only' : 'body_row_missing';
+              if (result.statePatched) {
+                result.applied = Math.max(result.applied, result.statePatchedFields.length);
+              }
               return result;
             }
 
@@ -896,7 +1249,10 @@ class BrowserRPA:
             }
 
             if (result.applied <= 0) {
-              result.reason = 'no_editable_cells';
+              result.reason = result.statePatched ? 'state_only' : 'no_editable_cells';
+              if (result.statePatched) {
+                result.applied = Math.max(result.applied, result.statePatchedFields.length);
+              }
             }
             return result;
             """,
@@ -909,6 +1265,135 @@ class BrowserRPA:
         context["logistics_dimension_fill"] = payload_dict
         return int(payload_dict.get("applied", 0) or 0) > 0
 
+    def _normalize_dimension_value(self, raw_value: str) -> str:
+        value = str(raw_value or "").strip()
+        if not value:
+            return ""
+        try:
+            parsed = float(value.replace(",", ""))
+        except ValueError:
+            return value
+        if parsed <= 0:
+            return ""
+        return f"{parsed:.3f}".rstrip("0").rstrip(".")
+
+    def _normalize_weight_value(self, raw_value: str) -> str:
+        value = self._normalize_dimension_value(raw_value)
+        if not value:
+            return ""
+        try:
+            parsed = float(value.replace(",", ""))
+        except ValueError:
+            return value
+        if 0 < parsed <= 50:
+            parsed *= 1000
+        if parsed <= 0:
+            return ""
+        return f"{parsed:.0f}"
+
+    def _normalize_logistics_dimension_map(self, raw_map: Any) -> dict[str, str]:
+        data = dict(raw_map or {}) if isinstance(raw_map, dict) else {}
+        return {
+            "length": self._normalize_dimension_value(
+                str(data.get("length", data.get("lengthCm", "")) or "").strip()
+            ),
+            "width": self._normalize_dimension_value(
+                str(data.get("width", data.get("widthCm", "")) or "").strip()
+            ),
+            "height": self._normalize_dimension_value(
+                str(data.get("height", data.get("heightCm", "")) or "").strip()
+            ),
+            "weight": self._normalize_weight_value(
+                str(data.get("weight", data.get("weightG", "")) or "").strip()
+            ),
+        }
+
+    def _extract_logistics_dimensions_from_official_logistics(self, payload: Any) -> dict[str, str]:
+        data = dict(payload or {}) if isinstance(payload, dict) else {}
+        offer_info = data.get("offerInfo")
+        offer_info_map = dict(offer_info or {}) if isinstance(offer_info, dict) else {}
+
+        sku_info_candidates: list[dict[str, Any]] = []
+        for candidate in (data.get("skuInfo"), offer_info_map.get("skuInfo")):
+            if not isinstance(candidate, list):
+                continue
+            sku_info_candidates.extend(item for item in candidate if isinstance(item, dict))
+
+        first_row = sku_info_candidates[0] if sku_info_candidates else {}
+        nested_dimension: dict[str, Any] = {}
+        for candidate in (first_row.get("dimension"), first_row.get("skuDimension")):
+            if isinstance(candidate, dict):
+                nested_dimension = dict(candidate)
+                break
+
+        result = self._normalize_logistics_dimension_map(offer_info_map)
+        row_result = self._normalize_logistics_dimension_map(first_row)
+        nested_result = self._normalize_logistics_dimension_map(nested_dimension)
+        for key in ("length", "width", "height", "weight"):
+            if not result[key]:
+                result[key] = row_result[key] or nested_result[key]
+        return result
+
+    def _extract_draft_trace_logistics_dimensions(self, draft_submit_trace: Any) -> tuple[dict[str, str], str]:
+        trace = dict(draft_submit_trace or {}) if isinstance(draft_submit_trace, dict) else {}
+        if not trace:
+            return {}, ""
+
+        patch_snapshot = ((trace.get("patch") or {}).get("patchSnapshot") or {})
+        if isinstance(patch_snapshot, dict):
+            snapshot_dimensions = self._normalize_logistics_dimension_map(
+                patch_snapshot.get("logisticsDimensions")
+            )
+            if any(snapshot_dimensions.values()):
+                return snapshot_dimensions, "draft_submit_trace.patch.patchSnapshot.logisticsDimensions"
+
+            snapshot_official_logistics = self._extract_logistics_dimensions_from_official_logistics(
+                patch_snapshot.get("officialLogistics")
+            )
+            if any(snapshot_official_logistics.values()):
+                return snapshot_official_logistics, "draft_submit_trace.patch.patchSnapshot.officialLogistics"
+
+        for preview_key in ("patchedBodyPreview", "originalBodyPreview"):
+            preview_text = str(trace.get(preview_key, "") or "").strip()
+            if not preview_text:
+                continue
+            try:
+                preview_payload = json.loads(preview_text)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(preview_payload, dict):
+                continue
+            form_values = preview_payload.get("formValues")
+            effective_payload = form_values if isinstance(form_values, dict) else preview_payload
+            preview_dimensions = self._extract_logistics_dimensions_from_official_logistics(
+                effective_payload.get("officialLogistics")
+            )
+            if any(preview_dimensions.values()):
+                return preview_dimensions, f"draft_submit_trace.{preview_key}"
+
+        return {}, ""
+
+    def _parse_positive_float(self, raw_value: Any, default: float | None = None) -> float | None:
+        text = str(raw_value or "").strip().replace(",", "")
+        if not text:
+            return default
+        try:
+            parsed = float(text)
+        except ValueError:
+            return default
+        if parsed <= 0:
+            return default
+        return parsed
+
+    def _parse_positive_integer(self, raw_value: Any, default: int = 0) -> int:
+        parsed = self._parse_positive_float(raw_value)
+        if parsed is None:
+            return default
+        integer_value = int(math.floor(parsed))
+        if integer_value <= 0:
+            return default
+        return integer_value
+
     def _build_context(
         self,
         platform_key: str,
@@ -919,6 +1404,11 @@ class BrowserRPA:
         detail_images = [
             image.strip()
             for image in product.raw.get("detail_images", "").split("|")
+            if image.strip()
+        ]
+        detail_images_remote = [
+            image.strip()
+            for image in product.raw.get("detail_images_remote", "").split("|")
             if image.strip()
         ]
         context = dict(product.raw)
@@ -933,6 +1423,8 @@ class BrowserRPA:
         for index, level in enumerate(resolved_category_levels, start=1):
             context[f"resolved_category_level_{index}"] = level
         context["detail_images_list"] = detail_images
+        context["detail_images_remote_list"] = detail_images_remote
+        context["company_sku_names"] = self._resolve_company_sku_names(context)
         return context
 
     def _resolve_publish_mode(self, publish_config: dict[str, Any]) -> str:
@@ -941,6 +1433,96 @@ class BrowserRPA:
         if publish_config.get("auto_submit", False):
             return "submit"
         return "manual"
+
+    def _assert_expected_publish_category(
+        self,
+        publish_config: dict[str, Any],
+        context: dict[str, Any],
+    ) -> None:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        expected_id = str(publish_config.get("expected_category_id", "")).strip()
+        expected_path = str(publish_config.get("expected_category_path", "")).strip()
+        if not expected_id and not expected_path:
+            return
+
+        timeout_seconds = max(1.0, float(publish_config.get("category_assert_timeout_seconds", 20) or 20))
+        deadline = time.time() + timeout_seconds
+        actual: dict[str, Any] = {}
+        while time.time() <= deadline:
+            payload = self.driver.execute_script(
+                """
+                const sdk = window.SellPublishSdk;
+                const state = sdk && sdk.engine && sdk.engine.getJsonState ? sdk.engine.getJsonState() : {};
+                const value = ((((state || {}).components || {}).catNamer || {}).props || {}).value || {};
+                const pathList = Array.isArray(value.pathList) ? value.pathList : [];
+                return {
+                  category_id: String(((pathList[pathList.length - 1] || {}).categoryId) || ''),
+                  category_path: pathList.map((item) => String((item || {}).name || '').trim()).filter(Boolean),
+                };
+                """
+            )
+            actual = payload if isinstance(payload, dict) else {}
+            if str(actual.get("category_id", "")).strip() or list(actual.get("category_path", []) or []):
+                break
+            self._pause(0.25)
+
+        actual_id = str(actual.get("category_id", "")).strip()
+        actual_path = [str(item).strip() for item in list(actual.get("category_path", []) or []) if str(item).strip()]
+        context["actual_category_id"] = actual_id
+        context["actual_category_path"] = actual_path
+        if expected_id and actual_id != expected_id:
+            raise PublishValidationError(
+                f"publish category mismatch: expected id {expected_id}, got {actual_id or 'unavailable'}"
+            )
+        expected_levels = self._split_category_path(expected_path)
+        if expected_levels and actual_path != expected_levels:
+            raise PublishValidationError(
+                "publish category mismatch: expected path "
+                + " > ".join(expected_levels)
+                + ", got "
+                + (" > ".join(actual_path) or "unavailable")
+            )
+
+    def _assert_expected_publish_draft(
+        self,
+        publish_config: dict[str, Any],
+        context: dict[str, Any],
+    ) -> None:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        expected_id = str(publish_config.get("expected_draft_id", "")).strip()
+        if not expected_id:
+            return
+
+        timeout_seconds = max(1.0, float(publish_config.get("draft_assert_timeout_seconds", 20) or 20))
+        deadline = time.time() + timeout_seconds
+        actual_id = ""
+        while time.time() <= deadline:
+            payload = self.driver.execute_script(
+                """
+                const sdk = window.SellPublishSdk;
+                const state = sdk && sdk.engine && sdk.engine.getJsonState ? sdk.engine.getJsonState() : {};
+                const current = new URL(window.location.href);
+                return String(
+                  current.searchParams.get('draftId') ||
+                  current.searchParams.get('offerDraftId') ||
+                  (((state || {}).global || {}).renderData || {}).draftId ||
+                  (((state || {}).global || {}).systemParam || {}).draftId ||
+                  ''
+                ).trim();
+                """
+            )
+            actual_id = str(payload or "").strip()
+            if actual_id:
+                break
+            self._pause(0.25)
+
+        context["actual_draft_id"] = actual_id
+        if actual_id != expected_id:
+            raise PublishValidationError(
+                f"publish draft mismatch: expected {expected_id}, got {actual_id or 'unavailable'}"
+            )
 
     def _resolve_value(self, step: dict[str, Any], context: dict[str, Any]) -> str:
         if "value" in step:
@@ -1024,6 +1606,16 @@ class BrowserRPA:
         force_reselect = bool(step.get("force_reselect", False))
         if not force_reselect and self._category_matches_current_page(levels):
             return
+        if (
+            not force_reselect
+            and bool(step.get("allow_skip_when_form_ready", True))
+            and self._is_publish_form_ready()
+        ):
+            print(
+                "[WARN] Skip category reselection because publish form is already ready "
+                "and category label check is unstable on current page."
+            )
+            return
 
         select_url = self._build_category_select_url(step)
         current_url = self.driver.current_url or ""
@@ -1065,6 +1657,27 @@ class BrowserRPA:
                 raise
         self._pause(float(step.get("after_category_return_wait_seconds", 2)))
 
+    def _recover_publish_form_after_category_step(self, context: dict[str, Any]) -> None:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        if self._is_publish_form_ready():
+            return
+
+        expected_levels = self._resolve_category_levels({"source": "resolved_category_levels"}, context)
+        recovered = self._activate_existing_publish_page(
+            expected_levels=expected_levels,
+            prefer_new_publish=False,
+        )
+        if recovered:
+            self._pause(0.8)
+            if self._is_publish_form_ready():
+                return
+
+        publish_url = str(context.get("publish_url", "")).strip()
+        if publish_url:
+            self.driver.get(publish_url)
+            self._pause(max(0.8, float(self.browser_config.get("page_load_wait_seconds", 2))))
+
     def _click_category_confirm_button(self, confirm_selector: dict[str, str]) -> None:
         if not self.driver:
             raise RuntimeError("Browser has not been opened.")
@@ -1095,7 +1708,7 @@ class BrowserRPA:
               const rect = node.getBoundingClientRect();
               return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
             }
-            const textCandidates = ['确定', '确认', '提交'];
+            const textCandidates = ['确定', '确认', '提交', '继续完善'];
             for (const selector of selectorCandidates) {
               const nodes = Array.from(document.querySelectorAll(selector)).filter((node) => {
                 if (!isVisible(node)) return false;
@@ -1153,7 +1766,8 @@ class BrowserRPA:
                 if "publish.htm" not in candidate_url or "login.1688.com" in candidate_url:
                     continue
                 if levels and not self._category_matches_current_page(levels):
-                    continue
+                    if not self._is_publish_form_ready():
+                        continue
                 candidate_rank = 0 if self._is_preferred_new_publish_url(candidate_url) else 1
                 candidates.append((candidate_rank, handle))
             except Exception:
@@ -1189,20 +1803,117 @@ class BrowserRPA:
         try:
             text = self.driver.execute_script(
                 """
-                const root = document.querySelector('#guid-catNamer .current-namer');
-                return root ? (root.innerText || root.textContent || '') : '';
+                const selectors = [
+                  '#guid-catNamer .current-namer',
+                  '#guid-catNamer',
+                  '.current-namer',
+                ];
+                for (const selector of selectors) {
+                  const node = document.querySelector(selector);
+                  const value = node ? (node.innerText || node.textContent || '') : '';
+                  if (value && String(value).trim()) {
+                    return value;
+                  }
+                }
+                return '';
                 """
             )
         except Exception:
             return False
-        current_text = str(text).replace("您选择的类目：", "").strip()
+        current_text = str(text or "").strip()
+        if not current_text:
+            return False
+        current_text = re.sub(
+            r"^(?:您选择的类目|当前类目|已选类目|已选分类)\s*[：:]\s*",
+            "",
+            current_text,
+        )
         current = self._split_category_path(current_text)
         if current == levels:
             return True
+        if len(current) >= len(levels) and current[-len(levels) :] == levels:
+            return True
 
-        normalized_current = re.sub(r"[\s>]+", "", current_text)
-        normalized_target = "".join(levels)
-        return normalized_current == normalized_target
+        normalized_current = re.sub(r"[\s>＞›/\\|：:]+", "", current_text)
+        normalized_target = re.sub(r"[\s>＞›/\\|：:]+", "", "".join(levels))
+        return bool(normalized_target) and (
+            normalized_current == normalized_target or normalized_target in normalized_current
+        )
+
+    def _is_publish_form_ready(self) -> bool:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        current_url = str(self.driver.current_url or "")
+        if "publish.htm" not in current_url or "login.1688.com" in current_url:
+            return False
+        try:
+            return bool(
+                self.driver.execute_script(
+                    """
+                    function isVisible(node) {
+                      if (!node) return false;
+                      const style = window.getComputedStyle(node);
+                      const rect = node.getBoundingClientRect();
+                      return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+                    }
+                    const selectors = [
+                      '#guid-title input[maxlength="60"]',
+                      '#guid-title input',
+                      '#saveDraftButton',
+                      '#submitFormButton',
+                    ];
+                    return selectors.some((selector) => {
+                      const node = document.querySelector(selector);
+                      return isVisible(node);
+                    });
+                    """
+                )
+            )
+        except Exception:
+            return False
+
+    def _can_reuse_current_publish_page(
+        self,
+        publish_url: str,
+        publish_config: dict[str, Any],
+    ) -> bool:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        current_url = str(self.driver.current_url or "").strip()
+        target_url = str(publish_url or "").strip()
+        if not current_url or not target_url:
+            return False
+        current = urlparse(current_url)
+        target = urlparse(target_url)
+        if current.netloc.lower() != target.netloc.lower() or current.path != target.path:
+            return False
+        current_query = parse_qs(current.query)
+        target_query = parse_qs(target.query)
+        for key in ("operator", "draftId", "offerDraftId"):
+            if current_query.get(key, []) != target_query.get(key, []):
+                return False
+        expected_draft_id = str(publish_config.get("expected_draft_id") or "").strip()
+        if expected_draft_id and expected_draft_id not in {
+            str((current_query.get("draftId") or [""])[0]).strip(),
+            str((current_query.get("offerDraftId") or [""])[0]).strip(),
+        }:
+            return False
+        return self._is_publish_form_ready()
+
+    def _wait_for_publish_runtime_ready(self, *, timeout_seconds: float) -> None:
+        deadline = time.time() + max(timeout_seconds, 1.0)
+        last_error: Exception | None = None
+        while time.time() < deadline:
+            try:
+                if self._is_publish_form_ready():
+                    return
+            except (TimeoutException, WebDriverException) as exc:
+                last_error = exc
+            self._pause(1.0)
+        message = "Timed out waiting for the 1688 publish runtime to become ready."
+        if last_error is not None:
+            message = f"{message} Last driver error: {last_error}"
+        raise TimeoutException(message)
 
     def _build_category_select_url(self, step: dict[str, Any]) -> str:
         if not self.driver:
@@ -1304,7 +2015,8 @@ class BrowserRPA:
                     if "publish.htm" not in candidate_url or "login.1688.com" in candidate_url:
                         continue
                     if expected and not self._category_matches_current_page(expected):
-                        continue
+                        if not self._is_publish_form_ready():
+                            continue
                     candidate_rank = 0 if self._is_preferred_new_publish_url(candidate_url) else 1
                     candidates.append((candidate_rank, handle))
                 except Exception:
@@ -1327,8 +2039,11 @@ class BrowserRPA:
         def locate_publish_page(driver: Any) -> bool:
             current_url = str(driver.current_url or "")
             if "publish.htm" in current_url and "login.1688.com" not in current_url:
+                category_ok = (not expected) or self._category_matches_current_page(expected)
+                if not category_ok and self._is_publish_form_ready():
+                    category_ok = True
                 if (
-                    (not expected or self._category_matches_current_page(expected))
+                    category_ok
                     and (not prefer_new_publish or self._is_preferred_new_publish_url(current_url))
                 ):
                     return True
@@ -1438,7 +2153,18 @@ class BrowserRPA:
                   return (value || '').replace(/\\s+/g, ' ').trim();
                 }
                 const selectedNode = document.querySelector('.current-selected strong');
-                const selectedText = norm(selectedNode ? (selectedNode.innerText || selectedNode.textContent || '') : '');
+                const selectedFallbackNode = document.querySelector('.current-selected');
+                const selectedText = norm(
+                  selectedNode
+                    ? (selectedNode.innerText || selectedNode.textContent || '')
+                    : (selectedFallbackNode ? (selectedFallbackNode.innerText || selectedFallbackNode.textContent || '') : '')
+                );
+                const selectedOptionTitles = Array.from(
+                  document.querySelectorAll('.next-cascader-menu-wrapper li.next-selected[role="option"], .next-cascader-menu-wrapper li.next-selected')
+                )
+                  .map((node) => norm(node.getAttribute('title') || node.innerText || node.textContent || ''))
+                  .filter(Boolean);
+                const selectedByOption = !!lastLevel && selectedOptionTitles.some((item) => item === lastLevel);
                 if (selectedText) {
                   const compactSelected = selectedText.replace(/[>＞]/g, '').replace(/\\s+/g, '');
                   if (selectedText === expected || compactSelected === expectedCompact) {
@@ -1453,7 +2179,7 @@ class BrowserRPA:
                   confirmButton.disabled ||
                   confirmButton.getAttribute('disabled') !== null ||
                   confirmButton.getAttribute('aria-disabled') === 'true';
-                if (!disabled && (!lastLevel || selectedText.includes(lastLevel))) {
+                if (!disabled && (!lastLevel || selectedText.includes(lastLevel) || selectedByOption)) {
                   return true;
                 }
                 return false;
@@ -1978,7 +2704,14 @@ class BrowserRPA:
                               return false;
                             }
                             const root = node.closest('.ant-select-dropdown');
-                            return Boolean(root && String(root.id || '').trim() === expectedId);
+                            const marker = document.getElementById(expectedId);
+                            return Boolean(
+                              root &&
+                              (
+                                String(root.id || '').trim() === expectedId ||
+                                (marker && root.contains(marker))
+                              )
+                            );
                             """,
                             candidate,
                             dropdown_id,
@@ -2135,21 +2868,65 @@ class BrowserRPA:
               return '';
             }
             anchor.scrollIntoView({ block: 'center' });
-            dispatchMouseSequence(root);
-            dispatchMouseSequence(selector);
-            dispatchMouseSequence(input);
+            dispatchMouseSequence(anchor);
             if (input) {
               input.focus();
-              input.dispatchEvent(new KeyboardEvent('keydown', {
-                key: 'ArrowDown',
-                bubbles: true,
-                cancelable: true,
-              }));
             }
-            return String((root && root.getAttribute('aria-controls')) || '').trim();
+            return String(
+              (input && (input.getAttribute('aria-controls') || input.getAttribute('aria-owns'))) ||
+              (root && (root.getAttribute('aria-controls') || root.getAttribute('aria-owns'))) ||
+              ''
+            ).trim();
             """
         )
         return str(dropdown_id or "").strip()
+
+    def _scroll_ant_dropdown_option_into_view(self, value: str, *, dropdown_id: str = "") -> bool:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        return bool(
+            self.driver.execute_script(
+                """
+                const expected = String(arguments[0] || '').replace(/\\s+/g, ' ').trim();
+                const dropdownId = String(arguments[1] || '').trim();
+                const norm = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+                const marker = dropdownId ? document.getElementById(dropdownId) : null;
+                const activeDropdown =
+                  (marker && marker.closest('.ant-select-dropdown')) ||
+                  Array.from(document.querySelectorAll('.ant-select-dropdown')).find((node) => {
+                    const style = window.getComputedStyle(node);
+                    const rect = node.getBoundingClientRect();
+                    return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+                  }) ||
+                  null;
+                if (!activeDropdown || !expected) {
+                  return false;
+                }
+                const options = Array.from(activeDropdown.querySelectorAll('.ant-select-item-option'));
+                const target =
+                  options.find((node) => norm(node.innerText || node.textContent) === expected) ||
+                  options.find((node) => {
+                    const text = norm(node.innerText || node.textContent);
+                    return text && (text.includes(expected) || expected.includes(text));
+                  }) ||
+                  null;
+                if (!target) {
+                  return false;
+                }
+                const holder = activeDropdown.querySelector('.rc-virtual-list-holder');
+                if (holder) {
+                  const targetCenter = target.offsetTop + (target.offsetHeight / 2);
+                  holder.scrollTop = Math.max(0, targetCenter - (holder.clientHeight / 2));
+                  holder.dispatchEvent(new Event('scroll', {bubbles: true}));
+                } else {
+                  target.scrollIntoView({block: 'nearest'});
+                }
+                return true;
+                """,
+                value,
+                dropdown_id,
+            )
+        )
 
     def _click_ant_dropdown_option_via_script(
         self,
@@ -2287,6 +3064,8 @@ class BrowserRPA:
             except Exception:
                 pass
 
+            if self._scroll_ant_dropdown_option_into_view(expected_value, dropdown_id=dropdown_id):
+                self._pause(max(0.05, float(open_wait_seconds)))
             matched = self._click_visible_dropdown_option_native(expected_value, dropdown_id=dropdown_id)
             if not matched:
                 matched = self._click_ant_dropdown_option_via_script(
@@ -2435,19 +3214,120 @@ class BrowserRPA:
     def _apply_spec_rule(self, rule: dict[str, Any], context: dict[str, Any]) -> None:
         label = str(rule.get("label", "")).strip()
         value = self._resolve_profile_rule_value(rule, context)
-        if not label or not value:
-            return
         required = bool(rule.get("required", False))
+        if not label:
+            return
+        if not value:
+            if required:
+                raise PublishValidationError(f"Spec rule '{label}' has no source value.")
+            return
+        spec_values = self._split_spec_rule_values(value, rule)
+        if not spec_values:
+            if required:
+                raise PublishValidationError(f"Spec rule '{label}' has no usable source value.")
+            return
         try:
-            input_element = self._wait_for_spec_input(label)
+            container = self._wait_for_spec_container(label)
         except TimeoutException:
             if required:
                 raise
             print(f"[WARN] Skip spec rule '{label}' because the spec input is not present on current page.")
             return
+        for item in spec_values:
+            if self.driver:
+                current_state = self._read_spec_text_state(container, item)
+                if bool(current_state.get("exact_match")) and not bool(current_state.get("required_warning")):
+                    continue
+            input_element = self._find_preferred_spec_input(container)
+            if not input_element:
+                if required:
+                    raise ValueError(f"Spec rule '{label}' has no editable input.")
+                print(f"[WARN] Skip remaining values for spec rule '{label}' because no editable input is available.")
+                return
+            self._fill_spec_text_value(input_element, label, item, rule)
+            try:
+                container = self._wait_for_spec_container(label)
+            except TimeoutException:
+                pass
+
+    def _fill_spec_text_value(
+        self,
+        input_element: WebElement,
+        label: str,
+        value: str,
+        rule: dict[str, Any],
+    ) -> None:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+
+        self.driver.execute_script(
+            """
+            const input = arguments[0];
+            const trigger = input.closest('.value-select-container[aria-haspopup="true"]') || input;
+            input.scrollIntoView({block: 'center', inline: 'nearest'});
+            trigger.click();
+            input.focus();
+            """,
+            input_element,
+        )
         self._fill_text_field(input_element, value, clear=True)
-        input_element.send_keys(Keys.ENTER)
+        commit_key = str(rule.get("commit_key", "enter")).strip().lower()
+        input_element.send_keys(Keys.TAB if commit_key == "tab" else Keys.ENTER)
         self._pause(float(rule.get("select_wait_seconds", 0.4)))
+        self._verify_spec_text_value(
+            label,
+            value,
+            wait_seconds=float(rule.get("verify_wait_seconds", 2.0)),
+        )
+
+    def _verify_spec_text_value(self, label: str, expected_value: str, *, wait_seconds: float) -> None:
+        deadline = time.monotonic() + max(0.0, wait_seconds)
+        last_state: dict[str, Any] = {}
+        while True:
+            try:
+                container = self._wait_for_spec_container(label)
+                last_state = self._read_spec_text_state(container, expected_value)
+            except (StaleElementReferenceException, TimeoutException):
+                last_state = {}
+            if bool(last_state.get("exact_match")) and not bool(last_state.get("required_warning")):
+                return
+            if time.monotonic() >= deadline:
+                break
+            self._pause(min(0.2, max(0.0, deadline - time.monotonic())))
+
+        values = [str(item).strip() for item in list(last_state.get("values", []) or [])]
+        if bool(last_state.get("required_warning")):
+            raise PublishValidationError(
+                f"Spec rule '{label}' still shows a required-field warning after entering '{expected_value}'."
+            )
+        raise PublishValidationError(
+            f"Spec rule '{label}' did not retain '{expected_value}' after commit; current values: {values}."
+        )
+
+    def _read_spec_text_state(self, container: WebElement, expected_value: str) -> dict[str, Any]:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        payload = self.driver.execute_script(
+            """
+            const root = arguments[0];
+            const normalize = (value) => String(value == null ? '' : value).replace(/\\s+/g, ' ').trim();
+            const expected = normalize(arguments[1]);
+            const values = Array.from(
+              root.querySelectorAll('.value-select-item:not(.resident) input')
+            )
+              .map((node) => normalize(node.value))
+              .filter(Boolean);
+            const text = normalize(root.innerText || root.textContent || '');
+            return {
+              values,
+              exact_match: values.includes(expected),
+              required_warning: text.includes('\u5fc5\u586b'),
+            };
+            """,
+            container,
+            expected_value,
+        )
+        return dict(payload or {})
 
     def _resolve_profile_rules(self, step: dict[str, Any], context: dict[str, Any]) -> list[dict[str, Any]]:
         profiles = step.get("profiles", {})
@@ -2459,6 +3339,15 @@ class BrowserRPA:
     def _resolve_profile_rule_value(self, rule: dict[str, Any], context: dict[str, Any]) -> str:
         if "value" in rule:
             return str(rule.get("value", "")).strip()
+        source_candidates = rule.get("source_candidates", [])
+        if isinstance(source_candidates, list):
+            for source in source_candidates:
+                source_name = str(source or "").strip()
+                if not source_name:
+                    continue
+                candidate = str(context.get(source_name, "")).strip()
+                if candidate:
+                    return candidate
         source = str(rule.get("source", "")).strip()
         if source:
             value = context.get(source, "")
@@ -2472,6 +3361,63 @@ class BrowserRPA:
         if not raw_value:
             return []
         return [item.strip() for item in re.split(r"\s*\|\s*", raw_value) if item.strip()]
+
+    def _split_spec_rule_values(self, value: str, rule: dict[str, Any]) -> list[str]:
+        raw_value = str(value or "").strip()
+        if not raw_value:
+            return []
+        if not bool(rule.get("multi_value", False)):
+            return [raw_value]
+
+        split_pattern = str(rule.get("split_pattern", "")).strip()
+        if split_pattern:
+            try:
+                parts = re.split(split_pattern, raw_value)
+            except re.error:
+                parts = [raw_value]
+        else:
+            parts = re.split(r"\s*\|\s*", raw_value)
+
+        result: list[str] = []
+        for item in parts:
+            normalized = str(item or "").strip()
+            if normalized and normalized not in result:
+                result.append(normalized)
+        return result or [raw_value]
+
+    def _resolve_company_sku_names(self, context: dict[str, Any]) -> str:
+        candidate_keys = [
+            "company_sku_names",
+            "company_sku_name",
+            "company_sku_list",
+            "company_sku",
+            "sku_names",
+            "sku_name",
+            "sku_list",
+            "spec_names",
+            "spec_name",
+            "outer_sku_list",
+            "sku_name_list",
+            "style_name",
+            "公司sku名称",
+            "公司SKU名称",
+            "公司sku",
+            "公司SKU",
+            "sku名称",
+            "SKU名称",
+            "规格名称",
+            "款式名称",
+        ]
+        for key in candidate_keys:
+            raw_value = context.get(key, "")
+            if isinstance(raw_value, (list, tuple, set)):
+                values = [str(item).strip() for item in raw_value if str(item).strip()]
+                value = "|".join(values)
+            else:
+                value = str(raw_value or "").strip()
+            if value:
+                return value
+        return str(context.get("outer_sku", "")).strip()
 
     def _wait_for_category_prop_container(self, label: str) -> WebElement:
         selector = {
@@ -2493,6 +3439,39 @@ class BrowserRPA:
             ),
         }
         return self._wait_for_element(selector)
+
+    def _wait_for_spec_container(self, label: str) -> WebElement:
+        selector = {
+            "by": "xpath",
+            "value": (
+                f"//div[@id='guid-saleProp']//div[contains(@class,'module-spec-decorator')]"
+                f"[.//div[contains(@class,'nak-label')][contains(normalize-space(.), {self._xpath_literal(label)})]]"
+            ),
+        }
+        return self._wait_for_element(selector)
+
+    def _find_preferred_spec_input(self, container: WebElement) -> WebElement | None:
+        candidates = container.find_elements(By.CSS_SELECTOR, "input")
+        visible_inputs: list[WebElement] = []
+        for element in candidates:
+            try:
+                if not element.is_displayed():
+                    continue
+                if element.get_attribute("disabled") or element.get_attribute("readonly"):
+                    continue
+            except Exception:
+                continue
+            visible_inputs.append(element)
+        if not visible_inputs:
+            return None
+
+        for element in visible_inputs:
+            try:
+                if not str(element.get_attribute("value") or "").strip():
+                    return element
+            except Exception:
+                continue
+        return visible_inputs[-1]
 
     def _find_first_enabled_input(self, container: WebElement) -> WebElement | None:
         candidates = container.find_elements(By.CSS_SELECTOR, "input, textarea")
@@ -2551,6 +3530,7 @@ class BrowserRPA:
     ) -> None:
         if not self.driver:
             raise RuntimeError("Browser has not been opened.")
+        step_name = str(step.get("name", "picker_upload")).strip() or "picker_upload"
 
         dialog_selector = self._resolve_selector(
             step.get("dialog_selector", {"by": "css", "value": "div.ibank-picker-dialog"}),
@@ -2575,6 +3555,41 @@ class BrowserRPA:
             step.get("album_select_selector", {"by": "css", "value": "select"}),
             context,
         )
+        create_album_link_selector = self._resolve_selector(
+            step.get(
+                "create_album_link_selector",
+                {"by": "css", "value": ".album-create"},
+            ),
+            context,
+        )
+        create_album_name_input_selector = self._resolve_selector(
+            step.get(
+                "create_album_name_input_selector",
+                {"by": "css", "value": "input.create-field[name='name']"},
+            ),
+            context,
+        )
+        create_album_private_selector = self._resolve_selector(
+            step.get(
+                "create_album_private_selector",
+                {
+                    "by": "xpath",
+                    "value": (
+                        "//*[@id='album-manager-pri'] | //label[@for='album-manager-pri'] | "
+                        "//*[self::label or self::span or self::a]"
+                        "[contains(normalize-space(.),'不公开')]"
+                    ),
+                },
+            ),
+            context,
+        )
+        create_album_submit_selector = self._resolve_selector(
+            step.get(
+                "create_album_submit_selector",
+                {"by": "css", "value": "a.button.insert"},
+            ),
+            context,
+        )
         file_input_selector = self._resolve_selector(
             step.get("file_input_selector", {"by": "css", "value": "input[type='file'][accept*='image']"}),
             context,
@@ -2589,19 +3604,38 @@ class BrowserRPA:
         )
 
         if step.get("upload_via_react_bridge", False):
-            self._upload_images_via_primary_picture_bridge(step, selector, values, context)
-            return
+            try:
+                uploaded_urls = self._upload_images_via_primary_picture_bridge(step, selector, values, context)
+                if uploaded_urls:
+                    context[f"{step_name}_uploaded_urls"] = uploaded_urls
+                    if step_name == "main_image":
+                        context["main_image_uploaded_urls"] = uploaded_urls
+                    elif step_name == "detail_images":
+                        context["detail_images_uploaded_urls"] = uploaded_urls
+                return
+            except Exception as bridge_error:
+                if bool(step.get("require_react_bridge", False)):
+                    raise
+                print(
+                    "[WARN] React bridge upload failed, fallback to picker dialog upload: "
+                    f"{bridge_error}"
+                )
 
         if not step.get("skip_open", False):
-            self._remove_elements(cleanup_selector)
+            if self._is_picker_ui_ready() and not self._close_picker_dialog(cleanup_selector):
+                raise ValueError("Existing picker dialog could not be closed cleanly.")
             opener = self._wait_for_element(selector, clickable=True)
             self._trigger_picker_opener(opener)
 
         dialog_element = self._wait_for_dialog(dialog_selector)
         self._pause(float(step.get("dialog_wait_seconds", 0.5)))
-        frame_element = self._wait_for_element(frame_selector)
+        frame_element = self._wait_for_visible_element(frame_selector)
         self.driver.switch_to.frame(frame_element)
         try:
+            album_ready = True
+            auto_create_album_when_full = bool(
+                step.get("auto_create_album_when_full", step_name == "detail_images")
+            )
             if self._selector_is_configured(upload_tab_selector):
                 try:
                     upload_tab = self._wait_for_element(upload_tab_selector, clickable=True)
@@ -2609,12 +3643,183 @@ class BrowserRPA:
                     self._pause(float(step.get("upload_tab_wait_seconds", 0.5)))
                 except TimeoutException:
                     pass
-                self._select_picker_album(album_select_selector)
+                force_create_album = bool(step.get("force_create_album", False))
+                excluded_album_values = {
+                    str(item).strip()
+                    for item in list(context.get(f"{step_name}_failed_album_values", []) or [])
+                    if str(item).strip()
+                }
+                album_ready = (
+                    False
+                    if force_create_album
+                    else self._select_picker_album(
+                        album_select_selector,
+                        excluded_values=excluded_album_values,
+                    )
+                )
+                context[f"{step_name}_album_ready"] = album_ready
+                if album_ready:
+                    context[f"{step_name}_album_selected"] = self._picker_selected_album(
+                        album_select_selector
+                    )
+                if not album_ready and (auto_create_album_when_full or force_create_album):
+                    album_name = self._build_picker_album_name(step)
+                    album_created = self._create_picker_album(
+                        link_selector=create_album_link_selector,
+                        name_input_selector=create_album_name_input_selector,
+                        private_selector=create_album_private_selector,
+                        submit_selector=create_album_submit_selector,
+                        album_select_selector=album_select_selector,
+                        album_name=album_name,
+                        timeout_seconds=float(step.get("create_album_timeout_seconds", 30)),
+                        access_label=str(step.get("auto_album_access_label", "不公开")),
+                    )
+                    context[f"{step_name}_album_created"] = album_created
+                    if album_created:
+                        self._record_picker_album_creation(context, step_name, album_name, step)
+                        self._pause(float(step.get("create_album_settle_seconds", 0.8)))
+                        album_ready = self._select_picker_album_by_text(
+                            album_select_selector,
+                            album_name,
+                        )
+                        context[f"{step_name}_album_ready"] = album_ready
+                        if album_ready:
+                            context[f"{step_name}_album_selected"] = self._picker_selected_album(
+                                album_select_selector
+                            )
+
+                require_album_ready = bool(step.get("require_album_ready", step_name == "detail_images"))
+                if not album_ready and require_album_ready:
+                    raise ValueError("No available picker album. Create a non-public album and retry upload.")
 
             self._install_picker_upload_trace()
             file_input = self._wait_for_element(file_input_selector)
-            payload = "\n".join(values) if step.get("multiple", len(values) > 1) else values[0]
-            file_input.send_keys(payload)
+            if len(values) > 1:
+                per_file_timeout = max(
+                    5.0,
+                    float(step.get("per_file_upload_timeout_seconds", 120) or 120),
+                )
+                max_album_rotations = max(
+                    0,
+                    int(step.get("max_album_rotations_per_batch", 12) or 12),
+                )
+                for value in values:
+                    upload_completed = False
+                    for album_attempt in range(max_album_rotations + 1):
+                        file_input = self._wait_for_element(file_input_selector)
+                        self._clear_picker_album_full_messages()
+                        before_trace_count, before_ui_count = self._picker_upload_progress_counts()
+                        context.pop(f"{step_name}_album_full_message", None)
+                        upload_started_at = time.time()
+                        file_input.send_keys(value)
+                        recovery_timeout = max(
+                            5.0,
+                            float(step.get("album_recovery_upload_timeout_seconds", 30) or 30),
+                        )
+                        effective_timeout = (
+                            min(per_file_timeout, recovery_timeout)
+                            if context.get(f"{step_name}_album_full_message")
+                            else per_file_timeout
+                        )
+                        try:
+                            outcome = WebDriverWait(self.driver, effective_timeout).until(
+                                lambda _driver, previous=(before_trace_count, before_ui_count): (
+                                    "completed"
+                                    if self._picker_upload_progress_detected(
+                                        previous[0],
+                                        previous[1],
+                                    )
+                                    else (
+                                        "album_full"
+                                        if (
+                                            time.time() - upload_started_at >= 1.5
+                                            and self._picker_album_full_message()
+                                        )
+                                        else ""
+                                    )
+                                )
+                            )
+                        except TimeoutException as exc:
+                            prior_full_message = str(
+                                context.get(f"{step_name}_album_full_message", "")
+                            ).strip()
+                            if prior_full_message:
+                                raise ImageAlbumFullError(
+                                    "Picker upload produced no response after switching from a full album: "
+                                    f"{prior_full_message}"
+                                ) from exc
+                            raise
+                        if outcome == "completed":
+                            upload_completed = True
+                            break
+
+                        full_message = self._picker_album_full_message()
+                        context[f"{step_name}_album_full_message"] = full_message
+                        if not auto_create_album_when_full:
+                            raise ImageAlbumFullError(f"Picker album is full: {full_message}")
+                        if album_attempt >= max_album_rotations:
+                            raise ImageAlbumFullError(
+                                "Picker album remained full after automatic rotations: "
+                                f"{full_message}"
+                            )
+
+                        failed_album_values = [
+                            str(item).strip()
+                            for item in list(context.get(f"{step_name}_failed_album_values", []) or [])
+                            if str(item).strip()
+                        ]
+                        current_album = self._picker_selected_album(album_select_selector)
+                        current_album_value = str(current_album.get("value", "")).strip()
+                        if current_album_value and current_album_value not in failed_album_values:
+                            failed_album_values.append(current_album_value)
+                        context[f"{step_name}_failed_album_values"] = failed_album_values
+
+                        rotation_count = int(context.get(f"{step_name}_album_rotation_count", 0) or 0) + 1
+                        if self._select_picker_album(
+                            album_select_selector,
+                            excluded_values=set(failed_album_values),
+                        ):
+                            selected_album = self._picker_selected_album(album_select_selector)
+                            context[f"{step_name}_album_selected"] = selected_album
+                            context[f"{step_name}_album_rotation_count"] = rotation_count
+                            continue
+
+                        album_name = self._build_picker_album_name(step)
+                        if rotation_count > 1:
+                            suffix = f"_{rotation_count}"
+                            max_name_length = max(
+                                8,
+                                int(step.get("auto_album_name_max_length", 20) or 20),
+                            )
+                            album_name = f"{album_name[: max_name_length - len(suffix)]}{suffix}"
+                        album_created = self._create_picker_album(
+                            link_selector=create_album_link_selector,
+                            name_input_selector=create_album_name_input_selector,
+                            private_selector=create_album_private_selector,
+                            submit_selector=create_album_submit_selector,
+                            album_select_selector=album_select_selector,
+                            album_name=album_name,
+                            timeout_seconds=float(step.get("create_album_timeout_seconds", 30)),
+                            access_label=str(step.get("auto_album_access_label", "不公开")),
+                        )
+                        if not album_created:
+                            raise ImageAlbumFullError(
+                                "Picker album is full and automatic album creation failed: "
+                                f"{full_message}"
+                            )
+                        self._pause(float(step.get("create_album_settle_seconds", 0.8)))
+                        if not self._select_picker_album_by_text(album_select_selector, album_name):
+                            raise ImageAlbumFullError(
+                                "Automatic picker album was created but could not be selected by name."
+                            )
+                        self._record_picker_album_creation(context, step_name, album_name, step)
+                        context[f"{step_name}_album_rotation_count"] = rotation_count
+                    if not upload_completed:
+                        raise ImageAlbumFullError(
+                            "Picker upload did not complete after rotating a full album."
+                        )
+            else:
+                file_input.send_keys(values[0])
 
             wait = WebDriverWait(self.driver, float(step.get("upload_timeout_seconds", 30)))
             try:
@@ -2627,12 +3832,14 @@ class BrowserRPA:
             except TimeoutException:
                 self._pause(float(step.get("upload_settle_seconds", 2)))
 
-            uploaded_urls = self._collect_picker_upload_urls()
+            raw_uploaded_urls = self._collect_picker_upload_urls()
+            uploaded_urls = self._select_current_picker_batch_urls(raw_uploaded_urls, len(values))
+            context[f"{step_name}_raw_uploaded_url_count"] = len(raw_uploaded_urls)
             if uploaded_urls:
-                context[f"{step.get('name', 'picker_upload')}_uploaded_urls"] = uploaded_urls
-                if step.get("name") == "main_image":
+                context[f"{step_name}_uploaded_urls"] = uploaded_urls
+                if step_name == "main_image":
                     context["main_image_uploaded_urls"] = uploaded_urls
-                elif step.get("name") == "detail_images":
+                elif step_name == "detail_images":
                     context["detail_images_uploaded_urls"] = uploaded_urls
 
             if not step.get("capture_uploaded_urls_only", False):
@@ -2645,8 +3852,116 @@ class BrowserRPA:
             self.driver.switch_to.default_content()
 
         self._pause(float(step.get("after_insert_wait_seconds", 1.5)))
-        self._remove_elements(cleanup_selector)
+        if not self._close_picker_dialog(cleanup_selector):
+            raise ValueError("Picker dialog could not be closed cleanly after upload.")
         self._pause(float(step.get("after_cleanup_wait_seconds", 0.3)))
+
+    def _upload_images_via_picker_batches(
+        self,
+        step: dict[str, Any],
+        selector: dict[str, str],
+        values: list[str],
+        context: dict[str, Any],
+    ) -> list[str]:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+
+        normalized_values = [str(item).strip() for item in values if str(item).strip()]
+        if not normalized_values:
+            return []
+
+        configured_batch_size = int(step.get("picker_batch_size", 4) or 4)
+        batch_size = max(1, min(4, configured_batch_size))
+        base_name = str(step.get("name", "detail_images")).strip() or "detail_images"
+        uploaded_urls = [
+            str(item).strip()
+            for item in list(context.get("detail_upload_resume_urls", []) or [])
+            if str(item).strip()
+        ]
+        if len(uploaded_urls) > len(normalized_values):
+            raise PublishValidationError("Detail upload resume checkpoint exceeds input image count.")
+        if uploaded_urls and len(uploaded_urls) % batch_size != 0:
+            raise PublishValidationError("Detail upload resume checkpoint must end at a complete picker batch.")
+        start_offset = len(uploaded_urls)
+        batch_evidence: list[dict[str, Any]] = [
+            {
+                "batch_number": batch_number,
+                "input_count": batch_size,
+                "uploaded_count": batch_size,
+                "resumed": True,
+            }
+            for batch_number in range(1, (start_offset // batch_size) + 1)
+        ]
+        for resumed_offset in range(0, start_offset, batch_size):
+            resumed_batch_number = (resumed_offset // batch_size) + 1
+            resumed_batch_name = f"{base_name}_batch_{resumed_batch_number:02d}"
+            resumed_batch_urls = uploaded_urls[resumed_offset : resumed_offset + batch_size]
+            context[f"{resumed_batch_name}_uploaded_urls"] = resumed_batch_urls
+            context[f"{resumed_batch_name}_raw_uploaded_url_count"] = len(resumed_batch_urls)
+            context[f"{resumed_batch_name}_resumed"] = True
+        context[f"{base_name}_resume_uploaded_count"] = start_offset
+
+        for offset in range(start_offset, len(normalized_values), batch_size):
+            batch_number = (offset // batch_size) + 1
+            batch_values = normalized_values[offset : offset + batch_size]
+            batch_name = f"{base_name}_batch_{batch_number:02d}"
+            if step.get("reload_page_before_picker_batch", False):
+                self.driver.refresh()
+                self._wait_for_publish_runtime_ready(
+                    timeout_seconds=float(step.get("picker_page_reload_timeout_seconds", 180) or 180)
+                )
+                self._pause(float(step.get("picker_page_reload_settle_seconds", 0.5)))
+            batch_step = {
+                **step,
+                "name": batch_name,
+                "capture_uploaded_urls_only": True,
+                "multiple": True,
+                "max_insert_count": len(batch_values),
+            }
+            if offset == start_offset:
+                context[f"{batch_name}_failed_album_values"] = list(
+                    context.get("detail_upload_excluded_album_values", []) or []
+                )
+            try:
+                self._run_picker_upload(batch_step, selector, batch_values, context)
+            except ImageAlbumFullError:
+                context[f"{base_name}_failed_album_values"] = list(
+                    context.get(f"{batch_name}_failed_album_values", []) or []
+                )
+                context[f"{base_name}_album_full_message"] = str(
+                    context.get(f"{batch_name}_album_full_message", "") or ""
+                )
+                raise
+            batch_urls = [
+                str(item).strip()
+                for item in context.get(f"{batch_name}_uploaded_urls", [])
+                if str(item).strip()
+            ]
+            if len(batch_urls) != len(batch_values):
+                raise PublishValidationError(
+                    "Picker batch upload returned an unexpected URL count "
+                    f"for batch {batch_number}: {len(batch_urls)}/{len(batch_values)}."
+                )
+            uploaded_urls.extend(batch_urls)
+            batch_evidence.append(
+                {
+                    "batch_number": batch_number,
+                    "input_count": len(batch_values),
+                    "uploaded_count": len(batch_urls),
+                }
+            )
+
+        if len(uploaded_urls) != len(normalized_values):
+            raise PublishValidationError(
+                "Picker detail upload returned an unexpected total URL count: "
+                f"{len(uploaded_urls)}/{len(normalized_values)}."
+            )
+
+        context[f"{base_name}_picker_batches"] = batch_evidence
+        context[f"{base_name}_uploaded_urls"] = uploaded_urls
+        if base_name == "detail_images":
+            context["detail_images_uploaded_urls"] = uploaded_urls
+        return uploaded_urls
 
     def _install_picker_upload_trace(self) -> None:
         if not self.driver:
@@ -2761,9 +4076,125 @@ class BrowserRPA:
                 continue
             for url in response_json.get("imgUrls", []) or []:
                 normalized = str(url or "").strip()
-                if normalized and normalized not in uploaded_urls:
+                if normalized:
                     uploaded_urls.append(normalized)
         return uploaded_urls
+
+    @staticmethod
+    def _select_current_picker_batch_urls(uploaded_urls: list[str], expected_count: int) -> list[str]:
+        expected = max(0, int(expected_count or 0))
+        if expected == 0:
+            return []
+        newest_unique: list[str] = []
+        seen: set[str] = set()
+        for raw_url in reversed(uploaded_urls):
+            url = str(raw_url or "").strip()
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            newest_unique.append(url)
+            if len(newest_unique) >= expected:
+                break
+        return list(reversed(newest_unique))
+
+    def _picker_completed_upload_count(self) -> int:
+        trace_count, ui_count = self._picker_upload_progress_counts()
+        return max(trace_count, ui_count)
+
+    def _picker_upload_progress_counts(self) -> tuple[int, int]:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        payload = self.driver.execute_script(
+            """
+            const traceCount = (window.__codexPickerUploadRecords || []).reduce((count, item) => {
+              const urls = item && item.responseJson && Array.isArray(item.responseJson.imgUrls)
+                ? item.responseJson.imgUrls
+                : [];
+              return count + urls.filter((url) => String(url || '').trim()).length;
+            }, 0);
+            const uiCount = Array.from(
+              document.querySelectorAll('.tabs-content.upload li.image-item')
+            ).filter((node) => {
+              const style = window.getComputedStyle(node);
+              const rect = node.getBoundingClientRect();
+              return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+            }).length;
+            return {traceCount, uiCount};
+            """
+        )
+        if not isinstance(payload, dict):
+            return 0, 0
+        try:
+            trace_count = max(0, int(payload.get("traceCount") or 0))
+            ui_count = max(0, int(payload.get("uiCount") or 0))
+        except (TypeError, ValueError):
+            return 0, 0
+        return trace_count, ui_count
+
+    def _picker_upload_progress_detected(self, before_trace_count: int, before_ui_count: int) -> bool:
+        trace_count, ui_count = self._picker_upload_progress_counts()
+        return trace_count > int(before_trace_count or 0) or ui_count > int(before_ui_count or 0)
+
+    def _clear_picker_album_full_messages(self) -> int:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        payload = self.driver.execute_script(
+            """
+            const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+            const isCapacityMessage = (text) => (
+              /(?:相册|图片空间|图片库).*(?:已满|空间不足|容量不足)/.test(text) ||
+              /抱歉.*(?:无法上传|不能上传)/.test(text)
+            );
+            const root = document.querySelector('.tabs-content.upload') || document.body;
+            if (!root) return 0;
+            const candidates = Array.from(root.querySelectorAll('div, p, span, li'))
+              .filter((node) => {
+                if (node.matches('option') || node.querySelector('select')) return false;
+                const text = normalize(node.innerText || node.textContent || '');
+                if (!text || text.length > 1000 || !isCapacityMessage(text)) return false;
+                return !Array.from(node.children || []).some((child) => {
+                  const childText = normalize(child.innerText || child.textContent || '');
+                  return childText && childText.length <= 1000 && isCapacityMessage(childText);
+                });
+              });
+            candidates.forEach((node) => node.remove());
+            return candidates.length;
+            """
+        )
+        try:
+            return max(0, int(payload or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def _picker_album_full_message(self) -> str:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        payload = self.driver.execute_script(
+            """
+            const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+            const candidates = Array.from(document.querySelectorAll('div, p, span, li'))
+              .filter((node) => !node.closest('select') && !node.querySelector('select'))
+              .map((node) => normalize(node.innerText || node.textContent || ''))
+              .filter((text) =>
+                text &&
+                text.length <= 500 &&
+                (
+                  /(?:相册|图片空间|图片库).*(?:已满|空间不足|容量不足)/.test(text) ||
+                  /抱歉.*(?:无法上传|不能上传)/.test(text)
+                )
+              )
+              .sort((left, right) => left.length - right.length);
+            if (candidates.length > 0) return candidates[0];
+            const text = normalize((document.body && document.body.innerText) || '');
+            const patterns = [/抱歉[^。！!]*(?:无法上传|不能上传)[^。！!]*/];
+            for (const pattern of patterns) {
+              const match = text.match(pattern);
+              if (match && match[0]) return match[0].trim();
+            }
+            return '';
+            """
+        )
+        return str(payload or "").strip()
 
     def _run_picker_url_upload(
         self,
@@ -2817,7 +4248,7 @@ class BrowserRPA:
 
         self._wait_for_dialog(dialog_selector)
         self._pause(float(step.get("dialog_wait_seconds", 0.5)))
-        frame_element = self._wait_for_element(frame_selector)
+        frame_element = self._wait_for_visible_element(frame_selector)
         self.driver.switch_to.frame(frame_element)
         try:
             if self._selector_is_configured(online_tab_selector):
@@ -2887,67 +4318,43 @@ class BrowserRPA:
             )
             return
 
-        editor_id = self._resolve_tinymce_editor_id(step, selector)
-        executed = self.driver.execute_script(
-            """
-            const editorId = arguments[0];
-            const editor = window.tinyMCE && window.tinyMCE.get && window.tinyMCE.get(editorId);
-            if (!editor) {
-              return false;
-            }
-            editor.execCommand('mceImage');
-            return true;
-            """,
-            editor_id,
-        )
-        if not executed:
-            fallback_selector = self._resolve_selector(step.get("fallback_picker_selector", {}), context)
-            if not self._selector_is_configured(fallback_selector):
-                raise ValueError(f"TinyMCE editor '{editor_id}' is not available.")
-            self._run_picker_upload(
-                {
-                    **step,
-                    "name": step.get("name", "detail_images"),
-                    "capture_uploaded_urls_only": True,
-                },
+        fallback_selector = self._resolve_selector(step.get("fallback_picker_selector", {}), context)
+        if not self._selector_is_configured(fallback_selector):
+            editor_id = self._resolve_tinymce_editor_id(step, selector)
+            raise ValueError(
+                f"TinyMCE editor '{editor_id}' does not configure a picker upload opener."
+            )
+
+        if step.get("use_remote_detail_urls", False):
+            uploaded_urls = [
+                str(item).strip()
+                for item in context.get("detail_images_remote_list", [])
+                if str(item).strip()
+            ]
+            if len(uploaded_urls) != len(values):
+                raise PublishValidationError(
+                    "External detail URL fallback count does not match prepared images: "
+                    f"{len(uploaded_urls)}/{len(values)}."
+                )
+            if any(not item.lower().startswith("https://") for item in uploaded_urls):
+                raise PublishValidationError("External detail URL fallback requires HTTPS URLs.")
+            context["detail_images_uploaded_urls"] = uploaded_urls
+            context["detail_images_delivery_mode"] = "external_url_capacity_fallback"
+        else:
+            uploaded_urls = self._upload_images_via_picker_batches(
+                step,
                 fallback_selector,
                 values,
                 context,
             )
-            uploaded_urls = [str(item).strip() for item in context.get("detail_images_uploaded_urls", []) if str(item).strip()]
-            html_value = self._build_tinymce_image_html(uploaded_urls)
-            if not html_value:
-                raise ValueError("Detail image upload completed without any remote image URLs.")
-            self._write_tinymce_content(
-                {
-                    **step,
-                    "append_mode": step.get("append_mode", "append"),
-                },
-                selector,
-                html_value,
-            )
-            return
-
-        self._run_picker_upload(
-            {
-                **step,
-                "skip_open": True,
-                "dialog_selector": step.get("dialog_selector", {"by": "css", "value": "div.ibank-picker-dialog"}),
-                "frame_selector": step.get("frame_selector", {"by": "css", "value": "iframe.picker-frame"}),
-                "upload_tab_selector": step.get("upload_tab_selector", {"by": "css", "value": "li.tab-upload"}),
-                "file_input_selector": step.get(
-                    "file_input_selector",
-                    {"by": "css", "value": "input[type='file'][accept*='image']"},
-                ),
-                "insert_selector": step.get("insert_selector", {"by": "css", "value": "a.button.submit"}),
-                "insert_count_selector": step.get(
-                    "insert_count_selector",
-                    {"by": "css", "value": ".insert-header em"},
-                ),
-            },
-            {"by": "css", "value": "body"},
-            values,
-            {},
+            context["detail_images_delivery_mode"] = "image_bank"
+        html_value = self._build_tinymce_image_html(uploaded_urls)
+        if not html_value:
+            raise ValueError("Detail image upload completed without any remote image URLs.")
+        self._write_tinymce_content(
+            {**step, "append_mode": step.get("append_mode", "replace")},
+            selector,
+            html_value,
         )
 
     def _write_tinymce_content(
@@ -3305,7 +4712,10 @@ class BrowserRPA:
         return self.driver.execute_script(
             f"""
             const target = arguments[0];
-            function findPrimaryPictureBridge(node) {{
+            function findBridgeFromNode(node) {{
+              if (!node) {{
+                return null;
+              }}
               const reactKey = Object.keys(node || {{}}).find(
                 (key) => key.startsWith('__reactInternalInstance') || key.startsWith('__reactFiber')
               );
@@ -3320,6 +4730,38 @@ class BrowserRPA:
                   return stateNode;
                 }}
                 fiber = fiber.return;
+              }}
+              return null;
+            }}
+            function findPrimaryPictureBridge(root) {{
+              const candidates = [];
+              const seenNodes = new Set();
+              const addCandidate = (node) => {{
+                if (node && !seenNodes.has(node)) {{
+                  seenNodes.add(node);
+                  candidates.push(node);
+                }}
+              }};
+
+              // The publish component can attach its React instance to a child
+              // wrapper or to a parent container depending on the page build.
+              addCandidate(root);
+              if (root && root.querySelectorAll) {{
+                Array.from(root.querySelectorAll('*')).slice(0, 500).forEach(addCandidate);
+              }}
+              let ancestor = root && root.parentElement;
+              let ancestorDepth = 0;
+              while (ancestor && ancestorDepth < 8) {{
+                addCandidate(ancestor);
+                ancestor = ancestor.parentElement;
+                ancestorDepth += 1;
+              }}
+
+              for (const candidate of candidates) {{
+                const bridge = findBridgeFromNode(candidate);
+                if (bridge) {{
+                  return bridge;
+                }}
               }}
               return null;
             }}
@@ -3351,18 +4793,434 @@ class BrowserRPA:
         digits = re.findall(r"\d+", element.text or "")
         return int(digits[0]) if digits else 0
 
-    def _select_picker_album(self, selector: dict[str, str]) -> None:
+    def _find_first_visible_element(self, selector: dict[str, str]) -> WebElement | None:
         if not self.driver:
             raise RuntimeError("Browser has not been opened.")
         if not self._selector_is_configured(selector):
-            return
+            return None
+        try:
+            candidates = self.driver.find_elements(
+                BY_MAPPING.get(selector.get("by", "css").strip().lower(), By.CSS_SELECTOR),
+                selector.get("value", "").strip(),
+            )
+        except Exception:
+            return None
+
+        for candidate in candidates:
+            try:
+                if candidate.is_displayed():
+                    return candidate
+            except Exception:
+                continue
+        return candidates[0] if candidates else None
+
+    def _wait_for_visible_element(
+        self,
+        selector: dict[str, str],
+        *,
+        timeout_seconds: float | None = None,
+    ) -> WebElement:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        if not self._selector_is_configured(selector):
+            raise TimeoutException("Visible element selector is not configured.")
+        by = BY_MAPPING.get(selector.get("by", "css").strip().lower(), By.CSS_SELECTOR)
+        value = selector.get("value", "").strip()
+
+        def find_visible(driver: Any) -> WebElement | bool:
+            for candidate in driver.find_elements(by, value):
+                try:
+                    if candidate.is_displayed():
+                        return candidate
+                except Exception:
+                    continue
+            return False
+
+        wait = WebDriverWait(
+            self.driver,
+            float(timeout_seconds or self.browser_config.get("explicit_wait_seconds", 20)),
+        )
+        return wait.until(find_visible)
+
+    def _click_first_visible_element(self, selector: dict[str, str]) -> bool:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        element = self._find_first_visible_element(selector)
+        if element is None:
+            return False
+        try:
+            element.click()
+            return True
+        except Exception:
+            try:
+                self.driver.execute_script("arguments[0].click();", element)
+                return True
+            except Exception:
+                return False
+
+    def _build_picker_album_name(self, step: dict[str, Any]) -> str:
+        prefix = str(step.get("auto_album_name_prefix", "AUTO_DETAIL")).strip() or "AUTO_DETAIL"
+        max_length = max(8, int(step.get("auto_album_name_max_length", 20) or 20))
+        timestamp = datetime.now().strftime("%y%m%d%H%M%S")
+        prefix_limit = max(1, max_length - len(timestamp) - 1)
+        return f"{prefix[:prefix_limit]}_{timestamp}"
+
+    def _record_picker_album_creation(
+        self,
+        context: dict[str, Any],
+        step_name: str,
+        album_name: str,
+        step: dict[str, Any],
+    ) -> None:
+        access = str(step.get("auto_album_access", "private")).strip().lower()
+        if access != "private":
+            raise ValueError("Automatic picker albums must use private access.")
+        capacity = max(1, int(step.get("auto_album_capacity", 500) or 500))
+        context[f"{step_name}_album_created"] = True
+        context[f"{step_name}_album_name"] = album_name
+        context[f"{step_name}_album_access"] = access
+        context[f"{step_name}_album_access_label"] = str(
+            step.get("auto_album_access_label", "不公开")
+        ).strip() or "不公开"
+        context[f"{step_name}_album_access_verified"] = True
+        context[f"{step_name}_album_capacity"] = capacity
+
+    def _picker_private_access_candidates(
+        self,
+        private_selector: dict[str, str],
+        access_label: str,
+    ) -> list[WebElement]:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+
+        selectors: list[dict[str, str]] = []
+        if self._selector_is_configured(private_selector):
+            selectors.append(private_selector)
+        selectors.extend(
+            [
+                {"by": "id", "value": "album-manager-pri"},
+                {
+                    "by": "xpath",
+                    "value": (
+                        "//input[@type='radio' and "
+                        "(@id='album-manager-pri' or @value='private' or @value='pri')] | "
+                        f"//*[self::label or self::span or self::a]"
+                        f"[contains(normalize-space(.),{self._xpath_literal(access_label)})]"
+                    ),
+                },
+            ]
+        )
+
+        candidates: list[WebElement] = []
+        seen: set[str] = set()
+        for selector in selectors:
+            try:
+                elements = self.driver.find_elements(
+                    BY_MAPPING.get(selector.get("by", "css").strip().lower(), By.CSS_SELECTOR),
+                    selector.get("value", "").strip(),
+                )
+            except Exception:
+                continue
+            for element in elements:
+                identity = str(getattr(element, "id", "") or id(element))
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                candidates.append(element)
+        return candidates
+
+    def _picker_private_access_is_selected(
+        self,
+        control: WebElement,
+        access_label: str,
+    ) -> bool:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        try:
+            if control.is_selected():
+                return True
+        except Exception:
+            pass
+        for attribute in ("checked", "aria-checked"):
+            try:
+                if str(control.get_attribute(attribute) or "").strip().lower() in {
+                    "true",
+                    "checked",
+                }:
+                    return True
+            except Exception:
+                pass
+        try:
+            return bool(
+                self.driver.execute_script(
+                    """
+                    const anchor = arguments[0];
+                    const expected = String(arguments[1] || '').trim();
+                    const isChecked = (node) => Boolean(
+                      node && (
+                        node.checked === true ||
+                        node.getAttribute('checked') !== null ||
+                        node.getAttribute('aria-checked') === 'true'
+                      )
+                    );
+                    const controls = [];
+                    const add = (node) => {
+                      if (node && !controls.includes(node)) controls.push(node);
+                    };
+                    add(anchor);
+                    if (anchor && anchor.matches && anchor.matches('label')) {
+                      add(anchor.control);
+                    }
+                    if (anchor && anchor.getAttribute) {
+                      const forId = anchor.getAttribute('for');
+                      if (forId) add(document.getElementById(forId));
+                    }
+                    if (anchor && anchor.querySelectorAll) {
+                      anchor.querySelectorAll("input[type='radio'],input[type='checkbox']").forEach(add);
+                    }
+                    if (anchor && anchor.closest) {
+                      const label = anchor.closest('label');
+                      if (label) {
+                        add(label.control);
+                        label.querySelectorAll("input[type='radio'],input[type='checkbox']").forEach(add);
+                      }
+                    }
+                    if (expected) {
+                      Array.from(document.querySelectorAll('label,span,a')).forEach((node) => {
+                        const text = String(node.innerText || node.textContent || '').trim();
+                        if (!text.includes(expected)) return;
+                        if (node.matches('label')) add(node.control);
+                        const forId = node.getAttribute('for');
+                        if (forId) add(document.getElementById(forId));
+                        node.querySelectorAll("input[type='radio'],input[type='checkbox']").forEach(add);
+                      });
+                    }
+                    return controls.some(isChecked);
+                    """,
+                    control,
+                    access_label,
+                )
+            )
+        except Exception:
+            return False
+
+    def _ensure_picker_album_private_access(
+        self,
+        private_selector: dict[str, str],
+        access_label: str,
+        *,
+        timeout_seconds: float,
+    ) -> bool:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        expected_label = str(access_label or "").strip() or "不公开"
+        deadline = time.time() + max(timeout_seconds, 1.0)
+        clicked: set[str] = set()
+        while time.time() < deadline:
+            candidates = self._picker_private_access_candidates(private_selector, expected_label)
+            for candidate in candidates:
+                if self._picker_private_access_is_selected(candidate, expected_label):
+                    return True
+            for candidate in candidates:
+                identity = str(getattr(candidate, "id", "") or id(candidate))
+                if identity in clicked:
+                    continue
+                clicked.add(identity)
+                try:
+                    candidate.click()
+                except Exception:
+                    try:
+                        self.driver.execute_script("arguments[0].click();", candidate)
+                    except Exception:
+                        continue
+                self._pause(0.1)
+                if self._picker_private_access_is_selected(candidate, expected_label):
+                    return True
+            self._pause(0.2)
+        return False
+
+    def _create_picker_album(
+        self,
+        *,
+        link_selector: dict[str, str],
+        name_input_selector: dict[str, str],
+        private_selector: dict[str, str],
+        submit_selector: dict[str, str],
+        album_select_selector: dict[str, str],
+        album_name: str,
+        timeout_seconds: float,
+        access_label: str = "不公开",
+    ) -> bool:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+
+        deadline = time.time() + max(timeout_seconds, 1.0)
+        if self._selector_is_configured(link_selector):
+            if not self._click_first_visible_element(link_selector):
+                return False
+            self._pause(0.25)
+
+        name_input: WebElement | None = None
+        while time.time() < deadline and name_input is None:
+            name_input = self._find_first_visible_element(name_input_selector)
+            if name_input is None:
+                self._pause(0.2)
+        if name_input is None:
+            return False
+
+        try:
+            self._fill_text_field(name_input, album_name, clear=True)
+        except Exception:
+            return False
+
+        access_timeout = min(max(timeout_seconds, 1.0), 5.0)
+        if not self._ensure_picker_album_private_access(
+            private_selector,
+            access_label,
+            timeout_seconds=access_timeout,
+        ):
+            return False
+
+        if not self._click_first_visible_element(submit_selector):
+            return False
+
+        deadline = time.time() + max(timeout_seconds, 1.0)
+        while time.time() < deadline:
+            option_created = self._picker_album_option_matches(
+                album_select_selector,
+                album_name,
+            )
+            if option_created:
+                return True
+            self._pause(0.2)
+        return False
+
+    def _picker_album_option_matches(
+        self,
+        selector: dict[str, str],
+        album_name: str,
+    ) -> bool:
+        if not self.driver or not self._selector_is_configured(selector):
+            return False
+        expected = str(album_name or "").strip()
+        if not expected:
+            return False
+        try:
+            album_selects = self.driver.find_elements(
+                BY_MAPPING.get(selector.get("by", "css").strip().lower(), By.CSS_SELECTOR),
+                selector.get("value", "").strip(),
+            )
+            for album_select in album_selects:
+                for option in Select(album_select).options:
+                    option_text = str(option.text or "").strip()
+                    option_title = str(option.get_attribute("title") or "").strip()
+                    if expected in {option_text, option_title}:
+                        return True
+        except Exception:
+            return False
+        return False
+
+    def _select_picker_album_by_text(
+        self,
+        selector: dict[str, str],
+        album_name: str,
+    ) -> bool:
+        if not self.driver or not self._selector_is_configured(selector):
+            return False
+        expected = str(album_name or "").strip()
+        if not expected:
+            return False
         try:
             album_selects = self.driver.find_elements(
                 BY_MAPPING.get(selector.get("by", "css").strip().lower(), By.CSS_SELECTOR),
                 selector.get("value", "").strip(),
             )
         except Exception:
-            return
+            return False
+
+        album_select = next(
+            (item for item in album_selects if item.is_displayed()),
+            album_selects[0] if album_selects else None,
+        )
+        if album_select is None:
+            return False
+
+        select_control = Select(album_select)
+        target_option = next(
+            (
+                option
+                for option in select_control.options
+                if expected
+                in {
+                    str(option.text or "").strip(),
+                    str(option.get_attribute("title") or "").strip(),
+                }
+            ),
+            None,
+        )
+        if target_option is None or not target_option.is_enabled():
+            return False
+
+        target_value = str(target_option.get_attribute("value") or "").strip()
+        try:
+            if target_value:
+                select_control.select_by_value(target_value)
+            else:
+                select_control.select_by_visible_text(str(target_option.text or "").strip())
+        except ElementNotInteractableException:
+            self.driver.execute_script(
+                "arguments[0].value = arguments[1];",
+                album_select,
+                target_value,
+            )
+        self.driver.execute_script(
+            "arguments[0].dispatchEvent(new Event('change', { bubbles: true }));",
+            album_select,
+        )
+        self._pause(0.3)
+        try:
+            selected = Select(album_select).first_selected_option
+            selected_text = str(selected.text or "").strip()
+            selected_title = str(selected.get_attribute("title") or "").strip()
+            return expected in {selected_text, selected_title}
+        except Exception:
+            return False
+
+    def _select_picker_album(
+        self,
+        selector: dict[str, str],
+        *,
+        excluded_values: set[str] | None = None,
+    ) -> bool:
+        for attempt in range(3):
+            try:
+                return self._select_picker_album_once(
+                    selector,
+                    excluded_values=excluded_values,
+                )
+            except StaleElementReferenceException:
+                if attempt >= 2:
+                    return False
+                self._pause(0.5)
+        return False
+
+    def _select_picker_album_once(
+        self,
+        selector: dict[str, str],
+        *,
+        excluded_values: set[str] | None = None,
+    ) -> bool:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        if not self._selector_is_configured(selector):
+            return True
+        try:
+            album_selects = self.driver.find_elements(
+                BY_MAPPING.get(selector.get("by", "css").strip().lower(), By.CSS_SELECTOR),
+                selector.get("value", "").strip(),
+            )
+        except Exception:
+            return False
 
         album_select: WebElement | None = None
         for candidate in album_selects:
@@ -3375,38 +5233,73 @@ class BrowserRPA:
         if album_select is None and album_selects:
             album_select = album_selects[0]
         if album_select is None:
-            return
+            return False
 
         select_control = Select(album_select)
+        excluded = {str(item).strip() for item in (excluded_values or set()) if str(item).strip()}
         viable_options = [
             option
             for option in select_control.options
-            if option.is_enabled() and "已满" not in option.text
+            if (
+                option.is_enabled()
+                and "\u5df2\u6ee1" not in str(option.text or "")
+                and "\u5df2\u6ee1" not in str(option.get_attribute("title") or "")
+                and str(option.get_attribute("value") or "").strip() not in excluded
+            )
         ]
         if not viable_options:
-            return
+            return False
 
         selected_options = [option for option in select_control.options if option.is_selected()]
         if selected_options and selected_options[0] in viable_options:
-            return
+            return True
 
         target_option = viable_options[0]
+        target_value = str(target_option.get_attribute("value") or "").strip()
         try:
-            select_control.select_by_value(target_option.get_attribute("value"))
+            select_control.select_by_value(target_value)
         except ElementNotInteractableException:
             if not self.driver:
                 raise RuntimeError("Browser has not been opened.")
             self.driver.execute_script(
-                """
-                const select = arguments[0];
-                const value = arguments[1];
-                select.value = value;
-                select.dispatchEvent(new Event('change', { bubbles: true }));
-                """,
+                "arguments[0].value = arguments[1];",
                 album_select,
-                target_option.get_attribute("value"),
+                target_value,
             )
+        self.driver.execute_script(
+            "arguments[0].dispatchEvent(new Event('change', { bubbles: true }));",
+            album_select,
+        )
         self._pause(0.3)
+        try:
+            selected_value = str(
+                Select(album_select).first_selected_option.get_attribute("value") or ""
+            ).strip()
+            return bool(target_value and selected_value == target_value)
+        except Exception:
+            return False
+
+    def _picker_selected_album(self, selector: dict[str, str]) -> dict[str, str]:
+        if not self.driver or not self._selector_is_configured(selector):
+            return {"value": "", "text": ""}
+        try:
+            candidates = self.driver.find_elements(
+                BY_MAPPING.get(selector.get("by", "css").strip().lower(), By.CSS_SELECTOR),
+                selector.get("value", "").strip(),
+            )
+            album_select = next(
+                (item for item in candidates if item.is_displayed()),
+                candidates[0] if candidates else None,
+            )
+            if album_select is None:
+                return {"value": "", "text": ""}
+            selected = Select(album_select).first_selected_option
+            return {
+                "value": str(selected.get_attribute("value") or "").strip(),
+                "text": str(selected.text or "").strip(),
+            }
+        except Exception:
+            return {"value": "", "text": ""}
 
     def _apply_draft_page_state_patch(
         self,
@@ -3807,6 +5700,7 @@ class BrowserRPA:
                       ...(existingStep || {}),
                       from: Number(stepItem.from),
                       value: String(stepItem.value || ''),
+                      serviceName: String(stepItem.serviceName || ''),
                     };
                     if (stepItem.end != null && Number(stepItem.end) >= Number(stepItem.from)) {
                       nextStep.end = Number(stepItem.end);
@@ -4111,22 +6005,42 @@ class BrowserRPA:
                     delete buyerProtectionValue.spsCode;
                   }
                   const findBuyerProtectionHandleNode = () => {
-                    const target = document.querySelector('#guid-buyerProtection .module-cbu-buyer-protection');
-                    const reactKey = Object.keys(target || {}).find(
-                      (key) => key.startsWith('__reactInternalInstance') || key.startsWith('__reactFiber')
-                    );
-                    let fiber = reactKey ? target[reactKey] : null;
-                    while (fiber) {
-                      const stateNode = fiber.stateNode;
-                      if (
-                        stateNode &&
-                        typeof stateNode.handleChange === 'function' &&
-                        stateNode.props &&
-                        String(stateNode.props.UUID || '') === 'buyerProtection'
-                      ) {
-                        return stateNode;
+                    const root = document.querySelector('#guid-buyerProtection');
+                    const candidates = [];
+                    const seenNodes = new Set();
+                    const addCandidate = (node) => {
+                      if (node && !seenNodes.has(node)) {
+                        seenNodes.add(node);
+                        candidates.push(node);
                       }
-                      fiber = fiber.return;
+                    };
+                    addCandidate(root);
+                    if (root && root.querySelectorAll) {
+                      Array.from(root.querySelectorAll('*')).slice(0, 500).forEach(addCandidate);
+                    }
+                    let ancestor = root && root.parentElement;
+                    let ancestorDepth = 0;
+                    while (ancestor && ancestorDepth < 8) {
+                      addCandidate(ancestor);
+                      ancestor = ancestor.parentElement;
+                      ancestorDepth += 1;
+                    }
+                    for (const node of candidates) {
+                      const reactKey = Object.keys(node || {}).find(
+                        (key) => key.startsWith('__reactInternalInstance') || key.startsWith('__reactFiber')
+                      );
+                      let fiber = reactKey ? node[reactKey] : null;
+                      while (fiber) {
+                        const stateNode = fiber.stateNode;
+                        if (
+                          stateNode &&
+                          typeof stateNode.handleChange === 'function' &&
+                          (!stateNode.props || String(stateNode.props.UUID || '') === 'buyerProtection')
+                        ) {
+                          return stateNode;
+                        }
+                        fiber = fiber.return;
+                      }
                     }
                     return null;
                   };
@@ -4189,7 +6103,8 @@ class BrowserRPA:
             return
 
         patch_mode = str(context.get("draft_request_patch_mode", "full")).strip().lower() or "full"
-        apply_patch = patch_mode not in {"capture_only"}
+        apply_patch = patch_mode == "full"
+        apply_identity_patch = patch_mode == "identity_only"
         buyer_protection_value = self._resolve_context_preferred_value(
             context=context,
             source=str(patch_config.get("buyer_protection_source", "")).strip(),
@@ -4228,6 +6143,7 @@ class BrowserRPA:
         detail_text_html = self._build_tinymce_html(str(context.get("description", "")).strip())
         config_payload = {
             "captureBodyChars": max(256, int(patch_config.get("capture_body_chars", 4000) or 4000)),
+            "expectedDraftId": str(publish_config.get("expected_draft_id", "")).strip(),
             "buyerProtectionServiceName": buyer_protection_value,
             "buyerProtectionServiceCode": buyer_protection_code,
             "buyerProtectionStepTemplate": buyer_protection_steps,
@@ -4235,7 +6151,16 @@ class BrowserRPA:
             "title": str(context.get("title", "")).strip(),
             "price": str(context.get("price", "")).strip(),
             "quantity": str(context.get("quantity", "")).strip(),
+            "quotationTypeText": str(patch_config.get("quotation_type_text", "")).strip(),
+            "unitText": str(patch_config.get("unit_text", "")).strip(),
+            "minBeginAmount": str(patch_config.get("min_begin_amount", "1")).strip() or "1",
             "sendAddressId": str(context.get("send_address_id", "")).strip(),
+            "logisticsDimensions": {
+                "length": self._normalize_dimension_value(str(context.get("length_cm", "")).strip()),
+                "width": self._normalize_dimension_value(str(context.get("width_cm", "")).strip()),
+                "height": self._normalize_dimension_value(str(context.get("height_cm", "")).strip()),
+                "weight": self._normalize_weight_value(str(context.get("weight_g", "")).strip()),
+            },
             "deliveryServiceIds": delivery_service_ids,
             "deliveryServiceLabelIdMap": patch_config.get("delivery_service_label_id_map", {}),
             "catPropValue": context.get("draft_cat_prop_value_runtime", {}),
@@ -4247,6 +6172,7 @@ class BrowserRPA:
             "detailHtml": detail_image_html or detail_text_html,
             "patchMode": patch_mode,
             "applyPatch": apply_patch,
+            "applyIdentityPatch": apply_identity_patch,
         }
         self.driver.execute_script(
             """
@@ -4301,6 +6227,111 @@ class BrowserRPA:
               }
             };
 
+            const requestCarriesExpectedDraftId = (rawUrl, body) => {
+              const expected = String(window.__codexDraftPatchConfig.expectedDraftId || '').trim();
+              if (!expected) {
+                return true;
+              }
+              const identityKeys = new Set(['draftid', 'offerdraftid', 'draft_id']);
+              const keyMatches = (key, value) =>
+                identityKeys.has(String(key || '').toLowerCase()) && String(value || '').trim() === expected;
+              const visited = new WeakSet();
+              const inspectValue = (value) => {
+                if (value == null) return false;
+                if (typeof value === 'string') {
+                  const text = value.trim();
+                  if (!text) return false;
+                  if (text.startsWith('{') || text.startsWith('[')) {
+                    try {
+                      return inspectValue(JSON.parse(text));
+                    } catch (error) {
+                      return false;
+                    }
+                  }
+                  try {
+                    const params = new URLSearchParams(text);
+                    return Array.from(params.entries()).some(
+                      ([key, entryValue]) => keyMatches(key, entryValue) || inspectValue(entryValue)
+                    );
+                  } catch (error) {
+                    return false;
+                  }
+                }
+                if (typeof URLSearchParams !== 'undefined' && value instanceof URLSearchParams) {
+                  return Array.from(value.entries()).some(
+                    ([key, entryValue]) => keyMatches(key, entryValue) || inspectValue(entryValue)
+                  );
+                }
+                if (typeof FormData !== 'undefined' && value instanceof FormData) {
+                  return Array.from(value.entries()).some(
+                    ([key, entryValue]) =>
+                      typeof entryValue === 'string' &&
+                      (keyMatches(key, entryValue) || inspectValue(entryValue))
+                  );
+                }
+                if (typeof value !== 'object' || visited.has(value)) return false;
+                visited.add(value);
+                return Object.entries(value).some(
+                  ([key, entryValue]) => keyMatches(key, entryValue) || inspectValue(entryValue)
+                );
+              };
+              try {
+                const parsedUrl = new URL(String(rawUrl || ''), window.location.href);
+                if (
+                  Array.from(parsedUrl.searchParams.entries()).some(([key, value]) => keyMatches(key, value))
+                ) {
+                  return true;
+                }
+              } catch (error) {
+                // The body remains authoritative when the request URL is relative or malformed.
+              }
+              return inspectValue(body);
+            };
+
+            const markMissingDraftIdentity = (record) => {
+              const expected = String(window.__codexDraftPatchConfig.expectedDraftId || '').trim();
+              const message = `blocked draftSubmit without expected draft identity: ${expected}`;
+              record.requestDraftIdentityPresent = false;
+              record.blockedBeforeSend = true;
+              record.status = 0;
+              record.responseText = message;
+              record.responseJson = { success: false, message };
+              return message;
+            };
+
+            const rewriteRequestUrlIdentity = (rawUrl) => {
+              const text = String(rawUrl || '').trim();
+              const expected = String(window.__codexDraftPatchConfig.expectedDraftId || '').trim();
+              const enabled = Boolean(window.__codexDraftPatchConfig.applyIdentityPatch);
+              if (!text || !expected || !enabled || !isDraftSubmitUrl(text)) {
+                return text;
+              }
+              try {
+                const parsed = new URL(text, window.location.href);
+                parsed.searchParams.set('draftId', expected);
+                return parsed.toString();
+              } catch (error) {
+                return text;
+              }
+            };
+
+            const patchDraftIdentityObject = (root) => {
+              const expected = String(window.__codexDraftPatchConfig.expectedDraftId || '').trim();
+              if (!expected || !root || typeof root !== 'object' || Array.isArray(root)) {
+                return false;
+              }
+              const globalModel = root.global;
+              if (!globalModel || typeof globalModel !== 'object' || Array.isArray(globalModel)) {
+                return false;
+              }
+              const systemParam = globalModel.systemParam;
+              if (!systemParam || typeof systemParam !== 'object' || Array.isArray(systemParam)) {
+                return false;
+              }
+              systemParam.draftId = expected;
+              return true;
+            };
+
             const normalizeIbankUrl = (rawValue) => {
               const text = String(rawValue || '').trim();
               if (!text) {
@@ -4353,6 +6384,7 @@ class BrowserRPA:
               const integerValue = Math.floor(parsed);
               return integerValue > 0 ? integerValue : null;
             };
+            const normalizeText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
 
             const getPatchSnapshot = () => {
               const sdk = window.SellPublishSdk;
@@ -4452,13 +6484,43 @@ class BrowserRPA:
               const draftTitle = titleValue || fallbackTitleValue;
               const totalSalesProps = ((components.totalSales || {}).props) || {};
               const stateQuantity = parsePositiveInteger(totalSalesProps.value);
-              const draftQuantity = stateQuantity || parsePositiveInteger(window.__codexDraftPatchConfig.quantity);
+              const configuredQuantity = parsePositiveInteger(window.__codexDraftPatchConfig.quantity);
+              const draftQuantity = configuredQuantity || stateQuantity || 999;
               const statePriceRange = (((components.priceRange || {}).props || {}).value) || [];
               const statePrice =
                 Array.isArray(statePriceRange) && statePriceRange[0]
                   ? parsePositiveNumber(statePriceRange[0].pricerange_price)
                   : null;
-              const draftPrice = statePrice || parsePositiveNumber(window.__codexDraftPatchConfig.price);
+              const configuredPrice = parsePositiveNumber(window.__codexDraftPatchConfig.price);
+              const draftPrice = configuredPrice || statePrice;
+              const minBeginAmount =
+                parsePositiveInteger(window.__codexDraftPatchConfig.minBeginAmount) || 1;
+              const quotationTypeProps = ((components.quotationType || {}).props) || {};
+              const quotationTypeDataSource = Array.isArray(quotationTypeProps.dataSource)
+                ? quotationTypeProps.dataSource
+                : [];
+              const desiredQuotationTypeText = String(window.__codexDraftPatchConfig.quotationTypeText || '').trim();
+              const normalizedDesiredQuotationTypeText = normalizeText(desiredQuotationTypeText);
+              const matchedQuotationType =
+                normalizedDesiredQuotationTypeText
+                  ? (
+                      quotationTypeDataSource.find((item) => {
+                        const label = normalizeText((item && (item.text || item.label || item.name)) || '');
+                        return label && (label === normalizedDesiredQuotationTypeText || label.includes(normalizedDesiredQuotationTypeText));
+                      }) || null
+                    )
+                  : null;
+              const quotationTypeValue =
+                (matchedQuotationType && ((matchedQuotationType.value != null && matchedQuotationType.value !== '') ? matchedQuotationType.value : matchedQuotationType.id)) ||
+                (quotationTypeProps.value && typeof quotationTypeProps.value === 'object' ? quotationTypeProps.value.value : quotationTypeProps.value) ||
+                null;
+              const quotationTypeText =
+                String(
+                  (matchedQuotationType && (matchedQuotationType.text || matchedQuotationType.label || matchedQuotationType.name)) ||
+                  (quotationTypeProps.value && typeof quotationTypeProps.value === 'object' ? quotationTypeProps.value.text : '') ||
+                  desiredQuotationTypeText
+                ).trim();
+              const desiredUnitText = String(window.__codexDraftPatchConfig.unitText || '').trim();
               const sendAddressProps = ((components.cbuSendAddress || {}).props) || {};
               const catPropProps = ((components.catProp || {}).props) || {};
               const catPropValueRaw = catPropProps.value && typeof catPropProps.value === 'object'
@@ -4506,6 +6568,91 @@ class BrowserRPA:
                     .find((item) => item != null) || null
                 : null;
               const sendAddressId = stateSendAddressId || configuredSendAddressId || dataSourceSendAddressId;
+              const configuredLogisticsDimensions =
+                window.__codexDraftPatchConfig.logisticsDimensions &&
+                typeof window.__codexDraftPatchConfig.logisticsDimensions === 'object'
+                  ? window.__codexDraftPatchConfig.logisticsDimensions
+                  : {};
+              const officialLogisticsProps = ((components.officialLogistics || {}).props) || {};
+              const officialLogisticsValue =
+                officialLogisticsProps.value && typeof officialLogisticsProps.value === 'object'
+                  ? officialLogisticsProps.value
+                  : {};
+              const officialOfferInfo =
+                officialLogisticsValue.offerInfo && typeof officialLogisticsValue.offerInfo === 'object'
+                  ? officialLogisticsValue.offerInfo
+                  : {};
+              const officialSkuInfo = Array.isArray(officialLogisticsValue.skuInfo)
+                ? officialLogisticsValue.skuInfo
+                : [];
+              const firstOfficialSku = officialSkuInfo.find((item) => item && typeof item === 'object') || {};
+              const firstOfficialSkuDimension =
+                (firstOfficialSku.dimension && typeof firstOfficialSku.dimension === 'object' && firstOfficialSku.dimension) ||
+                (firstOfficialSku.skuDimension && typeof firstOfficialSku.skuDimension === 'object' && firstOfficialSku.skuDimension) ||
+                {};
+              const firstNonEmptyValue = (...values) => {
+                for (const value of values) {
+                  const text = String(value == null ? '' : value).trim();
+                  if (text) {
+                    return value;
+                  }
+                }
+                return null;
+              };
+              const formatPositiveNumber = (rawValue) => {
+                const parsed = parsePositiveNumber(rawValue);
+                return parsed == null ? '' : String(parsed);
+              };
+              const formatPositiveInteger = (rawValue) => {
+                const parsed = parsePositiveInteger(rawValue);
+                return parsed == null ? '' : String(parsed);
+              };
+              const logisticsDimensions = {
+                length: formatPositiveNumber(
+                  firstNonEmptyValue(
+                    configuredLogisticsDimensions.length,
+                    officialOfferInfo.length,
+                    officialOfferInfo.lengthCm,
+                    firstOfficialSku.length,
+                    firstOfficialSku.lengthCm,
+                    firstOfficialSkuDimension.length,
+                    firstOfficialSkuDimension.lengthCm
+                  )
+                ),
+                width: formatPositiveNumber(
+                  firstNonEmptyValue(
+                    configuredLogisticsDimensions.width,
+                    officialOfferInfo.width,
+                    officialOfferInfo.widthCm,
+                    firstOfficialSku.width,
+                    firstOfficialSku.widthCm,
+                    firstOfficialSkuDimension.width,
+                    firstOfficialSkuDimension.widthCm
+                  )
+                ),
+                height: formatPositiveNumber(
+                  firstNonEmptyValue(
+                    configuredLogisticsDimensions.height,
+                    officialOfferInfo.height,
+                    officialOfferInfo.heightCm,
+                    firstOfficialSku.height,
+                    firstOfficialSku.heightCm,
+                    firstOfficialSkuDimension.height,
+                    firstOfficialSkuDimension.heightCm
+                  )
+                ),
+                weight: formatPositiveInteger(
+                  firstNonEmptyValue(
+                    configuredLogisticsDimensions.weight,
+                    officialOfferInfo.weight,
+                    officialOfferInfo.weightG,
+                    firstOfficialSku.weight,
+                    firstOfficialSku.weightG,
+                    firstOfficialSkuDimension.weight,
+                    firstOfficialSkuDimension.weightG
+                  )
+                ),
+              };
               const serviceName = String(window.__codexDraftPatchConfig.buyerProtectionServiceName || '').trim();
               const serviceCode = String(window.__codexDraftPatchConfig.buyerProtectionServiceCode || '').trim();
               const requestedStepTemplate = Array.isArray(window.__codexDraftPatchConfig.buyerProtectionStepTemplate)
@@ -4686,6 +6833,7 @@ class BrowserRPA:
                         ...(existingStep || {}),
                         from: Number(stepItem.from),
                         value: String(stepItem.value || ''),
+                        serviceName: String(stepItem.serviceName || ''),
                       };
                       if (stepItem.end != null && Number(stepItem.end) >= Number(stepItem.from)) {
                         nextStep.end = Number(stepItem.end);
@@ -4823,7 +6971,7 @@ class BrowserRPA:
               const buyerProtectionJgdzGroups = buildBuyerProtectionJgdzGroups();
 
               return {
-                primaryUrls: primaryUrls.length > 0 ? primaryUrls : fallbackPrimaryUrls,
+                primaryUrls: fallbackPrimaryUrls.length > 0 ? fallbackPrimaryUrls : primaryUrls,
                 runtimeCatPropValue: mergedCatPropValue,
                 buyerProtectionServiceName: serviceName,
                 buyerProtectionServiceCode: matchedBuyerService ? String(matchedBuyerService.serviceCode || '') : '',
@@ -4839,7 +6987,12 @@ class BrowserRPA:
                 draftTitle,
                 draftPrice,
                 draftQuantity,
+                minBeginAmount,
+                quotationTypeValue,
+                quotationTypeText,
+                unitText: desiredUnitText,
                 sendAddressId,
+                logisticsDimensions,
                 deliveryServiceIds: deliveryServiceState.deliveryServiceIds,
                 deliveryServiceLabels: deliveryServiceState.deliveryServiceLabels,
                 availableBuyerServices: availableBuyerServices.map((item) => ({
@@ -4877,16 +7030,17 @@ class BrowserRPA:
                   return rangeList;
                 }
                 const draftPrice = parsePositiveNumber(patchSnapshot.draftPrice);
-                if (draftPrice == null) {
+                const minBeginAmount = parsePositiveInteger(patchSnapshot.minBeginAmount) || 1;
+                if (draftPrice == null && minBeginAmount == null) {
                   return rangeList;
                 }
                 const sourceRow = rangeList[0] && typeof rangeList[0] === 'object' ? rangeList[0] : {};
                 const nextRow = { ...(sourceRow || {}) };
-                if (parsePositiveNumber(nextRow.pricerange_price) == null) {
+                if (draftPrice != null) {
                   nextRow.pricerange_price = draftPrice;
                 }
-                if (parsePositiveInteger(nextRow.pricerange_beginAmount) == null) {
-                  nextRow.pricerange_beginAmount = 1;
+                if (minBeginAmount != null) {
+                  nextRow.pricerange_beginAmount = minBeginAmount;
                 }
                 return [nextRow];
               };
@@ -4904,14 +7058,51 @@ class BrowserRPA:
                     return row;
                   }
                   const nextRow = { ...row };
-                  if (draftPrice != null && parsePositiveNumber(nextRow.sku_price) == null) {
+                  if (draftPrice != null) {
                     nextRow.sku_price = draftPrice;
                   }
-                  if (draftQuantity != null && parsePositiveInteger(nextRow.sku_amountOnSale) == null) {
+                  if (draftQuantity != null) {
                     nextRow.sku_amountOnSale = draftQuantity;
                   }
                   return nextRow;
                 });
+              };
+              const normalizeSaleProp = (salePropValue) => {
+                if (!salePropValue || typeof salePropValue !== 'object') {
+                  return salePropValue;
+                }
+                const nextSaleProp = {};
+                Object.entries(salePropValue).forEach(([key, rawValue]) => {
+                  const propKey = String(key || '').trim();
+                  if (!propKey) {
+                    return;
+                  }
+                  if (Array.isArray(rawValue)) {
+                    const normalizedItems = rawValue
+                      .filter((item) => item && typeof item === 'object')
+                      .filter((item) => {
+                        const text = String((item && item.text) || '').trim();
+                        const value = String((item && item.value) || '').trim();
+                        return Boolean(text || value);
+                      });
+                    if (normalizedItems.length > 0) {
+                      nextSaleProp[propKey] = normalizedItems;
+                    }
+                    return;
+                  }
+                  if (rawValue && typeof rawValue === 'object') {
+                    const keys = Object.keys(rawValue);
+                    if (keys.length > 0) {
+                      nextSaleProp[propKey] = rawValue;
+                    }
+                    return;
+                  }
+                  const textValue = String(rawValue == null ? '' : rawValue).trim();
+                  if (textValue) {
+                    nextSaleProp[propKey] = rawValue;
+                  }
+                });
+                return nextSaleProp;
               };
               const patchFormValues = (formValues) => {
                 if (!formValues || typeof formValues !== 'object') {
@@ -4951,6 +7142,34 @@ class BrowserRPA:
                 if (Array.isArray(formValues.skuTable)) {
                   formValues.skuTable = patchSkuRows(formValues.skuTable);
                 }
+                if (formValues.saleProp && typeof formValues.saleProp === 'object') {
+                  formValues.saleProp = normalizeSaleProp(formValues.saleProp);
+                }
+                if (patchSnapshot.quotationTypeValue != null) {
+                  const currentQuotationType =
+                    formValues.quotationType && typeof formValues.quotationType === 'object'
+                      ? formValues.quotationType
+                      : {};
+                  formValues.quotationType = {
+                    ...(currentQuotationType || {}),
+                    value: patchSnapshot.quotationTypeValue,
+                    text: String(
+                      patchSnapshot.quotationTypeText ||
+                      (currentQuotationType && currentQuotationType.text) ||
+                      ''
+                    ).trim(),
+                  };
+                }
+                const unitText = String(patchSnapshot.unitText || '').trim();
+                if (unitText) {
+                  const currentUnit = formValues.cbuUnit && typeof formValues.cbuUnit === 'object'
+                    ? formValues.cbuUnit
+                    : {};
+                  formValues.cbuUnit = {
+                    ...(currentUnit || {}),
+                    unit: unitText,
+                  };
+                }
                 const sendAddressId = parsePositiveInteger(patchSnapshot.sendAddressId);
                 if (sendAddressId != null) {
                   const currentSendAddress = formValues.cbuSendAddress;
@@ -4967,13 +7186,11 @@ class BrowserRPA:
                 const draftQuantity = parsePositiveInteger(patchSnapshot.draftQuantity);
                 if (draftQuantity != null) {
                   if (formValues.totalSales && typeof formValues.totalSales === 'object') {
-                    if (parsePositiveInteger(formValues.totalSales.value) == null) {
-                      formValues.totalSales = {
-                        ...(formValues.totalSales || {}),
-                        value: draftQuantity,
-                      };
-                    }
-                  } else if (parsePositiveInteger(formValues.totalSales) == null) {
+                    formValues.totalSales = {
+                      ...(formValues.totalSales || {}),
+                      value: draftQuantity,
+                    };
+                  } else {
                     formValues.totalSales = draftQuantity;
                   }
                 }
@@ -5015,28 +7232,74 @@ class BrowserRPA:
                   if (node.fields && Array.isArray(node.fields.value)) {
                     node.fields.value = patchSkuRows(node.fields.value);
                   }
+                } else if (nodeId === 'saleProp') {
+                  if (node.value && typeof node.value === 'object') {
+                    node.value = normalizeSaleProp(node.value);
+                  }
+                  if (node.fields && node.fields.value && typeof node.fields.value === 'object') {
+                    node.fields.value = normalizeSaleProp(node.fields.value);
+                  }
                 } else if (nodeId === 'totalSales') {
                   const draftQuantity = parsePositiveInteger(patchSnapshot.draftQuantity);
                   if (draftQuantity != null) {
                     if (node.fields && node.fields.value && typeof node.fields.value === 'object') {
-                      if (parsePositiveInteger(node.fields.value.value) == null) {
-                        node.fields.value = {
-                          ...(node.fields.value || {}),
-                          value: draftQuantity,
-                        };
-                      }
-                    } else if (node.fields && parsePositiveInteger(node.fields.value) == null) {
+                      node.fields.value = {
+                        ...(node.fields.value || {}),
+                        value: draftQuantity,
+                      };
+                    } else if (node.fields) {
                       node.fields.value = draftQuantity;
                     }
                     if (node.value && typeof node.value === 'object') {
-                      if (parsePositiveInteger(node.value.value) == null) {
-                        node.value = {
-                          ...(node.value || {}),
-                          value: draftQuantity,
-                        };
-                      }
-                    } else if (parsePositiveInteger(node.value) == null) {
+                      node.value = {
+                        ...(node.value || {}),
+                        value: draftQuantity,
+                      };
+                    } else {
                       node.value = draftQuantity;
+                    }
+                  }
+                } else if (nodeId === 'quotationType') {
+                  if (patchSnapshot.quotationTypeValue != null) {
+                    const nextValue = {
+                      value: patchSnapshot.quotationTypeValue,
+                      text: String(patchSnapshot.quotationTypeText || '').trim(),
+                    };
+                    if (node.fields && node.fields.value && typeof node.fields.value === 'object') {
+                      node.fields.value = {
+                        ...(node.fields.value || {}),
+                        ...nextValue,
+                      };
+                    } else if (node.fields) {
+                      node.fields.value = { ...nextValue };
+                    }
+                    if (node.value && typeof node.value === 'object') {
+                      node.value = {
+                        ...(node.value || {}),
+                        ...nextValue,
+                      };
+                    } else {
+                      node.value = { ...nextValue };
+                    }
+                  }
+                } else if (nodeId === 'cbuUnit') {
+                  const unitText = String(patchSnapshot.unitText || '').trim();
+                  if (unitText) {
+                    if (node.fields && node.fields.value && typeof node.fields.value === 'object') {
+                      node.fields.value = {
+                        ...(node.fields.value || {}),
+                        unit: unitText,
+                      };
+                    } else if (node.fields) {
+                      node.fields.value = { unit: unitText };
+                    }
+                    if (node.value && typeof node.value === 'object') {
+                      node.value = {
+                        ...(node.value || {}),
+                        unit: unitText,
+                      };
+                    } else {
+                      node.value = { unit: unitText };
                     }
                   }
                 } else if (nodeId === 'cbuSendAddress') {
@@ -5238,26 +7501,37 @@ class BrowserRPA:
             const rewriteRequestBody = (body) => {
               const patchSnapshot = getPatchSnapshot();
               const applyPatch = Boolean(window.__codexDraftPatchConfig.applyPatch);
+              const applyIdentityPatch = Boolean(window.__codexDraftPatchConfig.applyIdentityPatch);
               const patchMode = String(window.__codexDraftPatchConfig.patchMode || '').trim() || 'full';
               const meta = {
                 patchSnapshot,
                 bodyType: typeof body,
                 rewritten: false,
                 patchApplied: applyPatch,
+                identityPatchApplied: false,
                 patchMode,
               };
               if (body == null) {
                 return { body, meta };
               }
-              if (!applyPatch) {
+              if (!applyPatch && !applyIdentityPatch) {
                 return { body, meta };
               }
+
+              const patchParsedValue = (parsedValue) => {
+                if (applyPatch) {
+                  patchDraftObject(parsedValue, patchSnapshot);
+                }
+                if (applyIdentityPatch && patchDraftIdentityObject(parsedValue)) {
+                  meta.identityPatchApplied = true;
+                }
+              };
 
               if (typeof body === 'string') {
                 try {
                   const parsedJson = JSON.parse(body);
-                  patchDraftObject(parsedJson, patchSnapshot);
-                  meta.rewritten = true;
+                  patchParsedValue(parsedJson);
+                  meta.rewritten = applyPatch || meta.identityPatchApplied;
                   return { body: JSON.stringify(parsedJson), meta };
                 } catch (error) {
                   // Fall through to URLSearchParams parsing.
@@ -5276,9 +7550,9 @@ class BrowserRPA:
                     }
                     try {
                       const parsedValue = JSON.parse(trimmedValue);
-                      patchDraftObject(parsedValue, patchSnapshot);
+                      patchParsedValue(parsedValue);
                       params.set(key, JSON.stringify(parsedValue));
-                      changed = true;
+                      changed = applyPatch || meta.identityPatchApplied;
                     } catch (error) {
                       continue;
                     }
@@ -5305,9 +7579,9 @@ class BrowserRPA:
                   }
                   try {
                     const parsedValue = JSON.parse(trimmedValue);
-                    patchDraftObject(parsedValue, patchSnapshot);
+                    patchParsedValue(parsedValue);
                     cloned.append(key, JSON.stringify(parsedValue));
-                    changed = true;
+                    changed = applyPatch || meta.identityPatchApplied;
                   } catch (error) {
                     cloned.append(key, rawValue);
                   }
@@ -5319,12 +7593,30 @@ class BrowserRPA:
               return { body, meta };
             };
 
+            window.__codexDraftIdentityPatchProbe = (rawUrl, body) => {
+              const rewritten = rewriteRequestBody(body);
+              return {
+                url: rewriteRequestUrlIdentity(rawUrl),
+                body: rewritten.body,
+                meta: rewritten.meta,
+              };
+            };
+
             const installXHRPatch = () => {
               const originalOpen = XMLHttpRequest.prototype.open;
               const originalSend = XMLHttpRequest.prototype.send;
               XMLHttpRequest.prototype.open = function(method, url) {
-                this.__codexDraftMeta = { method, url };
-                return originalOpen.apply(this, arguments);
+                const originalUrl = String(url || '');
+                const requestUrl = rewriteRequestUrlIdentity(originalUrl);
+                this.__codexDraftMeta = {
+                  method,
+                  url: requestUrl,
+                  originalUrl,
+                  identityUrlPatched: requestUrl !== originalUrl,
+                };
+                const args = Array.from(arguments);
+                args[1] = requestUrl;
+                return originalOpen.apply(this, args);
               };
               XMLHttpRequest.prototype.send = function(body) {
                 const meta = this.__codexDraftMeta || {};
@@ -5337,11 +7629,20 @@ class BrowserRPA:
                   transport: 'xhr',
                   method: String(meta.method || ''),
                   url,
+                  originalUrl: String(meta.originalUrl || url),
+                  identityUrlPatched: Boolean(meta.identityUrlPatched),
                   originalBodyPreview: previewValue(body),
                 };
                 const rewritten = rewriteRequestBody(body);
                 record.patch = rewritten.meta;
                 record.patchedBodyPreview = previewValue(rewritten.body);
+                record.expectedDraftId = String(window.__codexDraftPatchConfig.expectedDraftId || '').trim();
+                record.requestDraftIdentityPresent = requestCarriesExpectedDraftId(url, rewritten.body);
+                if (!record.requestDraftIdentityPresent) {
+                  const message = markMissingDraftIdentity(record);
+                  window.__codexDraftSubmitRecords.push(record);
+                  throw new Error(message);
+                }
                 this.addEventListener('loadend', function() {
                   record.status = this.status;
                   record.responseText = String(this.responseText || '');
@@ -5364,9 +7665,17 @@ class BrowserRPA:
               window.fetch = function() {
                 const args = Array.from(arguments);
                 const input = args[0];
-                const url = typeof input === 'string' ? input : String((input && input.url) || '');
-                if (!isDraftSubmitUrl(url)) {
+                const originalUrl = typeof input === 'string' ? input : String((input && input.url) || '');
+                if (!isDraftSubmitUrl(originalUrl)) {
                   return originalFetch.apply(window, args);
+                }
+                const url = rewriteRequestUrlIdentity(originalUrl);
+                if (url !== originalUrl) {
+                  if (typeof input === 'string') {
+                    args[0] = url;
+                  } else if (typeof Request !== 'undefined' && input instanceof Request) {
+                    args[0] = new Request(url, input);
+                  }
                 }
 
                 const requestInit = args[1] || {};
@@ -5374,11 +7683,20 @@ class BrowserRPA:
                   transport: 'fetch',
                   method: String(requestInit.method || 'GET'),
                   url,
+                  originalUrl,
+                  identityUrlPatched: url !== originalUrl,
                   originalBodyPreview: previewValue(requestInit.body),
                 };
                 const rewritten = rewriteRequestBody(requestInit.body);
                 record.patch = rewritten.meta;
                 record.patchedBodyPreview = previewValue(rewritten.body);
+                record.expectedDraftId = String(window.__codexDraftPatchConfig.expectedDraftId || '').trim();
+                record.requestDraftIdentityPresent = requestCarriesExpectedDraftId(url, rewritten.body);
+                if (!record.requestDraftIdentityPresent) {
+                  const message = markMissingDraftIdentity(record);
+                  window.__codexDraftSubmitRecords.push(record);
+                  return Promise.reject(new Error(message));
+                }
                 args[1] = {
                   ...requestInit,
                   body: rewritten.body,
@@ -5424,18 +7742,35 @@ class BrowserRPA:
         timeout_seconds = max(0.0, float(patch_config.get("timeout_seconds", 4) or 4))
         deadline = time.time() + timeout_seconds
         latest_record: dict[str, Any] | None = None
+        latest_records: list[dict[str, Any]] = []
+        try:
+            start_index = max(0, int(context.get("draft_submit_trace_start_index", 0) or 0))
+        except (TypeError, ValueError):
+            start_index = 0
         while time.time() <= deadline:
             records = self.driver.execute_script(
                 "return (window.__codexDraftSubmitRecords || []).map((item) => ({...item}));"
             )
             if records:
-                latest_record = dict(records[-1] or {})
-                if (
-                    latest_record.get("responseText")
-                    or latest_record.get("responseJson") is not None
-                    or int(latest_record.get("status", 0) or 0) > 0
-                ):
-                    break
+                normalized_records = [dict(item or {}) for item in list(records or [])]
+                latest_records = normalized_records
+                new_records = normalized_records[start_index:] if start_index < len(normalized_records) else []
+                target_records = new_records if new_records else normalized_records
+                if target_records:
+                    latest_record = dict(target_records[-1] or {})
+                    completed_record = next(
+                        (
+                            item
+                            for item in reversed(target_records)
+                            if item.get("responseText")
+                            or item.get("responseJson") is not None
+                            or int(item.get("status", 0) or 0) > 0
+                        ),
+                        None,
+                    )
+                    if completed_record:
+                        latest_record = dict(completed_record or {})
+                        break
             time.sleep(0.2)
 
         if latest_record is None:
@@ -5455,8 +7790,10 @@ class BrowserRPA:
         response_text = str(latest_record.get("responseText", "")).strip()
         has_response_payload = bool(response_text) or response_json is not None or status > 0
         if not has_response_payload:
+            context["draft_submit_trace_latest_record_count"] = len(latest_records)
             context["draft_submit_trace_complete"] = False
-            return False
+            context["draft_submit_trace_pending"] = True
+            return True
         context["draft_submit_trace_complete"] = True
 
         if status >= 400:
@@ -5471,6 +7808,32 @@ class BrowserRPA:
             ).strip()
             context["draft_submit_backend_message"] = message
             raise PublishSubmitError(f"draft_submit backend rejected request: {message}")
+
+        expected_draft_id = str(publish_config.get("expected_draft_id") or "").strip()
+        if expected_draft_id and isinstance(response_json, dict):
+            def find_draft_id(value: Any) -> str:
+                if isinstance(value, dict):
+                    for key, item in value.items():
+                        if str(key).lower() in {"draftid", "offerdraftid", "draft_id"} and str(item or "").strip():
+                            return str(item).strip()
+                    for item in value.values():
+                        found = find_draft_id(item)
+                        if found:
+                            return found
+                elif isinstance(value, list):
+                    for item in value:
+                        found = find_draft_id(item)
+                        if found:
+                            return found
+                return ""
+
+            response_draft_id = find_draft_id(response_json)
+            context["draft_submit_response_draft_id"] = response_draft_id
+            if response_draft_id != expected_draft_id:
+                raise PublishSubmitError(
+                    "draft_submit returned a different draft identity: "
+                    f"expected {expected_draft_id}, got {response_draft_id or 'unavailable'}"
+                )
 
         failure_keywords = [
             str(item).strip()
@@ -5707,6 +8070,33 @@ class BrowserRPA:
             raise PublishSubmitError("submit verification failed: success signal not detected.")
 
         context["post_submit_verified"] = "true"
+
+    def _submit_success_navigation_detected(
+        self,
+        publish_config: dict[str, Any],
+        context: dict[str, Any],
+    ) -> bool:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        current_url = str(self.driver.current_url or "").strip()
+        verification = publish_config.get("submit_verification", {})
+        success_url_keywords = [
+            str(item).strip()
+            for item in verification.get("success_url_keywords", [])
+            if str(item).strip()
+        ]
+        query = parse_qs(urlparse(current_url).query)
+        offer_id = str((query.get("offerId") or query.get("offer_id") or [""])[0]).strip()
+        detected = bool(
+            re.fullmatch(r"\d+", offer_id)
+            and self._contains_any_keyword(current_url, success_url_keywords)
+        )
+        context["submit_success_navigation_detected"] = detected
+        if detected:
+            context["platform_link_id"] = offer_id
+            context["platform_link_url"] = f"https://detail.1688.com/offer/{offer_id}.html"
+            context["submit_success_result_url"] = current_url
+        return detected
 
     def _resolve_context_preferred_value(
         self,
@@ -5994,6 +8384,8 @@ class BrowserRPA:
         patterns = [
             re.compile(r"(?:请填写|请完善|请选择)\s*([^，。；;：:]+)"),
             re.compile(r"([^，。；;：:]+?)为必填项"),
+            re.compile(r"([^，。；;：:]+?)\s*[：:]\s*[\"“][^\"”]+[\"”]\s*不能为空"),
+            re.compile(r"([^，。；;：:]+?)\s*不能为空"),
         ]
         for raw_message in messages:
             message = str(raw_message or "").strip()
@@ -6002,7 +8394,12 @@ class BrowserRPA:
             raw_labels: list[str] = []
             for pattern in patterns:
                 raw_labels.extend(match.strip() for match in pattern.findall(message) if str(match).strip())
-            if not raw_labels and ("必填" in message or "请填写" in message or "请完善" in message):
+            if not raw_labels and (
+                "必填" in message
+                or "请填写" in message
+                or "请完善" in message
+                or "不能为空" in message
+            ):
                 raw_labels.append(message)
             for raw_label in raw_labels:
                 normalized = self._normalize_required_label(raw_label)
@@ -6015,6 +8412,418 @@ class BrowserRPA:
                 seen.add(normalized)
                 labels.append(normalized)
         return labels
+
+    def _ensure_core_publish_fields_before_draft_save(
+        self,
+        publish_config: dict[str, Any],
+        context: dict[str, Any],
+    ) -> None:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+
+        self._reapply_nonpersistent_draft_fields(publish_config, context)
+        begin_amount = self._resolve_context_preferred_value(
+            context=context,
+            source="price_begin_amount",
+            default_value="1",
+        )
+        detail_image_html = self._build_tinymce_image_html(
+            [
+                str(item).strip()
+                for item in context.get("detail_images_uploaded_urls", [])
+                if str(item).strip()
+            ]
+        )
+        raw_description = str(context.get("description", "")).strip()
+        detail_text_html = self._build_tinymce_html(raw_description) if raw_description else ""
+        description_html = detail_image_html or detail_text_html
+        quantity_value = self._parse_positive_integer(context.get("quantity"), default=999)
+        price_value = self._parse_positive_float(context.get("price"))
+        begin_amount_value = self._parse_positive_integer(begin_amount, default=1)
+        if quantity_value <= 0:
+            quantity_value = 999
+        if begin_amount_value <= 0:
+            begin_amount_value = 1
+
+        state = self.driver.execute_script(
+            """
+            const payload = arguments[0] || {};
+            const cloneValue = (value) => JSON.parse(JSON.stringify(value || {}));
+            const parsePositiveNumber = (value) => {
+              const text = String(value == null ? '' : value).trim();
+              if (!text) return null;
+              const normalized = text.replace(/,/g, '');
+              const parsed = Number(normalized);
+              if (!Number.isFinite(parsed) || parsed <= 0) {
+                return null;
+              }
+              return parsed;
+            };
+            const parsePositiveInteger = (value) => {
+              const parsed = parsePositiveNumber(value);
+              if (parsed == null) {
+                return null;
+              }
+              const integerValue = Math.floor(parsed);
+              return integerValue > 0 ? integerValue : null;
+            };
+
+            const sdk = window.SellPublishSdk;
+            const engine = sdk && sdk.engine;
+            const core = engine && engine._engine && engine._engine._core;
+            if (!engine || !engine.getJsonState || !core || !core.changeElementValue) {
+              return {
+                ok: false,
+                reason: '1688 runtime core is unavailable',
+              };
+            }
+
+            const state = engine.getJsonState() || {};
+            const components = state.components || {};
+            const result = {
+              ok: true,
+              applied: {
+                priceRange: false,
+                totalSales: false,
+                description: false,
+                skuTable: false,
+              },
+            };
+
+            const draftPrice = parsePositiveNumber(payload.price);
+            const draftQuantity = parsePositiveInteger(payload.quantity) || 999;
+            const minBeginAmount = parsePositiveInteger(payload.beginAmount) || 1;
+            const detailHtml = String(payload.descriptionHtml || '').trim();
+
+            if (draftPrice != null) {
+              const priceRangeProps = ((components.priceRange || {}).props) || {};
+              const currentPriceRange = Array.isArray(priceRangeProps.value) && priceRangeProps.value.length > 0
+                ? priceRangeProps.value
+                : [{}];
+              const nextPriceRow = { ...(currentPriceRange[0] || {}) };
+              nextPriceRow.pricerange_price = draftPrice;
+              nextPriceRow.pricerange_beginAmount = minBeginAmount;
+              core.changeElementValue('priceRange', [nextPriceRow], { isDepth: false });
+              result.applied.priceRange = true;
+            }
+
+            if (draftQuantity > 0) {
+              core.changeElementValue('totalSales', draftQuantity, { isDepth: false });
+              result.applied.totalSales = true;
+            }
+
+            const skuTableProps = ((components.skuTable || {}).props) || {};
+            const skuRows = Array.isArray(skuTableProps.value) ? skuTableProps.value : [];
+            if (skuRows.length > 0 && (draftPrice != null || draftQuantity > 0)) {
+              const nextSkuRows = skuRows.map((row) => {
+                if (!row || typeof row !== 'object') {
+                  return row;
+                }
+                const nextRow = { ...row };
+                if (draftPrice != null) {
+                  nextRow.sku_price = draftPrice;
+                }
+                if (draftQuantity > 0) {
+                  nextRow.sku_amountOnSale = draftQuantity;
+                }
+                return nextRow;
+              });
+              core.changeElementValue('skuTable', nextSkuRows, { isDepth: false });
+              result.applied.skuTable = true;
+            }
+
+            if (detailHtml) {
+              const descriptionProps = ((components.description || {}).props) || {};
+              const nextDescriptionValue = cloneValue(descriptionProps.value || {});
+              const nextDetailList = Array.isArray(nextDescriptionValue.detailList) ? nextDescriptionValue.detailList : [];
+              if (nextDetailList.length > 0) {
+                const firstDetail = nextDetailList[0] && typeof nextDetailList[0] === 'object'
+                  ? { ...(nextDetailList[0] || {}) }
+                  : {};
+                const currentContent = String(firstDetail.content || '').trim();
+                if (!currentContent || detailHtml.includes('<img')) {
+                  firstDetail.content = detailHtml;
+                }
+                firstDetail.isRequired = true;
+                if (!String(firstDetail.title || '').trim()) {
+                  firstDetail.title = '图文详情';
+                }
+                if (!String(firstDetail.id || '').trim()) {
+                  firstDetail.id = '0';
+                }
+                nextDetailList[0] = firstDetail;
+              } else {
+                nextDetailList.push({
+                  id: '0',
+                  title: '图文详情',
+                  content: detailHtml,
+                  contentUrl: null,
+                  isRequired: true,
+                });
+              }
+              nextDescriptionValue.detailList = nextDetailList;
+              const findDescriptionHandleNode = () => {
+                const root = document.querySelector('#guid-description');
+                const candidates = [];
+                const seenNodes = new Set();
+                const addCandidate = (node) => {
+                  if (node && !seenNodes.has(node)) {
+                    seenNodes.add(node);
+                    candidates.push(node);
+                  }
+                };
+                addCandidate(root);
+                if (root && root.querySelectorAll) {
+                  Array.from(root.querySelectorAll('*')).slice(0, 800).forEach(addCandidate);
+                }
+                let ancestor = root && root.parentElement;
+                let ancestorDepth = 0;
+                while (ancestor && ancestorDepth < 8) {
+                  addCandidate(ancestor);
+                  ancestor = ancestor.parentElement;
+                  ancestorDepth += 1;
+                }
+                for (const node of candidates) {
+                  const reactKey = Object.keys(node || {}).find(
+                    (key) => key.startsWith('__reactInternalInstance') || key.startsWith('__reactFiber')
+                  );
+                  let fiber = reactKey ? node[reactKey] : null;
+                  while (fiber) {
+                    const stateNode = fiber.stateNode;
+                    if (
+                      stateNode &&
+                      typeof stateNode.handleChange === 'function' &&
+                      stateNode.props &&
+                      String(stateNode.props.UUID || '') === 'description'
+                    ) {
+                      return stateNode;
+                    }
+                    fiber = fiber.return;
+                  }
+                }
+                return null;
+              };
+              const descriptionHandleNode = findDescriptionHandleNode();
+              if (descriptionHandleNode) {
+                descriptionHandleNode.handleChange(false, nextDescriptionValue);
+                result.descriptionUpdateMode = 'react_handle_change';
+              } else {
+                core.changeElementValue('description', nextDescriptionValue, { isDepth: false });
+                result.descriptionUpdateMode = 'core_change_element_value';
+              }
+              result.applied.description = true;
+            }
+
+            return result;
+            """,
+            {
+                "price": price_value,
+                "quantity": quantity_value,
+                "beginAmount": begin_amount_value,
+                "descriptionHtml": description_html,
+            },
+        )
+        context["draft_core_fields_pre_save"] = state if isinstance(state, dict) else {"ok": False}
+        self._verify_core_fields_before_draft_save(publish_config, context)
+
+    def _reapply_nonpersistent_draft_fields(
+        self,
+        publish_config: dict[str, Any],
+        context: dict[str, Any],
+    ) -> None:
+        verification = publish_config.get("draft_verification", {})
+        if not verification or not verification.get("enabled", True):
+            return
+
+        steps = [item for item in list(publish_config.get("steps", []) or []) if isinstance(item, dict)]
+        main_image_step = next(
+            (item for item in steps if str(item.get("name", "")).strip() == "main_image"),
+            None,
+        )
+        spec_step = next(
+            (item for item in steps if str(item.get("action", "")).strip() == "spec_values"),
+            None,
+        )
+        title_step = next(
+            (item for item in steps if str(item.get("name", "")).strip() == "title"),
+            None,
+        )
+
+        require_square_main_image = bool(verification.get("require_square_main_image", False))
+        main_image_state = self._draft_main_image_state()
+        main_image_needs_reapply = not bool(main_image_state.get("present")) or (
+            require_square_main_image and not bool(main_image_state.get("square"))
+        )
+        if main_image_needs_reapply and main_image_step:
+            self._run_publish_steps([main_image_step], context)
+            context["draft_main_image_reapplied_pre_save"] = True
+
+        expected_specs = self._resolve_expected_spec_values(spec_step, context) if spec_step else {}
+        current_specs = self._collect_spec_values() if expected_specs else {}
+        mismatched_spec_labels = [
+            label
+            for label, expected_values in expected_specs.items()
+            if not self._spec_value_lists_match(current_specs.get(label, ""), expected_values)
+        ]
+        if mismatched_spec_labels and spec_step:
+            for label in mismatched_spec_labels:
+                self._clear_committed_spec_values(label)
+            self._run_publish_steps([spec_step], context)
+            context["draft_specs_reapplied_pre_save"] = mismatched_spec_labels
+
+        expected_title = str(context.get("title", "")).strip()
+        if expected_title and self._draft_title_value() != expected_title and title_step:
+            self._run_publish_steps([title_step], context)
+            context["draft_title_reapplied_pre_save"] = True
+
+    def _resolve_expected_spec_values(
+        self,
+        spec_step: dict[str, Any] | None,
+        context: dict[str, Any],
+    ) -> dict[str, list[str]]:
+        if not spec_step:
+            return {}
+        expected: dict[str, list[str]] = {}
+        for rule in self._resolve_profile_rules(spec_step, context):
+            label = str(rule.get("label", "")).strip()
+            raw_value = self._resolve_profile_rule_value(rule, context)
+            values = self._split_spec_rule_values(raw_value, rule)
+            if label and values:
+                expected[label] = values
+        return expected
+
+    def _spec_value_lists_match(self, actual: Any, expected: list[str]) -> bool:
+        actual_values = [str(item).strip() for item in str(actual or "").split("|") if str(item).strip()]
+        expected_values = [str(item).strip() for item in expected if str(item).strip()]
+        return len(actual_values) == len(expected_values) and set(actual_values) == set(expected_values)
+
+    def _clear_committed_spec_values(self, label: str) -> None:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+
+        max_removals = 50
+        for _ in range(max_removals):
+            container = self._wait_for_spec_container(label)
+            committed_items = container.find_elements(
+                By.CSS_SELECTOR,
+                ".value-select-item:not(.resident)",
+            )
+            if not committed_items:
+                return
+            remove_controls = committed_items[-1].find_elements(
+                By.CSS_SELECTOR,
+                ".value-select-remove, .action-btn",
+            )
+            if not remove_controls:
+                raise PublishValidationError(
+                    f"Cannot reset mismatched committed values for spec '{label}'."
+                )
+            self.driver.execute_script("arguments[0].click();", remove_controls[-1])
+            self._pause(0.2)
+        raise PublishValidationError(
+            f"Too many committed values while resetting spec '{label}'."
+        )
+
+    def _verify_core_fields_before_draft_save(
+        self,
+        publish_config: dict[str, Any],
+        context: dict[str, Any],
+    ) -> None:
+        verification = publish_config.get("draft_verification", {})
+        if not verification or not verification.get("enabled", True):
+            return
+
+        if verification.get("require_title", False):
+            actual_title = self._draft_title_value()
+            context["draft_title_pre_save"] = actual_title
+            if not actual_title:
+                raise PublishValidationError("draft save blocked: title is empty before save.")
+            expected_title = str(context.get("title", "")).strip()
+            if expected_title and actual_title != expected_title:
+                raise PublishValidationError(
+                    "draft save blocked: title does not match the task payload before save "
+                    f"(expected={expected_title!r}, actual={actual_title!r})."
+                )
+
+        if verification.get("require_main_image", True):
+            main_image_present = self._draft_main_image_present()
+            main_image_state = {"present": main_image_present}
+            if verification.get("require_square_main_image", False):
+                main_image_state = self._draft_main_image_state()
+                main_image_present = bool(main_image_state.get("present"))
+            context["draft_main_image_state_pre_save"] = main_image_state
+            context["draft_main_image_pre_save"] = main_image_present
+            if not main_image_present:
+                raise PublishValidationError("draft save blocked: main image is empty before save.")
+            if verification.get("require_square_main_image", False) and not bool(main_image_state.get("square")):
+                raise PublishValidationError("draft save blocked: first main image is not square before save.")
+
+        minimum_description_image_count = max(
+            0,
+            int(verification.get("minimum_description_image_count", 0) or 0),
+        )
+        expected_description_image_count = len(
+            [
+                item
+                for item in list(context.get("detail_images_uploaded_urls", []) or [])
+                if str(item).strip()
+            ]
+        )
+        minimum_description_image_count = max(
+            minimum_description_image_count,
+            expected_description_image_count,
+        )
+        context["draft_description_image_count_expected_pre_save"] = minimum_description_image_count
+        if minimum_description_image_count > 0:
+            description_image_count = self._draft_description_image_count()
+            context["draft_description_image_count_pre_save"] = description_image_count
+            if description_image_count < minimum_description_image_count:
+                raise PublishValidationError(
+                    "draft save blocked: description images are incomplete before save "
+                    f"({description_image_count}/{minimum_description_image_count})."
+                )
+
+        if verification.get("require_specs", True):
+            required_spec_labels = [
+                str(item).strip()
+                for item in verification.get("required_spec_labels", [])
+                if str(item).strip()
+            ]
+            spec_values = self._collect_spec_values()
+            context["draft_spec_values_pre_save"] = spec_values
+            spec_step = next(
+                (
+                    item
+                    for item in list(publish_config.get("steps", []) or [])
+                    if isinstance(item, dict) and str(item.get("action", "")).strip() == "spec_values"
+                ),
+                None,
+            )
+            expected_specs = self._resolve_expected_spec_values(spec_step, context)
+            missing_labels = [
+                label
+                for label in required_spec_labels
+                if not str(spec_values.get(label, "")).strip()
+            ]
+            if missing_labels:
+                raise PublishValidationError(
+                    "draft save blocked: required specs are empty before save: "
+                    + ", ".join(missing_labels)
+                )
+            mismatched_labels = [
+                label
+                for label, expected_values in expected_specs.items()
+                if not self._spec_value_lists_match(spec_values.get(label, ""), expected_values)
+            ]
+            if mismatched_labels:
+                details = ", ".join(
+                    f"{label}={spec_values.get(label, '')!r} expected {'|'.join(expected_specs[label])!r}"
+                    for label in mismatched_labels
+                )
+                raise PublishValidationError(
+                    "draft save blocked: committed specs do not match the task payload before save: "
+                    + details
+                )
 
     def _ensure_required_cat_props_before_draft_save(
         self,
@@ -6029,6 +8838,12 @@ class BrowserRPA:
             for item in list(context.get("draft_required_field_labels", []) or [])
             if str(item).strip()
         ]
+        target_labels.extend(
+            self._normalize_required_label(item)
+            for item in list(((context.get("draft_page_state_patch") or {}).get("catPropMissingLabels", [])) or [])
+            if str(item).strip()
+        )
+        target_labels = list(dict.fromkeys(target_labels))
         target_labels = [item for item in target_labels if item]
         state = self.driver.execute_script(
             """
@@ -6137,7 +8952,25 @@ class BrowserRPA:
               const preferredValue = resolvePreferredValue(label);
               const options = Array.isArray(item && item.dataSource) ? item.dataSource : [];
               const uiType = String((item && item.uiType) || '').trim().toLowerCase();
+              const fieldType = String((item && item.fieldType) || '').trim().toLowerCase();
               const isMulti = uiType === 'checkbox' || uiType === 'multiselect';
+
+              if (preferredValue && ['input', 'textarea'].includes(uiType)) {
+                const numericFieldTypes = ['int', 'integer', 'number', 'float', 'double', 'decimal'];
+                if (numericFieldTypes.includes(fieldType)) {
+                  const numericValue = Number(String(preferredValue).replace(/,/g, ''));
+                  if (!Number.isFinite(numericValue)) {
+                    result.unresolvedLabels.push(label);
+                    return;
+                  }
+                  nextValue[propKey] = numericValue;
+                } else {
+                  nextValue[propKey] = String(preferredValue);
+                }
+                result.appliedLabels.push(label);
+                changed = true;
+                return;
+              }
 
               const matchedOption =
                 (preferredValue
@@ -6210,13 +9043,143 @@ class BrowserRPA:
             selector.get("value", ""),
         )
 
+    def _close_picker_dialog(
+        self,
+        selector: dict[str, str],
+        *,
+        timeout_seconds: float = 5.0,
+    ) -> bool:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        try:
+            self.driver.switch_to.default_content()
+        except Exception:
+            pass
+        if not self._is_picker_ui_ready():
+            return True
+
+        close_selectors = (
+            "div.ibank-picker-dialog .picker-header a.close",
+            "div.ibank-picker-dialog a.close",
+            "div.ui-dialog a.close",
+        )
+        for close_selector in close_selectors:
+            for close_button in self.driver.find_elements(By.CSS_SELECTOR, close_selector):
+                try:
+                    if not close_button.is_displayed():
+                        continue
+                    try:
+                        self.driver.execute_script("arguments[0].click();", close_button)
+                    except Exception:
+                        close_button.click()
+                    script_deadline = time.time() + min(max(timeout_seconds, 0.5), 1.0)
+                    while time.time() < script_deadline:
+                        if not self._is_picker_ui_ready():
+                            return True
+                        self._pause(0.1)
+                    if self._is_picker_ui_ready():
+                        close_button.click()
+                    deadline = time.time() + max(timeout_seconds, 0.5)
+                    while time.time() < deadline:
+                        if not self._is_picker_ui_ready():
+                            return True
+                        self._pause(0.1)
+                except Exception:
+                    continue
+
+        return not self._is_picker_ui_ready()
+
     def _wait_for_dialog(self, selector: dict[str, str]) -> WebElement:
         try:
-            return self._wait_for_element(selector)
+            return self._wait_for_visible_element(selector)
         except TimeoutException:
             # Some 1688 upload tiles only respond to native mouse events, so keep the
             # original timeout behavior for callers after a single retry window.
-            return self._wait_for_element(selector)
+            return self._wait_for_visible_element(selector)
+
+    def _is_picker_ui_ready(self) -> bool:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        dialog_selectors = (
+            "div.ibank-picker-dialog",
+            "div.ui-dialog",
+        )
+        for selector in dialog_selectors:
+            for node in self.driver.find_elements(By.CSS_SELECTOR, selector):
+                try:
+                    if node.is_displayed():
+                        return True
+                except Exception:
+                    continue
+        try:
+            for frame in self.driver.find_elements(By.CSS_SELECTOR, "iframe.picker-frame"):
+                try:
+                    source = str(frame.get_attribute("src") or "").strip().lower()
+                    if frame.is_displayed() and source not in {"", "about:blank"}:
+                        return True
+                except Exception:
+                    continue
+        except Exception:
+            return False
+        return False
+
+    def _trigger_react_picker_opener(self, element: WebElement) -> int:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        invoked = self.driver.execute_script(
+            """
+            const target = arguments[0];
+            if (!target) {
+              return 0;
+            }
+            const candidates = [
+              target,
+              target.querySelector ? target.querySelector('.picture-cover-content') : null,
+              target.closest ? target.closest('.module-picture-cover-wrapper') : null,
+              target.parentElement || null,
+            ].filter(Boolean);
+            const seen = [];
+            let triggered = 0;
+            const alreadySeen = (node) => seen.some((item) => item === node);
+            const buildEvent = (node) => ({
+              type: 'click',
+              target: node,
+              currentTarget: node,
+              preventDefault() {},
+              stopPropagation() {},
+              nativeEvent: new MouseEvent('click', { bubbles: true, cancelable: true, view: window }),
+            });
+            const invokeNode = (node) => {
+              if (!node || alreadySeen(node)) {
+                return;
+              }
+              seen.push(node);
+              const reactKey = Object.keys(node).find(
+                (key) => key.startsWith('__reactFiber') || key.startsWith('__reactInternalInstance')
+              );
+              let fiber = reactKey ? node[reactKey] : null;
+              while (fiber) {
+                const props = fiber.memoizedProps;
+                if (props && typeof props.onClick === 'function') {
+                  try {
+                    props.onClick(buildEvent(node));
+                    triggered += 1;
+                  } catch (error) {
+                    // Ignore and continue up the React chain.
+                  }
+                }
+                fiber = fiber.return;
+              }
+            };
+            candidates.forEach((node) => invokeNode(node));
+            return triggered;
+            """,
+            element,
+        )
+        try:
+            return int(invoked or 0)
+        except Exception:
+            return 0
 
     def _trigger_picker_opener(self, element: WebElement) -> None:
         if not self.driver:
@@ -6235,7 +9198,7 @@ class BrowserRPA:
             element,
         )
         self._pause(0.5)
-        if self.driver.find_elements(By.CSS_SELECTOR, "div.ibank-picker-dialog"):
+        if self._is_picker_ui_ready():
             return
         self.driver.execute_script(
             """
@@ -6260,6 +9223,11 @@ class BrowserRPA:
             element,
         )
         self._pause(0.5)
+        if self._is_picker_ui_ready():
+            return
+        invoked = self._trigger_react_picker_opener(element)
+        if invoked > 0:
+            self._pause(0.6)
 
     def _check_publish_error_state(
         self,
@@ -6435,14 +9403,111 @@ class BrowserRPA:
         return bool(str(selector.get("value", "")).strip())
 
     def _click_with_javascript(self, selector: dict[str, str]) -> None:
-        element = self._wait_for_element(selector, clickable=False)
         if not self.driver:
             raise RuntimeError("Browser has not been opened.")
+        by = str(selector.get("by", "")).strip().lower()
+        selector_value = str(selector.get("value", "")).strip()
+        if by == "css" and selector_value:
+            clicked = self.driver.execute_script(
+                """
+                const selector = String(arguments[0] || '').trim();
+                const isVisible = (node) => {
+                  if (!node) return false;
+                  const style = window.getComputedStyle(node);
+                  const rect = node.getBoundingClientRect();
+                  return (
+                    style.display !== 'none' &&
+                    style.visibility !== 'hidden' &&
+                    rect.width > 0 &&
+                    rect.height > 0
+                  );
+                };
+                const isEnabled = (node) => {
+                  if (!node) return false;
+                  const disabledAttr = node.getAttribute('disabled');
+                  const ariaDisabled = String(node.getAttribute('aria-disabled') || '').toLowerCase();
+                  return !node.disabled && disabledAttr == null && ariaDisabled !== 'true';
+                };
+                const dedup = (nodes) => {
+                  const seen = [];
+                  return nodes.filter((node) => {
+                    if (!node || seen.includes(node)) return false;
+                    seen.push(node);
+                    return true;
+                  });
+                };
+                const candidates = dedup(Array.from(document.querySelectorAll(selector)));
+                const target =
+                  candidates.find((node) => isVisible(node) && isEnabled(node)) ||
+                  candidates.find((node) => isVisible(node)) ||
+                  candidates[0] ||
+                  null;
+                if (!target) return false;
+                target.scrollIntoView({ block: 'center', inline: 'nearest' });
+                target.click();
+                return true;
+                """,
+                selector_value,
+            )
+            if bool(clicked):
+                return
+        element = self._wait_for_element(selector, clickable=False)
         self.driver.execute_script("arguments[0].click();", element)
 
     def _dispatch_click_with_events(self, selector: dict[str, str]) -> None:
         if not self.driver:
             raise RuntimeError("Browser has not been opened.")
+        by = str(selector.get("by", "")).strip().lower()
+        selector_value = str(selector.get("value", "")).strip()
+        if by == "css" and selector_value:
+            dispatched = self.driver.execute_script(
+                """
+                const selector = String(arguments[0] || '').trim();
+                const isVisible = (node) => {
+                  if (!node) return false;
+                  const style = window.getComputedStyle(node);
+                  const rect = node.getBoundingClientRect();
+                  return (
+                    style.display !== 'none' &&
+                    style.visibility !== 'hidden' &&
+                    rect.width > 0 &&
+                    rect.height > 0
+                  );
+                };
+                const dedup = (nodes) => {
+                  const seen = [];
+                  return nodes.filter((node) => {
+                    if (!node || seen.includes(node)) return false;
+                    seen.push(node);
+                    return true;
+                  });
+                };
+                const candidates = dedup(Array.from(document.querySelectorAll(selector)));
+                const target =
+                  candidates.find((node) => isVisible(node)) ||
+                  candidates[0] ||
+                  null;
+                if (!target) return false;
+                target.scrollIntoView({ block: 'center', inline: 'nearest' });
+                ['mouseenter', 'mouseover', 'mousemove', 'mousedown', 'mouseup', 'click'].forEach((eventType) => {
+                  target.dispatchEvent(
+                    new MouseEvent(eventType, {
+                      bubbles: true,
+                      cancelable: true,
+                      view: window,
+                      buttons: 1,
+                    })
+                  );
+                });
+                if (typeof target.click === 'function') {
+                  target.click();
+                }
+                return true;
+                """,
+                selector_value,
+            )
+            if bool(dispatched):
+                return
         element = self._wait_for_element(selector, clickable=False)
         self.driver.execute_script(
             """
@@ -6497,15 +9562,20 @@ class BrowserRPA:
                 const selectedNode = Array.from(root.querySelectorAll('.ant-select-selection-item')).find(isVisible) || null;
                 const selectedText = norm(selectedNode ? selectedNode.innerText || selectedNode.textContent || '' : '');
                 const selectedValue = getSelectedValueFromState();
-                if (selectedText && !selectedText.includes('请选择')) {
-                  return { exists: true, selected: true, clicked: false, selectedText, selectedValue };
-                }
+                const hadValidSelection = Boolean(selectedText && !selectedText.includes('请选择'));
                 const selectorNode =
                   Array.from(root.querySelectorAll('.ant-select-selector')).find(isVisible) ||
                   Array.from(root.querySelectorAll('.ant-select')).find(isVisible) ||
                   null;
                 if (!selectorNode || !isVisible(selectorNode)) {
-                  return { exists: true, selected: false, clicked: false, reason: 'selector_not_visible' };
+                  return {
+                    exists: true,
+                    selected: hadValidSelection,
+                    clicked: false,
+                    reason: 'selector_not_visible',
+                    selectedText,
+                    selectedValue,
+                  };
                 }
                 selectorNode.scrollIntoView({block: 'center', inline: 'nearest'});
                 selectorNode.click();
@@ -6530,10 +9600,10 @@ class BrowserRPA:
                 const afterValue = getSelectedValueFromState();
                 return {
                   exists: true,
-                  selected: Boolean(afterText && !afterText.includes('请选择')),
+                  selected: Boolean(afterText && !afterText.includes('请选择')) || hadValidSelection,
                   clicked: Boolean(target),
-                  selectedText: afterText,
-                  selectedValue: afterValue,
+                  selectedText: afterText || selectedText,
+                  selectedValue: afterValue || selectedValue,
                 };
                 """
             )
@@ -6542,10 +9612,36 @@ class BrowserRPA:
                 break
             self._pause(0.6)
         context["draft_send_address_state"] = result if isinstance(result, dict) else {"exists": False}
-        if isinstance(result, dict):
-            selected_value = str(result.get("selectedValue", "")).strip()
-            if selected_value:
-                context["send_address_id"] = selected_value
+        selected_value = self.driver.execute_script(
+            """
+            const sdk = window.SellPublishSdk;
+            const engine = sdk && sdk.engine;
+            const state = engine && engine.getJsonState ? engine.getJsonState() : {};
+            const components = (state || {}).components || {};
+            const addressProps = (components.cbuSendAddress || {}).props || {};
+            const currentRaw = addressProps.value;
+            const currentValue = currentRaw && typeof currentRaw === 'object' ? currentRaw.value : currentRaw;
+            const firstValue = Number((((addressProps.dataSource || [])[0] || {}).value) || 0);
+            const nextValue = Number(currentValue || firstValue || 0);
+            if (!nextValue || !engine) {
+              return '';
+            }
+            const core = engine.formilyCore || (engine._engine && engine._engine._core);
+            if (core && typeof core.changeElementValue === 'function') {
+              core.changeElementValue('cbuSendAddress', { value: nextValue }, { isDepth: false });
+              const freightProps = (components.freight || {}).props || {};
+              core.changeElementValue(
+                'freight',
+                { ...(freightProps.value || {}), sendAddressId: nextValue },
+                { isDepth: false }
+              );
+            }
+            return String(nextValue);
+            """
+        )
+        normalized_selected_value = str(selected_value or "").strip()
+        if normalized_selected_value:
+            context["send_address_id"] = normalized_selected_value
 
     def _ensure_draft_required_delivery_service(self, context: dict[str, Any]) -> None:
         if not self.driver:
@@ -6822,6 +9918,10 @@ class BrowserRPA:
         context["draft_buyer_protection_pre_save_expected"] = expected_value
         context["draft_buyer_protection_pre_save_selected_text"] = selected_text
         context["draft_buyer_protection_pre_save_selected"] = bool(selected_text)
+        if not selected_text:
+            raise PublishValidationError(
+                f"buyer protection ship time '{expected_value}' could not be selected before draft save."
+            )
         effective_name = selected_text or expected_value
         if effective_name:
             effective_code = self._resolve_buyer_protection_service_code_by_name(effective_name)
@@ -6836,14 +9936,115 @@ class BrowserRPA:
                     }
                 ]
 
+    def _prepare_and_verify_submit_required_fields(
+        self,
+        publish_config: dict[str, Any],
+        context: dict[str, Any],
+    ) -> None:
+        self._ensure_draft_send_address_selected(context)
+        self._ensure_draft_required_delivery_service(context)
+        self._apply_draft_page_state_patch(publish_config, context)
+        self._ensure_draft_logistics_dimensions_before_save(publish_config, context)
+        self._ensure_required_cat_props_before_draft_save(publish_config, context)
+        self._ensure_buyer_protection_ship_time_before_draft_save(publish_config, context)
+
+        verification = publish_config.get("draft_verification", {})
+        actual_send_address = self._draft_selected_send_address()
+        expected_send_address = str(context.get("send_address_id", "")).strip()
+        context["submit_send_address_value"] = actual_send_address
+        if verification.get("require_send_address", False) and not actual_send_address:
+            raise PublishValidationError("submit blocked: send address is empty after required-field reapply.")
+        if (
+            verification.get("require_send_address", False)
+            and expected_send_address
+            and actual_send_address.isdigit()
+            and actual_send_address != expected_send_address
+        ):
+            raise PublishValidationError(
+                "submit blocked: send address does not match the address selected for this submission."
+            )
+
+        expected_buyer_protection = self._resolve_buyer_protection_ship_time_for_draft(
+            publish_config,
+            context,
+        )
+        expected_buyer_protection_code = str(
+            verification.get("buyer_protection_expected_code", "")
+            or context.get("buyer_protection_ship_time_code", "")
+        ).strip()
+        actual_buyer_protection = self._draft_selected_buyer_protection()
+        actual_schedule = self._draft_selected_buyer_protection_schedule()
+        context["submit_buyer_protection_value"] = actual_buyer_protection
+        context["submit_buyer_protection_schedule"] = actual_schedule
+        if verification.get("require_buyer_protection", False):
+            matching_steps = [
+                item
+                for item in actual_schedule
+                if int(item.get("from", 0) or 0) == 1
+                and str(item.get("serviceName", "")).strip() == expected_buyer_protection
+                and (
+                    not expected_buyer_protection_code
+                    or str(item.get("serviceCode", "")).strip() == expected_buyer_protection_code
+                )
+            ]
+            if actual_buyer_protection != expected_buyer_protection or not matching_steps:
+                raise PublishValidationError(
+                    "submit blocked: buyer protection must be reapplied and read back as "
+                    f"'{expected_buyer_protection}/{expected_buyer_protection_code}'."
+                )
+
+        assist_messages = self._collect_assist_messages()
+        context["submit_assist_messages"] = assist_messages
+        blocking_keywords = [
+            str(item).strip()
+            for item in publish_config.get(
+                "submit_blocking_assist_keywords",
+                ["\u5fc5\u586b", "\u8bf7\u586b\u5199", "\u8bf7\u5b8c\u5584"],
+            )
+            if str(item).strip()
+        ]
+        blocking_messages = [
+            message
+            for message in assist_messages
+            if self._contains_any_keyword(message, blocking_keywords)
+        ]
+        context["submit_blocking_assist_messages"] = blocking_messages
+        if blocking_messages:
+            raise PublishValidationError(
+                "submit blocked by required-field warnings: " + " | ".join(blocking_messages)
+            )
+        context["submit_required_fields_verified"] = True
+
     def _save_draft_once(self, publish_config: dict[str, Any], context: dict[str, Any]) -> None:
         draft_selector = publish_config.get("draft_selector", {})
         if not self._selector_is_configured(draft_selector):
             raise ValueError("Auto save draft is enabled but draft_selector is not configured.")
+        self._assert_expected_publish_draft(publish_config, context)
         self._install_draft_request_patch(publish_config, context)
-        self._click_with_javascript(draft_selector)
+        if self.driver:
+            start_index = self.driver.execute_script(
+                "return Array.isArray(window.__codexDraftSubmitRecords) ? window.__codexDraftSubmitRecords.length : 0;"
+            )
+            try:
+                context["draft_submit_trace_start_index"] = int(start_index or 0)
+            except (TypeError, ValueError):
+                context["draft_submit_trace_start_index"] = 0
+        try:
+            self._wait_for_element(draft_selector, clickable=True).click()
+            context["draft_submit_retry_mode"] = "webdriver_click"
+        except (ElementClickInterceptedException, ElementNotInteractableException, TimeoutException):
+            self._click_with_javascript(draft_selector)
         self._handle_optional_draft_confirmation(publish_config, context=context)
         trace_detected = self._assert_draft_request_trace(publish_config, context)
+        if not trace_detected:
+            try:
+                context["draft_submit_retry_mode"] = "webdriver_click_retry"
+                self._wait_for_element(draft_selector, clickable=True).click()
+                self._pause(0.8)
+                self._handle_optional_draft_confirmation(publish_config, context=context)
+                trace_detected = self._assert_draft_request_trace(publish_config, context)
+            except (ElementClickInterceptedException, ElementNotInteractableException, TimeoutException):
+                trace_detected = False
         if not trace_detected:
             context["draft_submit_retry_mode"] = "dispatch_event_click"
             self._dispatch_click_with_events(draft_selector)
@@ -6851,9 +10052,17 @@ class BrowserRPA:
             self._handle_optional_draft_confirmation(publish_config, context=context)
             trace_detected = self._assert_draft_request_trace(publish_config, context)
         if not trace_detected:
+            assist_messages = self._collect_assist_messages()
+            if assist_messages:
+                context["draft_assist_messages"] = assist_messages
+                required_labels = self._extract_required_labels_from_assist_messages(assist_messages)
+                if required_labels:
+                    context["draft_required_field_labels"] = required_labels
+            summary = " | ".join(str(item).strip() for item in assist_messages[:3] if str(item).strip())
             raise PublishSubmitError(
                 "Draft button was clicked but no draftSubmit request was captured. "
                 "The page likely blocked draft save due to hidden validation or disabled state."
+                + (f" assist: {summary}" if summary else "")
             )
         self._check_publish_error_state(
             publish_config.get("draft_error_detection", publish_config.get("submit_error_detection", {})),
@@ -6893,6 +10102,8 @@ class BrowserRPA:
         return False
 
     def _should_retry_draft_submit(self, error: PublishSubmitError) -> bool:
+        if self._is_draft_submit_store_blocked_error(error):
+            return False
         message = str(error or "").lower()
         retryable_keywords = [
             "系统错误",
@@ -6902,12 +10113,58 @@ class BrowserRPA:
             "network error",
             "timeout",
             "保存失败",
+            "no draftsubmit request was captured",
+            "blocked draft save due to hidden validation",
+            "必填",
+            "不能为空",
         ]
         normalized_message = str(error or "")
         for keyword in retryable_keywords:
             if keyword.lower() in message or keyword in normalized_message:
                 return True
         return False
+
+    def _contains_draft_submit_system_error_message(self, raw_message: str) -> bool:
+        message = str(raw_message or "").strip()
+        if not message:
+            return False
+        if "\u7cfb\u7edf\u9519\u8bef\uff0c\u8bf7\u7a0d\u540e\u5c1d\u8bd5" in message:
+            return True
+        normalized = re.sub(r"\s+", "", message).replace("\uff1a", ":").replace("\uff0c", ",").lower()
+        return (
+            ("\u7cfb\u7edf\u9519\u8bef" in message and "\u8bf7\u7a0d\u540e\u5c1d\u8bd5" in message)
+            or ("systemerror" in normalized and "tryagainlater" in normalized)
+        )
+
+    def _is_draft_submit_store_blocked_error(
+        self,
+        error: PublishSubmitError,
+        context: dict[str, Any] | None = None,
+    ) -> bool:
+        if not self._is_draft_submit_backend_reject_error(error):
+            return False
+        if self._contains_draft_submit_system_error_message(str(error or "")):
+            return True
+        if not context:
+            return False
+        return self._contains_draft_submit_system_error_message(
+            str(context.get("draft_submit_backend_message", ""))
+        )
+
+    def _mark_store_blocked_for_draft_save(self, context: dict[str, Any], error: PublishSubmitError) -> None:
+        backend_message = str(context.get("draft_submit_backend_message", "")).strip() or str(error or "").strip()
+        if not self._contains_draft_submit_system_error_message(backend_message):
+            backend_message = "\u7cfb\u7edf\u9519\u8bef\uff0c\u8bf7\u7a0d\u540e\u5c1d\u8bd5"
+        context["shop_blocked"] = True
+        context["shop_block_reason"] = "draft_box_full"
+        context["shop_block_message"] = backend_message
+        context["shop_skip_remaining"] = True
+
+    def _mark_image_album_full(self, context: dict[str, Any], error: ImageAlbumFullError) -> None:
+        context["shop_blocked"] = True
+        context["shop_block_reason"] = "image_album_full"
+        context["shop_block_message"] = str(error or "").strip()
+        context["shop_skip_remaining"] = True
 
     def _is_draft_submit_backend_reject_error(self, error: PublishSubmitError) -> bool:
         message = str(error or "").strip().lower()
@@ -6926,7 +10183,7 @@ class BrowserRPA:
         normalized_modes: list[str] = []
         for item in raw_modes:
             text = str(item or "").strip().lower()
-            if text not in {"full", "capture_only"}:
+            if text not in {"full", "capture_only", "identity_only"}:
                 continue
             if text not in normalized_modes:
                 normalized_modes.append(text)
@@ -7001,6 +10258,186 @@ class BrowserRPA:
                 return
             time.sleep(0.2)
 
+    def _collect_draft_submit_reapply_evidence(
+        self,
+        publish_config: dict[str, Any],
+        context: dict[str, Any],
+        trace_patch_snapshot: dict[str, Any],
+    ) -> list[str]:
+        allowed_fields = {
+            str(item).strip()
+            for item in publish_config.get("submit_reapply_nonpersistent_fields", [])
+            if str(item).strip()
+        }
+        trace = context.get("draft_submit_trace") or {}
+        response_json = trace.get("responseJson") if isinstance(trace, dict) else None
+        try:
+            response_status = int(
+                context.get("draft_submit_response_status")
+                or (trace.get("status") if isinstance(trace, dict) else 0)
+                or 0
+            )
+        except (TypeError, ValueError):
+            response_status = 0
+        response_succeeded = (
+            200 <= response_status < 300
+            and isinstance(response_json, dict)
+            and response_json.get("success") is True
+        )
+
+        required_fields: list[str] = []
+        evidence: dict[str, Any] = {}
+        actual_send_address = str(context.get("draft_send_address_value", "")).strip()
+        expected_send_address = str(context.get("send_address_id", "")).strip()
+        trace_send_address = str(trace_patch_snapshot.get("sendAddressId", "")).strip()
+        send_address_state = context.get("draft_send_address_state") or {}
+        send_address_ui_selected = bool(
+            isinstance(send_address_state, dict)
+            and send_address_state.get("selected")
+            and str(send_address_state.get("selectedText", "")).strip()
+        )
+        if (
+            "send_address" in allowed_fields
+            and not actual_send_address
+            and response_succeeded
+            and send_address_ui_selected
+            and expected_send_address
+            and trace_send_address == expected_send_address
+        ):
+            required_fields.append("send_address")
+            evidence["send_address"] = {
+                "save_response_succeeded": True,
+                "ui_selected_before_save": True,
+                "requested_value": trace_send_address,
+            }
+
+        verification = publish_config.get("draft_verification", {})
+        expected_buyer_protection = self._resolve_context_preferred_value(
+            context=context,
+            source=str(verification.get("buyer_protection_source", "")).strip(),
+            default_value=str(verification.get("buyer_protection_default_value", "")).strip(),
+        )
+        expected_buyer_protection_code = str(
+            verification.get("buyer_protection_expected_code", "")
+            or context.get("buyer_protection_ship_time_code", "")
+        ).strip()
+        actual_buyer_protection = str(context.get("draft_buyer_protection_value", "")).strip()
+        actual_buyer_schedule = list(context.get("draft_buyer_protection_schedule", []) or [])
+        buyer_ui_selected = bool(context.get("draft_buyer_protection_pre_save_selected")) and (
+            str(context.get("draft_buyer_protection_pre_save_selected_text", "")).strip()
+            == expected_buyer_protection
+        )
+        trace_buyer_steps = [
+            item
+            for item in list(trace_patch_snapshot.get("buyerProtectionSteps", []) or [])
+            if isinstance(item, dict)
+        ]
+        matching_trace_steps = [
+            item
+            for item in trace_buyer_steps
+            if int(item.get("from", 0) or 0) == 1
+            and str(item.get("serviceName", "")).strip() == expected_buyer_protection
+            and (
+                not expected_buyer_protection_code
+                or str(item.get("value", item.get("serviceCode", ""))).strip()
+                == expected_buyer_protection_code
+            )
+        ]
+        if (
+            "buyer_protection" in allowed_fields
+            and not actual_buyer_protection
+            and not actual_buyer_schedule
+            and response_succeeded
+            and buyer_ui_selected
+            and expected_buyer_protection
+            and matching_trace_steps
+        ):
+            required_fields.append("buyer_protection")
+            evidence["buyer_protection"] = {
+                "save_response_succeeded": True,
+                "ui_selected_before_save": True,
+                "requested_service_name": expected_buyer_protection,
+                "requested_service_code": str(
+                    matching_trace_steps[0].get("value", matching_trace_steps[0].get("serviceCode", ""))
+                ).strip(),
+            }
+
+        context["draft_submit_reapply_required_fields"] = required_fields
+        context["draft_submit_reapply_evidence"] = evidence
+        return required_fields
+
+    def _reopen_saved_draft_from_server(
+        self,
+        publish_config: dict[str, Any],
+        context: dict[str, Any],
+        *,
+        wait_seconds: float,
+    ) -> None:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        saved_url = str(self.driver.current_url or context.get("current_url") or "").strip()
+        parsed = urlparse(saved_url)
+        query = parse_qs(parsed.query)
+        saved_draft_id = str(
+            (query.get("draftId") or query.get("offerDraftId") or [""])[0]
+        ).strip()
+        expected_draft_id = str(publish_config.get("expected_draft_id") or "").strip()
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname != "offer-new.1688.com"
+            or parsed.path != "/popular/publish.htm"
+            or not saved_draft_id
+            or not str((query.get("catId") or [""])[0]).strip()
+            or (expected_draft_id and saved_draft_id != expected_draft_id)
+        ):
+            raise PublishValidationError(
+                "draft_verify blocked: saved URL does not identify the expected draft and category."
+            )
+
+        context["draft_server_reopen_url"] = saved_url
+        context["draft_server_reopen_draft_id"] = saved_draft_id
+        official_entry_url = (
+            "https://offer.1688.com/offer/post/fillProductInfo.htm?"
+            + urlencode({"operator": "draft2offer", "offerDraftId": saved_draft_id})
+        )
+        context["draft_server_reopen_entry_url"] = official_entry_url
+        self.driver.get("about:blank")
+        self.driver.get(official_entry_url)
+        self._pause(max(0.2, wait_seconds))
+        body_text = str(
+            self.driver.execute_script(
+                "return String((document.body && document.body.innerText) || '').slice(0, 4000);"
+            )
+            or ""
+        )
+        if "SYS_ERROR" in body_text or ("出错啦" in body_text and "系统错误" in body_text):
+            context["draft_server_reopen_fatal_page"] = body_text
+            raise PublishValidationError(
+                "draft_verify blocked: official draft reopen returned SYS_ERROR."
+            )
+        self._wait_for_publish_runtime_ready(
+            timeout_seconds=max(30.0, float(publish_config.get("runtime_ready_timeout_seconds", 180) or 180))
+        )
+        reopened_url = str(self.driver.current_url or "").strip()
+        reopened_parsed = urlparse(reopened_url)
+        reopened_query = parse_qs(reopened_parsed.query)
+        reopened_draft_id = str(
+            (reopened_query.get("draftId") or reopened_query.get("offerDraftId") or [""])[0]
+        ).strip()
+        reopened_operator = str((reopened_query.get("operator") or [""])[0]).strip()
+        if (
+            reopened_parsed.scheme != "https"
+            or reopened_parsed.hostname != "offer-new.1688.com"
+            or not reopened_parsed.path.endswith("/publish.htm")
+            or reopened_draft_id != saved_draft_id
+            or reopened_operator != "draft2offer"
+        ):
+            raise PublishValidationError(
+                "draft_verify blocked: official draft reopen changed the saved draft identity."
+            )
+        context["draft_verify_server_reopened"] = True
+        context["draft_verify_server_reopened_url"] = reopened_url
+
     def _verify_saved_draft(self, publish_config: dict[str, Any], context: dict[str, Any]) -> None:
         verification = publish_config.get("draft_verification", {})
         if not verification or not verification.get("enabled", True):
@@ -7010,11 +10447,22 @@ class BrowserRPA:
 
         self._pause(float(verification.get("settle_seconds", 1.2)))
         refreshed = False
-        if verification.get("refresh_after_save", True):
+        if verification.get("server_reopen_after_save", False):
+            refresh_wait_seconds = float(verification.get("refresh_wait_seconds", 4))
+            self._reopen_saved_draft_from_server(
+                publish_config,
+                context,
+                wait_seconds=refresh_wait_seconds,
+            )
+            refreshed = True
+        elif verification.get("refresh_after_save", True):
             refresh_wait_seconds = float(verification.get("refresh_wait_seconds", 4))
             try:
                 self.driver.refresh()
                 self._pause(refresh_wait_seconds)
+                WebDriverWait(self.driver, max(5.0, refresh_wait_seconds * 3)).until(
+                    lambda _driver: self._is_publish_form_ready()
+                )
                 refreshed = True
             except WebDriverException as exc:
                 current_url = str(self.driver.current_url or "").strip()
@@ -7022,6 +10470,9 @@ class BrowserRPA:
                     if current_url:
                         self.driver.get(current_url)
                         self._pause(refresh_wait_seconds)
+                        WebDriverWait(self.driver, max(5.0, refresh_wait_seconds * 3)).until(
+                            lambda _driver: self._is_publish_form_ready()
+                        )
                         refreshed = True
                 except WebDriverException:
                     refreshed = False
@@ -7034,8 +10485,38 @@ class BrowserRPA:
         assist_messages = self._collect_assist_messages()
         context["draft_assist_messages"] = assist_messages
         context["draft_required_field_labels"] = self._extract_required_labels_from_assist_messages(assist_messages)
-        context["draft_main_image_present"] = self._draft_main_image_present()
+        context["draft_title_value"] = self._draft_title_value()
+        main_image_wait_seconds = max(
+            0.0,
+            float(verification.get("main_image_wait_seconds", 0) or 0),
+        )
+        main_image_poll_seconds = max(
+            0.1,
+            float(verification.get("main_image_poll_seconds", 0.8) or 0.8),
+        )
+        require_square_main_image = bool(verification.get("require_square_main_image", False))
+        main_image_state = self._draft_main_image_state()
+        main_image_state["present"] = self._draft_main_image_present()
+        if refreshed and main_image_wait_seconds > 0:
+            wait_deadline = time.monotonic() + main_image_wait_seconds
+            wait_attempts = 0
+            while time.monotonic() < wait_deadline:
+                main_image_ready = bool(main_image_state.get("present")) and (
+                    not require_square_main_image or bool(main_image_state.get("square"))
+                )
+                if main_image_ready:
+                    break
+                wait_attempts += 1
+                remaining = wait_deadline - time.monotonic()
+                self._pause(min(main_image_poll_seconds, max(0.0, remaining)))
+                main_image_state = self._draft_main_image_state()
+                main_image_state["present"] = self._draft_main_image_present()
+            context["draft_main_image_wait_attempts"] = wait_attempts
+        context["draft_main_image_state"] = main_image_state
+        context["draft_main_image_present"] = bool(main_image_state.get("present"))
+        context["draft_main_image_square"] = bool(main_image_state.get("square"))
         context["draft_description_present"] = self._draft_description_present()
+        context["draft_description_image_count"] = self._draft_description_image_count()
         context["draft_spec_values"] = self._collect_spec_values()
         context["draft_send_address_value"] = self._draft_selected_send_address()
         context["draft_logistics_dimensions"] = self._draft_logistics_dimension_values()
@@ -7080,8 +10561,13 @@ class BrowserRPA:
                 context["draft_required_field_labels"] = self._extract_required_labels_from_assist_messages(
                     assist_messages
                 )
-                context["draft_main_image_present"] = self._draft_main_image_present()
+                main_image_state = self._draft_main_image_state()
+                main_image_state["present"] = self._draft_main_image_present()
+                context["draft_main_image_state"] = main_image_state
+                context["draft_main_image_present"] = bool(main_image_state.get("present"))
+                context["draft_main_image_square"] = bool(main_image_state.get("square"))
                 context["draft_description_present"] = self._draft_description_present()
+                context["draft_description_image_count"] = self._draft_description_image_count()
                 context["draft_spec_values"] = self._collect_spec_values()
                 context["draft_send_address_value"] = self._draft_selected_send_address()
                 context["draft_logistics_dimensions"] = self._draft_logistics_dimension_values()
@@ -7095,20 +10581,118 @@ class BrowserRPA:
                     context["draft_buyer_protection_grace_recovered"] = True
                     break
             context["draft_buyer_protection_grace_recheck_count"] = grace_recheck_count
-        if refreshed and self._contains_any_keyword(combined_assist, forbidden_keywords):
-            self._annotate_page_error_context(
-                context,
-                stage_name="draft_verify",
-                error_text=combined_assist,
-                error_category="business_validation",
-            )
-            raise PublishValidationError(f"draft_verify blocked by assist warnings: {combined_assist}")
+        submit_reapply_required_fields = self._collect_draft_submit_reapply_evidence(
+            publish_config,
+            context,
+            trace_patch_snapshot,
+        )
+        if verification.get("require_title", False):
+            actual_title = str(context.get("draft_title_value", "")).strip()
+            expected_title = re.sub(r"\s+", " ", str(context.get("title", "")).strip())
+            if not actual_title:
+                raise PublishValidationError("draft_verify blocked: title did not persist after save.")
+            if expected_title and re.sub(r"\s+", " ", actual_title) != expected_title:
+                raise PublishValidationError("draft_verify blocked: title changed after save.")
 
         if verification.get("require_main_image", True) and not context["draft_main_image_present"]:
             raise PublishValidationError("draft_verify blocked: main image did not persist after save.")
 
+        if require_square_main_image and not context.get("draft_main_image_square", False):
+            raise PublishValidationError("draft_verify blocked: main image is not square after save.")
+
+        minimum_description_image_count = max(
+            0, int(verification.get("minimum_description_image_count", 0) or 0)
+        )
+        if context["draft_description_image_count"] < minimum_description_image_count:
+            description_image_wait_seconds = max(
+                0.0,
+                float(verification.get("description_image_wait_seconds", 0) or 0),
+            )
+            description_image_poll_seconds = max(
+                0.1,
+                float(verification.get("description_image_poll_seconds", 0.8) or 0.8),
+            )
+            if refreshed and description_image_wait_seconds > 0:
+                wait_deadline = time.monotonic() + description_image_wait_seconds
+                wait_attempts = 0
+                while time.monotonic() < wait_deadline:
+                    wait_attempts += 1
+                    remaining = wait_deadline - time.monotonic()
+                    self._pause(min(description_image_poll_seconds, max(0.0, remaining)))
+                    context["draft_description_image_count"] = self._draft_description_image_count()
+                    if context["draft_description_image_count"] >= minimum_description_image_count:
+                        context["draft_description_images_delayed"] = True
+                        break
+                context["draft_description_image_wait_attempts"] = wait_attempts
+        if context["draft_description_image_count"] < minimum_description_image_count:
+            raise PublishValidationError(
+                "draft_verify blocked: description images did not persist after save "
+                f"({context['draft_description_image_count']}/{minimum_description_image_count})."
+            )
+        if context["draft_description_image_count"] > 0:
+            context["draft_description_present"] = True
         if verification.get("require_description", True) and not context["draft_description_present"]:
             raise PublishValidationError("draft_verify blocked: description content did not persist after save.")
+
+        stale_assist_keywords = [
+            str(item).strip()
+            for item in verification.get(
+                "stale_assist_keywords_when_description_images_ready",
+                ["\u8bf7\u586b\u5199\u56fe\u6587\u8be6\u60c5"],
+            )
+            if str(item).strip()
+        ]
+        stale_assist_messages_ignored = []
+        effective_assist_messages = list(assist_messages)
+        if (
+            minimum_description_image_count > 0
+            and context["draft_description_image_count"] >= minimum_description_image_count
+        ):
+            stale_assist_messages_ignored = [
+                message
+                for message in assist_messages
+                if self._contains_any_keyword(message, stale_assist_keywords)
+            ]
+            if stale_assist_messages_ignored:
+                effective_assist_messages = [
+                    message
+                    for message in assist_messages
+                    if message not in stale_assist_messages_ignored
+                ]
+        nonpersistent_assist_messages_ignored: list[str] = []
+        if "buyer_protection" in submit_reapply_required_fields:
+            nonpersistent_assist_messages_ignored = [
+                message
+                for message in effective_assist_messages
+                if "\u53d1\u8d27\u65f6\u95f4" in message and "\u5fc5\u586b" in message
+            ]
+            if nonpersistent_assist_messages_ignored:
+                effective_assist_messages = [
+                    message
+                    for message in effective_assist_messages
+                    if message not in nonpersistent_assist_messages_ignored
+                ]
+        context["draft_stale_assist_messages_ignored"] = stale_assist_messages_ignored
+        context["draft_nonpersistent_assist_messages_ignored"] = nonpersistent_assist_messages_ignored
+        context["draft_assist_messages_effective"] = effective_assist_messages
+        context["draft_required_field_labels"] = self._extract_required_labels_from_assist_messages(
+            effective_assist_messages
+        )
+        effective_combined_assist = " | ".join(effective_assist_messages)
+        buyer_protection_required_warning = (
+            "\u53d1\u8d27\u65f6\u95f4" in effective_combined_assist
+            and "\u5fc5\u586b" in effective_combined_assist
+        )
+        if refreshed and self._contains_any_keyword(effective_combined_assist, forbidden_keywords):
+            self._annotate_page_error_context(
+                context,
+                stage_name="draft_verify",
+                error_text=effective_combined_assist,
+                error_category="business_validation",
+            )
+            raise PublishValidationError(
+                f"draft_verify blocked by assist warnings: {effective_combined_assist}"
+            )
 
         if verification.get("require_specs", True):
             required_spec_labels = [
@@ -7121,18 +10705,35 @@ class BrowserRPA:
                     raise PublishValidationError(f"draft_verify blocked: spec '{label}' is empty after save.")
 
         if verification.get("require_send_address", False):
+            strict_send_address_persist = bool(verification.get("strict_send_address_persist", False))
             actual_send_address = str(context.get("draft_send_address_value", "")).strip()
+            expected_send_address = str(context.get("send_address_id", "")).strip()
+            if actual_send_address and expected_send_address and actual_send_address.isdigit():
+                if actual_send_address != expected_send_address:
+                    raise PublishValidationError(
+                        "draft_verify blocked: persisted send address does not match the selected address."
+                    )
             if not actual_send_address:
                 trace_send_address = str(trace_patch_snapshot.get("sendAddressId", "")).strip()
                 if trace_send_address:
-                    actual_send_address = trace_send_address
-                    context["draft_send_address_value"] = trace_send_address
-                    context["draft_send_address_source"] = "draft_submit_trace"
-            if not actual_send_address:
+                    context["draft_send_address_trace"] = trace_send_address
+                    if not strict_send_address_persist:
+                        actual_send_address = trace_send_address
+                        context["draft_send_address_value"] = trace_send_address
+                        context["draft_send_address_source"] = "draft_submit_trace"
+            if not actual_send_address and "send_address" not in submit_reapply_required_fields:
                 raise PublishValidationError("draft_verify blocked: send address did not persist after save.")
+            if not actual_send_address:
+                context["draft_send_address_source"] = "submit_reapply_required"
 
         if verification.get("require_logistics_dimensions", False):
             dimension_map = dict(context.get("draft_logistics_dimensions", {}) or {})
+            trace_dimensions, trace_dimension_source = self._extract_draft_trace_logistics_dimensions(
+                context.get("draft_submit_trace")
+            )
+            if trace_dimensions:
+                context["draft_logistics_dimensions_trace"] = trace_dimensions
+                context["draft_logistics_dimensions_trace_source"] = trace_dimension_source
             required_fields = [
                 (
                     str(item.get("name", "")).strip().lower(),
@@ -7152,6 +10753,18 @@ class BrowserRPA:
                     ("height", str(context.get("height_cm", "")).strip()),
                     ("weight", str(context.get("weight_g", "")).strip()),
                 ]
+            trace_applied = False
+            for name, expected in required_fields:
+                if not expected or str(dimension_map.get(name, "")).strip():
+                    continue
+                trace_value = str(trace_dimensions.get(name, "")).strip()
+                if not trace_value:
+                    continue
+                dimension_map[name] = trace_value
+                trace_applied = True
+            if trace_applied:
+                context["draft_logistics_dimensions"] = dimension_map
+                context["draft_logistics_dimensions_source"] = "draft_submit_trace"
             missing_fields = [
                 name
                 for name, expected in required_fields
@@ -7164,6 +10777,7 @@ class BrowserRPA:
                 )
 
         if verification.get("require_buyer_protection", False):
+            buyer_protection_reapply_required = "buyer_protection" in submit_reapply_required_fields
             desired_steps = [
                 {
                     key: value
@@ -7239,7 +10853,7 @@ class BrowserRPA:
                     for item in actual_schedule
                     if int(item.get("from", 0) or 0) > 0 and str(item.get("serviceName", "")).strip()
                 ]
-                if simplified_actual != expected_schedule and trace_steps:
+                if simplified_actual != expected_schedule and trace_steps and not strict_buyer_protection_persist:
                     trace_by_name = [
                         {
                             key: value
@@ -7264,11 +10878,16 @@ class BrowserRPA:
                         simplified_actual = expected_schedule
                         context["draft_buyer_protection_schedule_source"] = "draft_submit_trace"
                 if simplified_actual != expected_schedule:
-                    if strict_buyer_protection_persist or (refreshed and buyer_protection_required_warning):
+                    if not buyer_protection_reapply_required and (
+                        strict_buyer_protection_persist or (refreshed and buyer_protection_required_warning)
+                    ):
                         raise PublishValidationError(
                             "draft_verify blocked: buyer protection ship time schedule did not persist after save."
                         )
-                    context["draft_buyer_protection_schedule_unverified"] = True
+                    if buyer_protection_reapply_required:
+                        context["draft_buyer_protection_schedule_source"] = "submit_reapply_required"
+                    else:
+                        context["draft_buyer_protection_schedule_unverified"] = True
             expected_value = self._resolve_context_preferred_value(
                 context=context,
                 source=str(verification.get("buyer_protection_source", "")).strip(),
@@ -7278,14 +10897,36 @@ class BrowserRPA:
             if not actual_value:
                 trace_value = str(trace_patch_snapshot.get("buyerProtectionServiceName", "")).strip()
                 if trace_value:
-                    actual_value = trace_value
-                    context["draft_buyer_protection_value_source"] = "draft_submit_trace"
+                    context["draft_buyer_protection_value_trace"] = trace_value
+                    if not strict_buyer_protection_persist:
+                        actual_value = trace_value
+                        context["draft_buyer_protection_value_source"] = "draft_submit_trace"
             if expected_value and actual_value != expected_value:
-                if strict_buyer_protection_persist or (refreshed and buyer_protection_required_warning):
+                if not buyer_protection_reapply_required and (
+                    strict_buyer_protection_persist or (refreshed and buyer_protection_required_warning)
+                ):
                     raise PublishValidationError(
                         "draft_verify blocked: buyer protection ship time did not persist after save."
                     )
-                context["draft_buyer_protection_value_unverified"] = True
+                if buyer_protection_reapply_required:
+                    context["draft_buyer_protection_value_source"] = "submit_reapply_required"
+                else:
+                    context["draft_buyer_protection_value_unverified"] = True
+            expected_service_code = str(
+                verification.get("buyer_protection_expected_code", "")
+                or context.get("buyer_protection_ship_time_code", "")
+            ).strip()
+            if expected_service_code and actual_schedule:
+                matching_code_steps = [
+                    item
+                    for item in actual_schedule
+                    if int(item.get("from", 0) or 0) == 1
+                    and str(item.get("serviceCode", "")).strip() == expected_service_code
+                ]
+                if not matching_code_steps:
+                    raise PublishValidationError(
+                        "draft_verify blocked: buyer protection service code does not match after save."
+                    )
 
     def _collect_assist_messages(self) -> list[str]:
         if not self.driver:
@@ -7302,21 +10943,34 @@ class BrowserRPA:
         )
         return [str(item).strip() for item in (messages or []) if str(item).strip()]
 
-    def _draft_main_image_present(self) -> bool:
+    def _draft_title_value(self) -> str:
         if not self.driver:
             raise RuntimeError("Browser has not been opened.")
         payload = self.driver.execute_script(
             """
-            const slot = document.querySelector('#guid-primaryPicture .picture-sort-item');
-            const wrapper = slot ? slot.querySelector('.module-picture-cover-wrapper') : null;
-            const img = slot ? slot.querySelector('img') : null;
-            const domPresent = Boolean(
-              wrapper &&
-              !(wrapper.className || '').includes('cover-empty') &&
-              img &&
-              img.getAttribute('src')
-            );
+            const sdk = window.SellPublishSdk;
+            const state = sdk && sdk.engine && sdk.engine.getJsonState ? sdk.engine.getJsonState() : {};
+            const titleProps = ((((state || {}).components || {}).subject || {}).props || {});
+            const stateValue = titleProps.value;
+            const normalizedStateValue = String(
+              stateValue && typeof stateValue === 'object'
+                ? (stateValue.value || stateValue.text || stateValue.title || '')
+                : (stateValue || '')
+            ).replace(/\\s+/g, ' ').trim();
+            if (normalizedStateValue) {
+              return normalizedStateValue;
+            }
+            const input = document.querySelector('#guid-title input[maxlength="60"], #guid-title input');
+            return input ? String(input.value || '').replace(/\\s+/g, ' ').trim() : '';
+            """
+        )
+        return str(payload or "").strip()
 
+    def _draft_main_image_state(self) -> dict[str, Any]:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        payload = self.driver.execute_script(
+            """
             const sdk = window.SellPublishSdk;
             const state = sdk && sdk.engine && sdk.engine.getJsonState ? sdk.engine.getJsonState() : {};
             const components = (state && state.components) || {};
@@ -7329,26 +10983,140 @@ class BrowserRPA:
             const imageList = Array.isArray(primaryValue.imageList)
               ? primaryValue.imageList
               : (Array.isArray(props.imageList) ? props.imageList : []);
-            const statePresent = imageList.some((item) => {
-              if (!item || typeof item !== 'object') return false;
-              const url =
-                item.url ||
+            const firstStateImage = imageList.find((item) => {
+               if (!item || typeof item !== 'object') return false;
+               const url =
+                 item.url ||
                 item.imageUrl ||
                 item.imgUrl ||
                 item.fileUrl ||
-                item.downloadUrl ||
-                '';
-              return String(url || '').trim().length > 0;
-            });
+                 item.downloadUrl ||
+                 '';
+               return String(url || '').trim().length > 0;
+            }) || {};
+            const firstStateUrl = String(
+              firstStateImage.url ||
+              firstStateImage.imageUrl ||
+              firstStateImage.imgUrl ||
+              firstStateImage.fileUrl ||
+              firstStateImage.downloadUrl ||
+              ''
+            ).trim();
+            const slot = document.querySelector(
+              '#guid-primaryPicture .picture-sort-list .picture-sort-item'
+            );
+            const wrapper = slot ? slot.querySelector('.module-picture-cover-wrapper') : null;
+            const domImage = wrapper
+              ? wrapper.querySelector('.picture-cover-content img, img')
+              : null;
+            const domPresent = Boolean(
+              wrapper &&
+              !(wrapper.className || '').includes('cover-empty') &&
+              domImage &&
+              domImage.getAttribute('src')
+            );
+            const width = Number(
+              firstStateImage.imageWidth ||
+              firstStateImage.width ||
+              (domImage && domImage.naturalWidth) ||
+              0
+            );
+            const height = Number(
+              firstStateImage.imageHeight ||
+              firstStateImage.height ||
+              (domImage && domImage.naturalHeight) ||
+              0
+            );
+            const statePresent = Boolean(firstStateUrl);
             return {
               domPresent,
               statePresent,
+              present: Boolean(domPresent || statePresent),
+              square: Boolean(width > 0 && height > 0 && width === height),
+              width,
+              height,
+              url: firstStateUrl || String((domImage && domImage.src) || '').trim(),
             };
             """
         )
         if isinstance(payload, dict):
-            return bool(payload.get("domPresent") or payload.get("statePresent"))
-        return bool(payload)
+            result = dict(payload)
+            if "present" not in result:
+                result["present"] = bool(result.get("domPresent") or result.get("statePresent"))
+            return result
+        return {"present": bool(payload), "square": False}
+
+    def _draft_main_image_present(self) -> bool:
+        return bool(self._draft_main_image_state().get("present"))
+
+    def _prepare_main_image_slot(self, step: dict[str, Any], context: dict[str, Any]) -> bool:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        if not bool(step.get("ensure_square_first_image", False)):
+            return False
+
+        state = self.driver.execute_script(
+            """
+            const sdk = window.SellPublishSdk;
+            const runtimeState = sdk && sdk.engine && sdk.engine.getJsonState ? sdk.engine.getJsonState() : {};
+            const primaryProps = ((((runtimeState || {}).components || {}).primaryPicture || {}).props) || {};
+            const primaryValue = primaryProps && typeof primaryProps.value === 'object' && primaryProps.value
+              ? primaryProps.value
+              : {};
+            const imageList = Array.isArray(primaryValue.imageList)
+              ? primaryValue.imageList
+              : (Array.isArray(primaryProps.imageList) ? primaryProps.imageList : []);
+            const firstItem = imageList.find((item) => item && typeof item === 'object' && String(item.url || '').trim()) || null;
+            const domImage = document.querySelector('#guid-primaryPicture .picture-sort-item img');
+            const width = Number((firstItem && (firstItem.imageWidth || firstItem.width)) || (domImage && domImage.naturalWidth) || 0);
+            const height = Number((firstItem && (firstItem.imageHeight || firstItem.height)) || (domImage && domImage.naturalHeight) || 0);
+            const url = String((firstItem && firstItem.url) || (domImage && domImage.src) || '').trim();
+            return {
+              present: Boolean(url),
+              square: Boolean(url && width > 0 && height > 0 && width === height),
+              width,
+              height,
+              url,
+            };
+            """
+        )
+        state = state if isinstance(state, dict) else {}
+        context["main_image_existing_state"] = state
+        if not bool(state.get("present")):
+            return False
+        if bool(state.get("square")):
+            existing_url = str(state.get("url", "")).strip()
+            if existing_url:
+                context["main_image_uploaded_urls"] = [existing_url]
+            context["main_image_reused_square"] = True
+            return True
+
+        if not bool(step.get("replace_existing_non_square", True)):
+            raise PublishValidationError("Existing first main image is not square and replacement is disabled.")
+        deleted = bool(
+            self.driver.execute_script(
+                """
+                const firstSlot = document.querySelector('#guid-primaryPicture .picture-sort-item');
+                if (!firstSlot) return false;
+                const deleteLink = Array.from(firstSlot.querySelectorAll('.picture-cover-actions a, a.link'))
+                  .find((node) => String(node.innerText || node.textContent || '').trim() === '删除');
+                if (!deleteLink) return false;
+                deleteLink.click();
+                return true;
+                """
+            )
+        )
+        if not deleted:
+            raise PublishValidationError("Existing non-square first main image could not be removed.")
+        try:
+            WebDriverWait(
+                self.driver,
+                float(step.get("main_image_replace_wait_seconds", 5.0)),
+            ).until(lambda _driver: not self._draft_main_image_present())
+        except TimeoutException as exc:
+            raise PublishValidationError("Existing non-square first main image did not clear in time.") from exc
+        context["main_image_replaced_non_square"] = True
+        return False
 
     def _draft_description_present(self) -> bool:
         if not self.driver:
@@ -7369,6 +11137,29 @@ class BrowserRPA:
             )
         )
 
+    def _draft_description_image_count(self) -> int:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        payload = self.driver.execute_script(
+            """
+            const sdk = window.SellPublishSdk;
+            const state = sdk && sdk.engine && sdk.engine.getJsonState ? sdk.engine.getJsonState() : {};
+            const value = ((((state || {}).components || {}).description || {}).props || {}).value || {};
+            const detailList = Array.isArray(value.detailList) ? value.detailList : [];
+            const stateHtml = detailList.map((item) => String((item || {}).content || '')).join('');
+            const textarea = document.querySelector('#tinyMCE-0');
+            const textareaHtml = textarea ? String(textarea.value || '') : '';
+            const editor = window.tinyMCE && window.tinyMCE.get && window.tinyMCE.get('tinyMCE-0');
+            const editorHtml = editor ? String(editor.getContent() || '') : '';
+            const html = stateHtml || textareaHtml || editorHtml;
+            return (html.match(/<img\\b/gi) || []).length;
+            """
+        )
+        try:
+            return max(0, int(payload or 0))
+        except (TypeError, ValueError):
+            return 0
+
     def _collect_spec_values(self) -> dict[str, str]:
         if not self.driver:
             raise RuntimeError("Browser has not been opened.")
@@ -7378,7 +11169,7 @@ class BrowserRPA:
             const result = {};
             sections.forEach((section) => {
               const label = (section.querySelector('.nak-label')?.innerText || '').replace(/\\s+/g, ' ').trim();
-              const values = Array.from(section.querySelectorAll('input'))
+              const values = Array.from(section.querySelectorAll('.value-select-item:not(.resident) input'))
                 .map((node) => (node.value || '').replace(/\\s+/g, ' ').trim())
                 .filter(Boolean);
               if (label) {
@@ -7466,6 +11257,7 @@ class BrowserRPA:
               const state = sdk && sdk.engine && sdk.engine.getJsonState ? sdk.engine.getJsonState() : {};
               const props = (((state || {}).components || {}).officialLogistics || {}).props || {};
               const value = props.value && typeof props.value === 'object' ? props.value : {};
+              const offerInfo = value.offerInfo && typeof value.offerInfo === 'object' ? value.offerInfo : {};
               const skuInfoCandidates = [];
               if (Array.isArray(value.skuInfo)) {
                 skuInfoCandidates.push(...value.skuInfo);
@@ -7492,6 +11284,15 @@ class BrowserRPA:
               };
               if (Object.values(stateResult).some((item) => trimText(item))) {
                 return stateResult;
+              }
+              const offerInfoResult = {
+                length: firstNonEmpty(offerInfo.length, offerInfo.lengthCm),
+                width: firstNonEmpty(offerInfo.width, offerInfo.widthCm),
+                height: firstNonEmpty(offerInfo.height, offerInfo.heightCm),
+                weight: firstNonEmpty(offerInfo.weight, offerInfo.weightG),
+              };
+              if (Object.values(offerInfoResult).some((item) => trimText(item))) {
+                return offerInfoResult;
               }
               return null;
             };
@@ -7739,7 +11540,11 @@ class BrowserRPA:
         ).strip("_") or "product"
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         target = screenshot_dir / f"{safe_name}_{timestamp}.png"
-        self.driver.save_screenshot(str(target))
+        try:
+            self.driver.save_screenshot(str(target))
+        except Exception as exc:
+            print(f"[WARN] Skip screenshot capture due browser error: {exc}")
+            return
         self.last_screenshot_path = str(target)
         print(f"[INFO] Saved screenshot: {target}")
         self._capture_html_snapshot(safe_name, timestamp)
@@ -7753,6 +11558,10 @@ class BrowserRPA:
         )
         snapshot_dir.mkdir(parents=True, exist_ok=True)
         target = snapshot_dir / f"{safe_name}_{timestamp}.html"
-        target.write_text(self.driver.page_source, encoding="utf-8")
+        try:
+            target.write_text(self.driver.page_source, encoding="utf-8")
+        except Exception as exc:
+            print(f"[WARN] Skip html snapshot capture due browser error: {exc}")
+            return
         self.last_html_snapshot_path = str(target)
         print(f"[INFO] Saved html snapshot: {target}")

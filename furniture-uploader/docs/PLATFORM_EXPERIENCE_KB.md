@@ -41,6 +41,37 @@
 - 每切换一行后重新扫描当前 React DOM，避免第一行切换引起表格重渲染后继续使用失效的 WebElement。
 - 提交前的 `skuTable` 状态写入和提交后复核都必须覆盖全部匹配索引；任一重复行仍在线时，该任务不得记为成功。
 - 若目标条形码的全部匹配行就是商品当前全部在线 SKU，批量下架会导致零在线 SKU，仍按 `sole_sku_requires_product_offline` 业务异常停止并钉钉告警，不自动整商品下架。
+## 2026-07-30 Managed Update (Buyer-Protection Shipping Time)
+
+- For the current 1688 listing contract, `24小时发货` maps to service code `essxsfh` in `buyerProtection.channelRenderMap.dsc`.
+- Keep the display name and service code synchronized in the page-state patch, `draftSubmit` patch, persisted schedule verification, submit-time reapply, and success reconciliation.
+- A working normal-browser draft page does not prove the dedicated automation Profile is healthy. Compare the same official draft URL under both sessions before changing selectors or deleting/rebuilding a draft.
+
+## 2026-07-29 Managed Update (Independent Draft Persistence)
+
+- A successful `draftSubmit` response, matching response ID, and same-session page reload are necessary but not sufficient. Persistent acceptance requires a fresh official `draft2offer` reopen and exact full-field checks.
+- Never use `offer-new ... operator=new&catId=...&draftId=...` as repair execution or persistence evidence. It can render a valid empty form for the expected ID while the official draft entry is unusable.
+- `SYS_ERROR` can be returned in the initial publish HTML before any XHR/fetch request. Capture URL, body text, operation code, screenshot, and boot-network records, then classify the draft entry as unavailable.
+- Use non-target draft controls before diagnosing one draft as corrupt. For `木刻理想`, the target and two control drafts all returned `SYS_ERROR`, which indicates account/platform draft-entry failure.
+- On an independent-field failure, write `draft_verification_failed` to the formal audit and block approval/submit. Do not preserve a false `draft_pending_review` state from an earlier same-session check.
+
+## 2026-07-29 Managed Update (1688 Draft Identity and Recovery Links)
+
+- Existing-draft editing should start from `https://offer.1688.com/offer/post/fillProductInfo.htm?operator=draft2offer&offerDraftId=<id>`, then verify the final URL and `SellPublishSdk` state expose the same ID.
+- Do not trust a successful click or HTTP 200 alone. A repair save must prove the expected ID in the outgoing `draftSubmit` URL/body and in the successful JSON response.
+- The current platform may redirect the formal entry to `offer-new.1688.com/popular/publish.htm`. If the page is complete but shows `SYS_ERROR`, preserve the error code and screenshot and classify the draft as unavailable.
+- The product-management draft box is the authoritative recovery source when a direct URL fails. Preserve each visible row's full text, all links and `href` values, row/link/descendant `data-*` attributes, and extracted `draftId/offerDraftId` values before choosing an edit action.
+- A `SYS_ERROR` does not prove that a draft is absent. Never create a replacement draft until the draft-box evidence and management entry establish that no recoverable historical draft exists and the workflow policy is explicitly changed.
+- CTG0286 live evidence confirmed both draft IDs in a 5-row draft box. Clicking the old row's actual “继续发布商品” link still opened the matching ID and returned `SYS_ERROR`; direct navigation versus management-page click therefore does not explain the failure.
+- Store identity elements can go stale or temporarily disappear during management-page React re-render. Retry identity observation briefly and retain the body-text fallback instead of treating one empty read as a wrong account.
+
+## 2026-07-28 Managed Update (1688 Draft Re-Render)
+
+- Live finding: reloading between image-picker batches can leave later steps successful in the run log while title, primary picture, sale specs, and logistics are empty in the final React state.
+- A text value left in `.value-select-item.resident input` is not a committed SKU specification. Pressing Tab creates a `.value-select-item:not(.resident)` item; Enter did not commit on the observed page.
+- Before draft save, repair fields in this order: square main image, committed specs, title, then core price/inventory/description state. Do not re-upload completed detail batches.
+- Verify the exact payload title and exact committed spec set immediately before save. Presence-only checks can accept stale or wrong values.
+- Keep the pre-save guard fail-closed. A failed guard is evidence that no draft save was attempted, not evidence that the draft is repaired.
 
 ## 2026-03-26 Managed Update
 
@@ -212,3 +243,23 @@
 - 发现新的稳定上传方式
 - 修掉一个平台级坑
 - 总结出可以复用到同平台其他页面的实现
+## 2026-07-28 Live Finding: 1688 SKU Specification Entry
+
+- Scope: `#guid-saleProp .module-spec-decorator` on the current 1688 publish page.
+- Color accepts direct Chinese text. The verified sequence is: scroll the input into view, click the nearest `.value-select-container[aria-haspopup="true"]`, focus the input, clear and type the Chinese value, then press Tab.
+- Do not require an exact suggestion option and do not choose the first standard color. The standard color-family overlay is optional UI assistance.
+- Acceptance requires the expected value in `.value-select-item:not(.resident)` and the local required-field warning to be absent. Text left only in the resident input is not committed.
+- Apply the same direct-entry and read-back rule to size.
+- Never click a direct-save confirmation when the modal states that incomplete specification data will be cleared.
+
+## 2026-07-29 SQL Server Driver Finding
+
+- The executor has ODBC Driver 17, while the development machine currently exposes SQL Server Native Client 10.0.
+- Read-only lifecycle probes must resolve an installed SQL Server driver; a hard-coded ODBC 17 dependency can fail before any query is issued.
+- Driver compatibility does not relax the data gate: the current row must still match all four lifecycle fields exactly.
+
+## 2026-07-28 Required Specification Review Rule
+
+- A required 1688 specification must be checked for exact persisted text after refresh; non-empty alone is insufficient.
+- Direct Chinese input plus Tab is valid for color, but review must compare the committed value with the payload.
+- For CTG028601N1416V01, expected persisted values are color `胡桃色` and size `48/40/50`.

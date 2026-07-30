@@ -1,13 +1,7 @@
-import pyodbc
+from jst_readonly_db import connect_jst_readonly
 
-conn = pyodbc.connect(
-    'DRIVER={SQL Server Native Client 10.0};'
-    'SERVER=218.93.191.21;'
-    'DATABASE=JianSun;'
-    'UID=itread;'
-    'PWD=eZR3DJd2;'
-    'Connection Timeout=10'
-)
+
+conn = connect_jst_readonly()
 cursor = conn.cursor()
 
 print("=" * 60)
