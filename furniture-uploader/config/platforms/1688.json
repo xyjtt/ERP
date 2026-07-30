@@ -160,13 +160,13 @@
       "require_buyer_protection": true,
       "strict_buyer_protection_persist": true,
       "buyer_protection_source": "buyer_protection_ship_time",
-      "buyer_protection_default_value": "15天发货",
-      "buyer_protection_expected_code": "swtfh",
+      "buyer_protection_default_value": "24小时发货",
+      "buyer_protection_expected_code": "essxsfh",
       "buyer_protection_step_template": [
         {
           "from": 1,
-          "service_name": "15天发货",
-          "service_code": "swtfh"
+          "service_name": "24小时发货",
+          "service_code": "essxsfh"
         }
       ],
       "require_specs": true,
@@ -190,12 +190,12 @@
       "capture_body_chars": 4000,
       "buyer_protection_include_sps_code": false,
       "buyer_protection_source": "buyer_protection_ship_time",
-      "buyer_protection_default_value": "15天发货",
+      "buyer_protection_default_value": "24小时发货",
       "buyer_protection_step_template": [
         {
           "from": 1,
-          "service_name": "15天发货",
-          "service_code": "swtfh"
+          "service_name": "24小时发货",
+          "service_code": "essxsfh"
         }
       ],
       "quotation_type_text": "按产品规格报价",
@@ -217,12 +217,12 @@
       "enabled": true,
       "buyer_protection_include_sps_code": false,
       "buyer_protection_source": "buyer_protection_ship_time",
-      "buyer_protection_default_value": "15天发货",
+      "buyer_protection_default_value": "24小时发货",
       "buyer_protection_step_template": [
         {
           "from": 1,
-          "service_name": "15天发货",
-          "service_code": "swtfh"
+          "service_name": "24小时发货",
+          "service_code": "essxsfh"
         }
       ],
       "delivery_service_default_ids": [
@@ -652,7 +652,7 @@
         "name": "buyer_protection_ship_time",
         "action": "ant_select",
         "source": "buyer_protection_ship_time",
-        "default_value": "15天发货",
+        "default_value": "24小时发货",
         "required": false,
         "select_first_option_if_unmatched": true,
         "selector": {

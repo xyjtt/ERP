@@ -1,5 +1,11 @@
 # Platform Experience Knowledge Base
 
+## 2026-07-30 Managed Update (Buyer-Protection Shipping Time)
+
+- For the current 1688 listing contract, `24小时发货` maps to service code `essxsfh` in `buyerProtection.channelRenderMap.dsc`.
+- Keep the display name and service code synchronized in the page-state patch, `draftSubmit` patch, persisted schedule verification, submit-time reapply, and success reconciliation.
+- A working normal-browser draft page does not prove the dedicated automation Profile is healthy. Compare the same official draft URL under both sessions before changing selectors or deleting/rebuilding a draft.
+
 ## 2026-07-29 Managed Update (Independent Draft Persistence)
 
 - A successful `draftSubmit` response, matching response ID, and same-session page reload are necessary but not sufficient. Persistent acceptance requires a fresh official `draft2offer` reopen and exact full-field checks.

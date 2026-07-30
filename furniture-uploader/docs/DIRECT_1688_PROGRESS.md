@@ -1,5 +1,10 @@
 # DIRECT 1688 Progress
 
+## 2026-07-30 Managed Update (24-Hour Shipping Requirement)
+
+- Buyer-protection shipping time is now `24小时发货` with platform code `essxsfh` across field entry, draft persistence, request patching, submit reapply, and reconciliation gates.
+- The user's normal Edge session opens the target draft successfully. The dedicated automation profile still returns `SYS_ERROR`, so real repair/save/submit remains blocked on automation-session refresh rather than field selectors.
+
 ## 2026-07-29 Managed Update (Independent Draft Acceptance Result)
 
 - User-authorized deletion removed the two corrupt historical CTG0286 drafts. One replacement draft was created: `6a69bee6e4b01cad1b297a52`.

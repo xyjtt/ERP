@@ -369,8 +369,8 @@ def extract_submit_reconciliation_evidence(
     payload: dict[str, Any],
     failure_payload: dict[str, Any],
     *,
-    expected_buyer_protection: str = "15天发货",
-    expected_buyer_protection_code: str = "swtfh",
+    expected_buyer_protection: str = "24小时发货",
+    expected_buyer_protection_code: str = "essxsfh",
 ) -> dict[str, Any]:
     task_id = str(payload.get("task_id") or "").strip()
     if str(failure_payload.get("task_id") or "").strip() != task_id:

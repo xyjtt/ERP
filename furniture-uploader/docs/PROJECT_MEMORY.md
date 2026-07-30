@@ -1,5 +1,11 @@
 # Project Memory
 
+## 2026-07-30 Managed Update (24-Hour Shipping Contract)
+
+- User-confirmed buyer-protection shipping time is fixed to `24小时发货`; the live 1688 service code is `essxsfh`.
+- Publish UI default, draft page-state patch, `draftSubmit` request patch, post-save verification, and submit reconciliation now share the same name/code contract.
+- A normal user Edge session can open target draft `6a69bee6e4b01cad1b297a52`, but the dedicated `muke_lixiang` automation profile still receives first-page `SYS_ERROR`. Do not save or submit through that profile until its authenticated session is refreshed and independently rechecked.
+
 ## 2026-07-29 Managed Update (CTG0286 Independent Persistence Gate)
 
 - User-authorized cleanup deleted corrupt drafts `6a635fcee4b0eda6ebbdf340` and `6a6976c1e4b09c827f2edbc9`. The only CTG0286 draft is now `6a69bee6e4b01cad1b297a52`; do not create another draft while it remains present.

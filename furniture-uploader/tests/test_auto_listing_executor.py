@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 import unittest
@@ -40,6 +41,28 @@ from run_1688_listing_task import _resolve_listing_account_lock_path
 
 
 class AutoListingExecutorTests(unittest.TestCase):
+    def test_1688_publish_contract_uses_24_hour_buyer_protection(self) -> None:
+        config = json.loads(
+            (PROJECT_ROOT / "config" / "platforms" / "1688.json").read_text(encoding="utf-8")
+        )
+        publish = config["publish"]
+        expected_name = "24小时发货"
+        expected_code = "essxsfh"
+
+        self.assertEqual(publish["draft_verification"]["buyer_protection_default_value"], expected_name)
+        self.assertEqual(publish["draft_verification"]["buyer_protection_expected_code"], expected_code)
+        for section_name in ("draft_verification", "draft_request_patch", "draft_page_state_patch"):
+            section = publish[section_name]
+            self.assertEqual(section["buyer_protection_default_value"], expected_name)
+            self.assertEqual(
+                section["buyer_protection_step_template"],
+                [{"from": 1, "service_name": expected_name, "service_code": expected_code}],
+            )
+        buyer_step = next(
+            step for step in publish["steps"] if step.get("name") == "buyer_protection_ship_time"
+        )
+        self.assertEqual(buyer_step["default_value"], expected_name)
+
     def test_listing_lock_is_scoped_to_the_payload_account(self) -> None:
         payload = sample_payload()
         payload["shop"]["account_key"] = "muke_lixiang"
@@ -418,9 +441,9 @@ class AutoListingExecutorTests(unittest.TestCase):
                 "page_title": "商品发布成功 - 卖家工作台",
                 "submit_required_fields_verified": True,
                 "submit_send_address_value": "35281125",
-                "submit_buyer_protection_value": "15天发货",
+                "submit_buyer_protection_value": "24小时发货",
                 "submit_buyer_protection_schedule": [
-                    {"from": 1, "serviceName": "15天发货", "serviceCode": "swtfh"}
+                    {"from": 1, "serviceName": "24小时发货", "serviceCode": "essxsfh"}
                 ],
                 "submit_blocking_assist_messages": [],
             },
