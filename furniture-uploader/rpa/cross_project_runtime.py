@@ -149,6 +149,7 @@ def resolve_executor_binding(
         raise RuntimeProtocolError(f"runtime_account_disabled:{normalized_key}")
     profile_ref = str(
         account.get("profile_ref")
+        or account.get("profile_key")
         or account.get("browser_profile_dir")
         or fallback_profile_ref
         or ""

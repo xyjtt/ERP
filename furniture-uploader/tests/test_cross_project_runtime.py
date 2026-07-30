@@ -109,6 +109,29 @@ class CrossProjectRuntimeTests(unittest.TestCase):
         self.assertEqual(binding.cdp_port, 9301)
         self.assertEqual(binding.config_revision, "20260730-1")
 
+    def test_binding_prefers_profile_key_over_profile_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            payload = {
+                "config_revision": "20260730-1",
+                "target_hostname": "executor-a",
+                "accounts": [
+                    {
+                        "account_key": "gonglai",
+                        "enabled": True,
+                        "profile_key": "gonglai",
+                        "browser_profile_dir": "D:/profiles/gonglai",
+                        "cdp_port": 9301,
+                    }
+                ],
+            }
+            payload["config_hash"] = canonical_accounts_config_hash(payload)
+            (root / "accounts.json").write_text(json.dumps(payload), encoding="utf-8")
+
+            binding = resolve_executor_binding("gonglai", config_root=root)
+
+        self.assertEqual(binding.profile_ref, "gonglai")
+
     def test_binding_rejects_changed_config_without_hash_refresh(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
