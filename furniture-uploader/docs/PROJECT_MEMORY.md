@@ -284,3 +284,10 @@
 - Enter was disproved on the real publish page: it left `胡桃色` in the resident input and did not create a committed specification item.
 - Tab creates the non-resident item, exposes the image-plus/delete controls, and creates the next empty resident input.
 - The implementation now uses Tab for both color and size and verifies only committed non-resident values. Full listing regression is `375/375`.
+
+## 2026-07-30 Draft Field Persistence Fix (Code Complete, Live Pending)
+
+- Root causes fixed in the working tree (uncommitted): full patch mode now carries the existing draft edit identity; main-image bridge upload advances per slot (0-3); pre-save and post-refresh checks require 4 main images; logistics dimensions require strict persisted-value match; independent inspection no longer accepts "reapply at submit" as draft acceptance.
+- Local validation: listing `432/432`; title engine `89/89` (requires the declared `jieba` dependency installed); doctor `status: ok` with the two pre-existing empty-selector warnings only.
+- The unique draft remains `6a69bee6e4b01cad1b297a52`; no new draft, no delete, no submit. Live repair and independent inspection are still pending browser-mutex clearance.
+- Full status and next steps: `docs/handoff/1688_LISTING_DRAFT_FIELD_PERSISTENCE_HANDOFF_2026-07-30.md`.

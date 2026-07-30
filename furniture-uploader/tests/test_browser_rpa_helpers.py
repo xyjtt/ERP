@@ -765,6 +765,42 @@ class BrowserRPAHelperTests(unittest.TestCase):
         self.assertEqual(self.browser._resolve_bridge_slot_index({"bridge_slot_index": "3"}), 3)
         self.assertEqual(self.browser._resolve_bridge_slot_index({"bridge_slot_index": "-2"}), 0)
 
+    def test_resolve_file_values_honors_max_files(self) -> None:
+        self.assertEqual(
+            self.browser._resolve_file_values(
+                {"source": "main_images", "max_files": 4},
+                {"main_images": ["1.jpg", "2.jpg", "3.jpg", "4.jpg", "5.jpg"]},
+            ),
+            ["1.jpg", "2.jpg", "3.jpg", "4.jpg"],
+        )
+
+    def test_primary_picture_bridge_uses_a_distinct_slot_per_image(self) -> None:
+        self.browser.driver = FakeDriver()
+        self.browser._pause = lambda _seconds: None  # type: ignore[assignment]
+        self.browser._encode_file_as_data_url = lambda value: f"data:{value}"  # type: ignore[assignment]
+        cleared_slots: list[int] = []
+        invoked_slots: list[int] = []
+        self.browser._clear_primary_picture_bridge_slot = (  # type: ignore[assignment]
+            lambda _selector, slot: cleared_slots.append(slot)
+        )
+        self.browser._invoke_primary_picture_bridge_upload = (  # type: ignore[assignment]
+            lambda _selector, _data_url, slot: invoked_slots.append(slot) or {"ok": True}
+        )
+        self.browser._read_primary_picture_bridge_slot = (  # type: ignore[assignment]
+            lambda _selector, slot: {"url": f"https://example.com/{slot}.jpg"}
+        )
+
+        uploaded = self.browser._upload_images_via_primary_picture_bridge(
+            {"bridge_slot_index": 1},
+            {"by": "css", "value": "#guid-primaryPicture"},
+            ["1.jpg", "2.jpg", "3.jpg", "4.jpg"],
+            {},
+        )
+
+        self.assertEqual(cleared_slots, [1, 2, 3, 4])
+        self.assertEqual(invoked_slots, [1, 2, 3, 4])
+        self.assertEqual(len(uploaded), 4)
+
     def test_resolve_category_levels_supports_list_and_path(self) -> None:
         self.assertEqual(
             self.browser._resolve_category_levels(
@@ -1468,6 +1504,27 @@ class BrowserRPAHelperTests(unittest.TestCase):
         self.assertTrue(context["main_image_reused_square"])
         self.assertEqual(context["main_image_uploaded_urls"], ["https://example.com/square.jpg"])
 
+    def test_prepare_main_image_slot_does_not_reuse_incomplete_square_images(self) -> None:
+        self.browser.driver = FakeDriver()
+        self.browser._draft_main_image_state = lambda: {  # type: ignore[assignment]
+            "present": True,
+            "count": 1,
+            "square": True,
+            "url": "https://example.com/square.jpg",
+        }
+        context: dict[str, object] = {}
+
+        reused = self.browser._prepare_main_image_slot(
+            {"ensure_square_first_image": True, "minimum_image_count": 4},
+            context,
+        )
+
+        self.assertFalse(reused)
+        self.assertEqual(
+            context["main_image_existing_count_incomplete"],
+            {"actual": 1, "expected": 4},
+        )
+
     def test_prepare_main_image_slot_removes_existing_non_square_image(self) -> None:
         class NonSquareImageDriver(FakeDriver):
             def __init__(self) -> None:
@@ -1883,6 +1940,30 @@ class BrowserRPAHelperTests(unittest.TestCase):
             {"颜色": "胡桃色", "尺寸": "50x40x45cm"},
         )
 
+    def test_pre_save_core_guard_rejects_incomplete_main_image_count(self) -> None:
+        self.browser.driver = FakeDriver()
+        self.browser._draft_main_image_present = lambda: True  # type: ignore[assignment]
+        self.browser._draft_main_image_state = lambda: {  # type: ignore[assignment]
+            "present": True,
+            "count": 1,
+            "square": True,
+        }
+
+        with self.assertRaisesRegex(PublishValidationError, "main images are incomplete"):
+            self.browser._verify_core_fields_before_draft_save(
+                {
+                    "draft_verification": {
+                        "enabled": True,
+                        "require_title": False,
+                        "require_main_image": True,
+                        "minimum_main_image_count": 4,
+                        "require_description": False,
+                        "require_specs": False,
+                    }
+                },
+                {},
+            )
+
     def test_draft_description_image_count_uses_javascript_word_boundary(self) -> None:
         class DescriptionCountDriver(FakeDriver):
             def __init__(self) -> None:
@@ -2097,6 +2178,56 @@ class BrowserRPAHelperTests(unittest.TestCase):
                 context,
             )
         self.assertEqual(context.get("draft_send_address_trace"), "861873672")
+
+    def test_verify_saved_draft_rejects_logistics_trace_in_strict_mode(self) -> None:
+        self.browser.driver = FakeDriver(current_url="https://offer-new.1688.com/popular/publish.htm")
+        self.browser._pause = lambda _seconds: None  # type: ignore[assignment]
+        self.browser._collect_assist_messages = lambda: []  # type: ignore[assignment]
+        self.browser._draft_main_image_state = lambda: {"present": True, "count": 1, "square": True}  # type: ignore[assignment]
+        self.browser._draft_main_image_present = lambda: True  # type: ignore[assignment]
+        self.browser._draft_description_present = lambda: True  # type: ignore[assignment]
+        self.browser._draft_description_image_count = lambda: 0  # type: ignore[assignment]
+        self.browser._collect_spec_values = lambda: {}  # type: ignore[assignment]
+        self.browser._draft_selected_send_address = lambda: ""  # type: ignore[assignment]
+        self.browser._draft_logistics_dimension_values = lambda: {}  # type: ignore[assignment]
+        self.browser._draft_selected_buyer_protection = lambda: ""  # type: ignore[assignment]
+        self.browser._draft_selected_buyer_protection_schedule = lambda: []  # type: ignore[assignment]
+        context: dict[str, object] = {
+            "length_cm": "55",
+            "width_cm": "47",
+            "height_cm": "62.5",
+            "weight_g": "15250",
+            "draft_submit_trace": {
+                "patch": {
+                    "patchSnapshot": {
+                        "logisticsDimensions": {
+                            "length": "55",
+                            "width": "47",
+                            "height": "62.5",
+                            "weight": "15250",
+                        }
+                    }
+                }
+            },
+        }
+
+        with self.assertRaisesRegex(PublishValidationError, "logistics dimensions missing"):
+            self.browser._verify_saved_draft(
+                {
+                    "draft_verification": {
+                        "enabled": True,
+                        "refresh_after_save": False,
+                        "require_main_image": True,
+                        "require_description": True,
+                        "require_specs": False,
+                        "require_send_address": False,
+                        "require_logistics_dimensions": True,
+                        "strict_logistics_persist": True,
+                        "require_buyer_protection": False,
+                    }
+                },
+                context,
+            )
 
     def test_verify_saved_draft_allows_nonpersistent_fields_only_with_complete_evidence(self) -> None:
         class RefreshDriver(FakeDriver):
@@ -2686,6 +2817,9 @@ class BrowserRPAHelperTests(unittest.TestCase):
 
         payload = driver.last_args[0]
         self.assertEqual(payload.get("expectedDraftId"), "draft-existing-1")
+        self.assertEqual(payload.get("patchMode"), "full")
+        self.assertEqual(payload.get("applyPatch"), True)
+        self.assertEqual(payload.get("applyIdentityPatch"), True)
         self.assertIn("requestCarriesExpectedDraftId", driver.last_script)
         self.assertIn("identityKeys", driver.last_script)
         self.assertIn("blocked draftSubmit without expected draft identity", driver.last_script)
@@ -3272,7 +3406,20 @@ class BrowserRPAHelperTests(unittest.TestCase):
         verification = config["publish"]["draft_verification"]
         self.assertEqual(verification["required_spec_labels"], ["颜色", "尺寸"])
         self.assertTrue(verification["require_title"])
+        self.assertEqual(verification["minimum_main_image_count"], 4)
         self.assertEqual(verification["minimum_description_image_count"], 1)
+        self.assertTrue(verification["strict_send_address_persist"])
+        self.assertTrue(verification["strict_logistics_persist"])
+        self.assertTrue(verification["strict_buyer_protection_persist"])
+        self.assertEqual(config["publish"]["draft_request_patch_retry_modes"], ["full", "identity_only"])
+        self.assertEqual(config["publish"]["submit_reapply_nonpersistent_fields"], [])
+        main_image_step = next(
+            step
+            for step in config["publish"]["steps"]
+            if step.get("name") == "main_image"
+        )
+        self.assertEqual(main_image_step["source"], "main_images")
+        self.assertEqual(main_image_step["max_files"], 4)
 
     def test_split_spec_rule_values_supports_custom_pattern(self) -> None:
         values = self.browser._split_spec_rule_values(

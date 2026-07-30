@@ -369,6 +369,7 @@ class VariantPipelineTests(unittest.TestCase):
         self.assertEqual(len(products), 1)
         self.assertEqual(products[0].title, "测试标题3")
         self.assertEqual(products[0].raw["main_image"], "C:\\images\\main.jpg")
+        self.assertEqual(products[0].raw["main_images"], ["C:\\images\\main.jpg"])
 
     def test_build_products_from_variants_keeps_validation_flow_when_image_lookup_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

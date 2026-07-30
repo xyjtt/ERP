@@ -60,6 +60,43 @@ class FakeBrowser:
 
 
 class InspectSavedDraftTests(unittest.TestCase):
+    def test_expected_main_image_count_caps_at_four(self) -> None:
+        self.assertEqual(
+            inspector._expected_main_image_count(
+                {"images": {"main_urls": ["1", "2", "3", "4", "5"]}}
+            ),
+            4,
+        )
+
+    def test_buyer_protection_requires_persisted_name_and_code(self) -> None:
+        schedule = [
+            {"from": 1, "serviceName": "24小时发货", "serviceCode": "essxsfh"},
+        ]
+        self.assertTrue(
+            inspector._buyer_protection_matches(
+                "24小时发货",
+                schedule,
+                expected_value="24小时发货",
+                expected_code="essxsfh",
+            )
+        )
+        self.assertFalse(
+            inspector._buyer_protection_matches(
+                "",
+                schedule,
+                expected_value="24小时发货",
+                expected_code="essxsfh",
+            )
+        )
+        self.assertFalse(
+            inspector._buyer_protection_matches(
+                "24小时发货",
+                [{"from": 1, "serviceName": "24小时发货", "serviceCode": "wrong"}],
+                expected_value="24小时发货",
+                expected_code="essxsfh",
+            )
+        )
+
     def test_boot_network_probe_fails_closed_when_cdp_is_unavailable(self) -> None:
         browser = SimpleNamespace(driver=FakeDriver())
         self.assertFalse(inspector._install_draft_boot_network_probe(browser))

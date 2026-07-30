@@ -59,6 +59,29 @@ def _spec_equal(actual: object, expected: object) -> bool:
     return bool(expected_value) and str(actual or "").strip() == expected_value
 
 
+def _expected_main_image_count(payload: dict[str, object]) -> int:
+    main_urls = list(((payload.get("images") or {}).get("main_urls") or []))
+    return max(1, min(4, len(main_urls)))
+
+
+def _buyer_protection_matches(
+    actual_value: object,
+    actual_schedule: list[dict[str, object]],
+    *,
+    expected_value: str,
+    expected_code: str,
+) -> bool:
+    if str(actual_value or "").strip() != expected_value:
+        return False
+    return any(
+        int(item.get("from", 0) or 0) == 1
+        and str(item.get("serviceName", "")).strip() == expected_value
+        and str(item.get("serviceCode", "")).strip() == expected_code
+        for item in actual_schedule
+        if isinstance(item, dict)
+    )
+
+
 def _validate_publish_url_override(raw_url: object, expected_draft_id: str) -> str:
     url = str(raw_url or "").strip()
     parsed = urlparse(url)
@@ -308,6 +331,7 @@ def main() -> int:
     if not re.fullmatch(r"[A-Za-z0-9_-]+", expected_draft_id):
         raise ValueError("read-only draft inspection requires a valid draft ID")
     expected_detail_count = len(list(((payload.get("images") or {}).get("detail_urls") or [])))
+    expected_main_image_count = _expected_main_image_count(payload)
     expected_title = str((payload.get("product") or {}).get("selected_title") or "").strip()
     expected_price = str((payload.get("pricing") or {}).get("publish_price") or "").strip()
     expected_quantity = int((payload.get("inventory") or {}).get("quantity") or 0)
@@ -321,9 +345,8 @@ def main() -> int:
         "height": str((payload.get("logistics") or {}).get("height_cm") or "").strip(),
         "weight": str((payload.get("logistics") or {}).get("weight_g") or "").strip(),
     }
-    reapply_fields = list(
-        (((payload.get("workflow") or {}).get("draft") or {}).get("submit_reapply_required_fields") or [])
-    )
+    expected_buyer_protection = "24小时发货"
+    expected_buyer_protection_code = "essxsfh"
 
     config_dir = PROJECT_ROOT / "config"
     operator_config = load_json_with_local_override(config_dir / "operator_config.json")
@@ -466,13 +489,19 @@ def main() -> int:
         "price": _decimal_equal(core.get("price"), expected_price),
         "quantity": int(core.get("quantity") or 0) == expected_quantity,
         "main_image_present": bool(main_image.get("present")),
+        "main_image_count": int(main_image.get("count") or 0) >= expected_main_image_count,
         "main_image_square": bool(main_image.get("square")),
         "detail_image_count": description_image_count == expected_detail_count,
         "spec_color": _spec_equal(spec_values.get("颜色"), expected_specs["颜色"]),
         "spec_size": _spec_equal(spec_values.get("尺寸"), expected_specs["尺寸"]),
         "logistics": all(str(logistics.get(key, "")).strip() == value for key, value in expected_logistics.items()),
-        "send_address_reapply_recorded": bool(send_address) or "send_address" in reapply_fields,
-        "buyer_protection_reapply_recorded": bool(buyer_protection) or "buyer_protection" in reapply_fields,
+        "send_address": bool(send_address),
+        "buyer_protection": _buyer_protection_matches(
+            buyer_protection,
+            buyer_schedule,
+            expected_value=expected_buyer_protection,
+            expected_code=expected_buyer_protection_code,
+        ),
     }
     evidence = {
         "status": "passed" if all(checks.values()) else "failed",
@@ -500,11 +529,13 @@ def main() -> int:
             "title": expected_title,
             "price": expected_price,
             "quantity": expected_quantity,
+            "main_image_count": expected_main_image_count,
             "spec_values": expected_specs,
             "logistics": expected_logistics,
             "detail_image_count": expected_detail_count,
+            "buyer_protection": expected_buyer_protection,
+            "buyer_protection_code": expected_buyer_protection_code,
         },
-        "submit_reapply_required_fields": reapply_fields,
         "boot_network_probe_installed": boot_network_probe_installed,
         "boot_network_records": boot_network_records,
         "draft_saved": False,
