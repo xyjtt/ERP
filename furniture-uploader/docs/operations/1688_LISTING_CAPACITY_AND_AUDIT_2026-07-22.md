@@ -21,7 +21,7 @@ Do not run multiple Selenium workers against the same browser profile. Keep one 
 1. A product starts in `draft_pending` and must pass preflight before browser execution.
 2. Draft execution requires `ENABLE_1688_LISTING_EXECUTION=1`.
 3. Submit requires state `submit_pending`, recorded approval, `ENABLE_1688_LISTING_EXECUTION=1`, and `ENABLE_1688_LISTING_SUBMIT=1`.
-4. Submit mode reapplies and reads back the configured send address and exact buyer-protection value `15天发货` with code `swtfh`.
+4. Submit mode reapplies and reads back the configured send address and exact buyer-protection value `24小时发货` with code `essxsfh`.
 5. Empty addresses, wrong buyer-protection values, or visible required-field warnings block submit.
 6. Never retry a failed submit until the success URL, Offer ID, product-management page, and formal audit records have all been checked.
 7. `reconcile-submit` is only for a captured 1688 success page that contains a numeric Offer ID and complete required-field evidence.
@@ -197,6 +197,6 @@ The reference product was accepted with real account, real page, real image API,
 - price: `325`;
 - inventory: `999`;
 - logistics: `55 x 45 x 55 cm`, `17000 g`;
-- submit-time required fields: non-empty address and `15天发货 / swtfh`.
+- historical submit-time required fields: non-empty address and `15天发货 / swtfh` (the contract used by this 2026-07-23 reference Offer; do not reuse it for current listings).
 
 Do not rerun draft or submit for this task. Its original submit execution row is `failed` because the old tracker lost the response after successful navigation; immutable `submit_succeeded` and `offer_written_back` events reconcile the actual successful publication without a second click.

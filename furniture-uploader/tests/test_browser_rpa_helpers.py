@@ -2654,7 +2654,12 @@ class BrowserRPAHelperTests(unittest.TestCase):
         self.assertEqual(payload.get("applyPatch"), False)
         self.assertEqual(payload.get("applyIdentityPatch"), True)
         self.assertIn("systemParam.draftId = expected", driver.last_script)
+        self.assertIn("systemParam.edit = true", driver.last_script)
+        self.assertIn("systemParam.isItemEdit = true", driver.last_script)
         self.assertIn("searchParams.set('draftId', expected)", driver.last_script)
+        self.assertIn("searchParams.set('edit', 'true')", driver.last_script)
+        self.assertIn("searchParams.set('isItemEdit', 'true')", driver.last_script)
+        self.assertIn("collectDraftIdentityEvidence", driver.last_script)
         self.assertIn("__codexDraftIdentityPatchProbe", driver.last_script)
 
     def test_install_draft_request_patch_includes_expected_draft_identity(self) -> None:
@@ -3406,6 +3411,71 @@ class BrowserRPAHelperTests(unittest.TestCase):
         )
 
         self.assertTrue(detected)
+        self.assertEqual(context["draft_submit_response_draft_id"], "existing")
+
+    def test_assert_draft_request_trace_requires_existing_draft_edit_semantics(self) -> None:
+        class TraceDriver(FakeDriver):
+            def execute_script(self, script: str, *args: object) -> object:
+                if "window.__codexDraftSubmitRecords" in script:
+                    return [
+                        {
+                            "status": 200,
+                            "responseText": '{"success":true,"data":{"draftId":"existing"}}',
+                            "responseJson": {"success": True, "data": {"draftId": "existing"}},
+                            "draftIdentityEvidence": {
+                                "expectedDraftId": "existing",
+                                "url": {"draftId": "existing", "edit": False, "isItemEdit": False},
+                                "body": {"draftId": "existing", "edit": False, "isItemEdit": False},
+                                "effective": {"draftId": "existing", "edit": False, "isItemEdit": False},
+                            },
+                        }
+                    ]
+                return None
+
+        self.browser.driver = TraceDriver()
+        with self.assertRaisesRegex(PublishSubmitError, "edit=true/isItemEdit=true"):
+            self.browser._assert_draft_request_trace(
+                {
+                    "expected_draft_id": "existing",
+                    "draft_request_patch": {"enabled": True, "timeout_seconds": 0},
+                },
+                {"draft_request_patch_mode": "identity_only"},
+            )
+
+    def test_assert_draft_request_trace_records_existing_draft_identity_evidence(self) -> None:
+        identity_evidence = {
+            "expectedDraftId": "existing",
+            "url": {"draftId": "existing", "edit": True, "isItemEdit": True},
+            "body": {"draftId": "existing", "edit": True, "isItemEdit": True},
+            "effective": {"draftId": "existing", "edit": True, "isItemEdit": True},
+        }
+
+        class TraceDriver(FakeDriver):
+            def execute_script(self, script: str, *args: object) -> object:
+                if "window.__codexDraftSubmitRecords" in script:
+                    return [
+                        {
+                            "status": 200,
+                            "responseText": '{"success":true,"data":{"draftId":"existing"}}',
+                            "responseJson": {"success": True, "data": {"draftId": "existing"}},
+                            "draftIdentityEvidence": identity_evidence,
+                        }
+                    ]
+                return None
+
+        self.browser.driver = TraceDriver()
+        context: dict[str, object] = {"draft_request_patch_mode": "identity_only"}
+
+        detected = self.browser._assert_draft_request_trace(
+            {
+                "expected_draft_id": "existing",
+                "draft_request_patch": {"enabled": True, "timeout_seconds": 0},
+            },
+            context,
+        )
+
+        self.assertTrue(detected)
+        self.assertEqual(context["draft_submit_identity_evidence"], identity_evidence)
         self.assertEqual(context["draft_submit_response_draft_id"], "existing")
 
     def test_assert_draft_request_trace_accepts_matching_offer_draft_id(self) -> None:

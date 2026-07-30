@@ -33,6 +33,7 @@ from auto_listing_executor import (
     extract_draft_reconciliation_evidence,
     extract_submit_reconciliation_evidence,
     extract_offer_id,
+    execute_browser_task,
     restore_execution_only_detail_images,
     resolve_1688_publish_url,
 )
@@ -246,10 +247,11 @@ class AutoListingExecutorTests(unittest.TestCase):
 
         self.assertEqual(category_id, "122942001")
         self.assertIn("operator=draft2offer", url)
-        self.assertIn("offerDraftId=draft-repair-123", url)
-        self.assertTrue(url.startswith("https://offer.1688.com/offer/post/fillProductInfo.htm?"))
+        self.assertIn("catId=122942001", url)
+        self.assertIn("draftId=draft-repair-123", url)
+        self.assertTrue(url.startswith("https://offer-new.1688.com/popular/publish.htm?"))
 
-    def test_draft_repair_uses_official_entry_even_with_saved_publish_url(self) -> None:
+    def test_draft_repair_rebuilds_compatible_entry_without_trusting_saved_url(self) -> None:
         payload = sample_payload()
         payload["product"]["category"] = "bedside_table"
         payload["workflow"]["pending_draft_id"] = "draft-repair-123"
@@ -266,8 +268,10 @@ class AutoListingExecutorTests(unittest.TestCase):
 
         self.assertEqual(category_id, "122942001")
         self.assertIn("operator=draft2offer", url)
-        self.assertIn("offerDraftId=draft-repair-123", url)
-        self.assertTrue(url.startswith("https://offer.1688.com/offer/post/fillProductInfo.htm?"))
+        self.assertIn("catId=122942001", url)
+        self.assertIn("draftId=draft-repair-123", url)
+        self.assertNotIn("operator=new", url)
+        self.assertTrue(url.startswith("https://offer-new.1688.com/popular/publish.htm?"))
 
     def test_draft_repair_does_not_trust_saved_publish_url_for_another_draft(self) -> None:
         payload = sample_payload()
@@ -283,7 +287,7 @@ class AutoListingExecutorTests(unittest.TestCase):
 
         url, _category_id = resolve_1688_publish_url(payload, mode="draft")
 
-        self.assertIn("offerDraftId=draft-repair-123", url)
+        self.assertIn("draftId=draft-repair-123", url)
         self.assertNotIn("draft-other", url)
 
     def test_draft_repair_steps_skip_existing_specs_and_core_fields(self) -> None:
@@ -534,6 +538,60 @@ class AutoListingExecutorTests(unittest.TestCase):
             },
         }
         self.assertEqual(extract_draft_id(context), "existing-draft")
+
+    def test_draft_saved_evidence_records_response_draft_id(self) -> None:
+        payload = sample_payload()
+        payload["product"]["category"] = "bedside_table"
+        response_draft_id = "draft-response-1"
+        context = {
+            "draft_submit_trace": {
+                "responseJson": {"success": True, "data": {"draftId": response_draft_id}}
+            },
+            "draft_submit_response_status": 200,
+            "draft_submit_response_draft_id": response_draft_id,
+            "draft_submit_identity_evidence": {
+                "expectedDraftId": "",
+                "effective": {"draftId": response_draft_id},
+            },
+            "current_url": (
+                "https://offer-new.1688.com/popular/publish.htm?draftId="
+                + response_draft_id
+            ),
+            "detail_images_delivery_mode": "image_bank",
+            "draft_description_image_count": 1,
+        }
+        browser = SimpleNamespace(publish_product=lambda *_args: context)
+        platform_config = json.loads(
+            (PROJECT_ROOT / "config" / "platforms" / "1688.json").read_text(encoding="utf-8")
+        )
+        category_config = json.loads(
+            (PROJECT_ROOT / "config" / "furniture_categories.json").read_text(
+                encoding="utf-8"
+            )
+        )
+
+        product = SimpleNamespace(raw={}, platform_category="bedside_table")
+        with (
+            patch.dict(os.environ, {"ENABLE_1688_LISTING_EXECUTION": "1"}),
+            patch("auto_listing_executor.build_product_record", return_value=product),
+        ):
+            updated, returned_context = execute_browser_task(
+                payload,
+                mode="draft",
+                browser=browser,
+                platform_config=platform_config,
+                category_config=category_config,
+                project_root=PROJECT_ROOT,
+            )
+
+        self.assertIs(returned_context, context)
+        self.assertEqual(
+            updated["workflow"]["draft"]["draft_response_draft_id"], response_draft_id
+        )
+        self.assertEqual(
+            updated["workflow"]["last_event_evidence"]["draft_response_draft_id"],
+            response_draft_id,
+        )
 
     def test_draft_repair_rejects_a_different_save_response_draft_id(self) -> None:
         payload = sample_payload()

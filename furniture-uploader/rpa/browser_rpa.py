@@ -6309,6 +6309,8 @@ class BrowserRPA:
               try {
                 const parsed = new URL(text, window.location.href);
                 parsed.searchParams.set('draftId', expected);
+                parsed.searchParams.set('edit', 'true');
+                parsed.searchParams.set('isItemEdit', 'true');
                 return parsed.toString();
               } catch (error) {
                 return text;
@@ -6329,7 +6331,107 @@ class BrowserRPA:
                 return false;
               }
               systemParam.draftId = expected;
+              systemParam.edit = true;
+              systemParam.isItemEdit = true;
               return true;
+            };
+
+            const collectDraftIdentityEvidence = (rawUrl, body) => {
+              const normalizeFlag = (value) => {
+                if (typeof value === 'boolean') return value;
+                const text = String(value == null ? '' : value).trim().toLowerCase();
+                if (text === 'true' || text === '1') return true;
+                if (text === 'false' || text === '0') return false;
+                return text;
+              };
+              const emptyIdentity = () => ({
+                draftId: '',
+                edit: '',
+                isItemEdit: '',
+                operator: '',
+              });
+              const urlIdentity = emptyIdentity();
+              const bodyIdentity = emptyIdentity();
+              const assignIdentity = (target, rawKey, rawValue) => {
+                const key = String(rawKey || '').trim().toLowerCase();
+                if (!key) return;
+                if (['draftid', 'offerdraftid', 'draft_id'].includes(key)) {
+                  const value = String(rawValue == null ? '' : rawValue).trim();
+                  if (value && !target.draftId) target.draftId = value;
+                } else if (key === 'edit' && target.edit === '') {
+                  target.edit = normalizeFlag(rawValue);
+                } else if (key === 'isitemedit' && target.isItemEdit === '') {
+                  target.isItemEdit = normalizeFlag(rawValue);
+                } else if (['operator', 'operatorname'].includes(key) && !target.operator) {
+                  target.operator = String(rawValue == null ? '' : rawValue).trim();
+                }
+              };
+              const visited = new WeakSet();
+              const inspectBody = (value) => {
+                if (value == null) return;
+                if (typeof value === 'string') {
+                  const text = value.trim();
+                  if (!text) return;
+                  if (text.startsWith('{') || text.startsWith('[')) {
+                    try {
+                      inspectBody(JSON.parse(text));
+                      return;
+                    } catch (error) {
+                      // Fall through to form-value parsing.
+                    }
+                  }
+                  try {
+                    const params = new URLSearchParams(text);
+                    Array.from(params.entries()).forEach(([key, entryValue]) => {
+                      assignIdentity(bodyIdentity, key, entryValue);
+                      if (String(entryValue || '').trim() !== text) inspectBody(entryValue);
+                    });
+                  } catch (error) {
+                    return;
+                  }
+                  return;
+                }
+                if (typeof URLSearchParams !== 'undefined' && value instanceof URLSearchParams) {
+                  Array.from(value.entries()).forEach(([key, entryValue]) => {
+                    assignIdentity(bodyIdentity, key, entryValue);
+                    inspectBody(entryValue);
+                  });
+                  return;
+                }
+                if (typeof FormData !== 'undefined' && value instanceof FormData) {
+                  Array.from(value.entries()).forEach(([key, entryValue]) => {
+                    if (typeof entryValue !== 'string') return;
+                    assignIdentity(bodyIdentity, key, entryValue);
+                    inspectBody(entryValue);
+                  });
+                  return;
+                }
+                if (typeof value !== 'object' || visited.has(value)) return;
+                visited.add(value);
+                Object.entries(value).forEach(([key, entryValue]) => {
+                  assignIdentity(bodyIdentity, key, entryValue);
+                  inspectBody(entryValue);
+                });
+              };
+              try {
+                const parsed = new URL(String(rawUrl || ''), window.location.href);
+                Array.from(parsed.searchParams.entries()).forEach(([key, value]) => {
+                  assignIdentity(urlIdentity, key, value);
+                });
+              } catch (error) {
+                // A malformed URL is represented by empty URL identity evidence.
+              }
+              inspectBody(body);
+              const effective = emptyIdentity();
+              Object.keys(effective).forEach((key) => {
+                effective[key] = bodyIdentity[key] !== '' ? bodyIdentity[key] : urlIdentity[key];
+              });
+              return {
+                expectedDraftId: String(window.__codexDraftPatchConfig.expectedDraftId || '').trim(),
+                url: urlIdentity,
+                body: bodyIdentity,
+                effective,
+              };
             };
 
             const normalizeIbankUrl = (rawValue) => {
@@ -7637,6 +7739,7 @@ class BrowserRPA:
                 record.patch = rewritten.meta;
                 record.patchedBodyPreview = previewValue(rewritten.body);
                 record.expectedDraftId = String(window.__codexDraftPatchConfig.expectedDraftId || '').trim();
+                record.draftIdentityEvidence = collectDraftIdentityEvidence(url, rewritten.body);
                 record.requestDraftIdentityPresent = requestCarriesExpectedDraftId(url, rewritten.body);
                 if (!record.requestDraftIdentityPresent) {
                   const message = markMissingDraftIdentity(record);
@@ -7691,6 +7794,7 @@ class BrowserRPA:
                 record.patch = rewritten.meta;
                 record.patchedBodyPreview = previewValue(rewritten.body);
                 record.expectedDraftId = String(window.__codexDraftPatchConfig.expectedDraftId || '').trim();
+                record.draftIdentityEvidence = collectDraftIdentityEvidence(url, rewritten.body);
                 record.requestDraftIdentityPresent = requestCarriesExpectedDraftId(url, rewritten.body);
                 if (!record.requestDraftIdentityPresent) {
                   const message = markMissingDraftIdentity(record);
@@ -7779,6 +7883,9 @@ class BrowserRPA:
 
         context["draft_submit_trace_present"] = True
         context["draft_submit_trace"] = latest_record
+        identity_evidence = latest_record.get("draftIdentityEvidence") or {}
+        if isinstance(identity_evidence, dict) and identity_evidence:
+            context["draft_submit_identity_evidence"] = identity_evidence
 
         raw_status = latest_record.get("status", 0)
         try:
@@ -7810,6 +7917,25 @@ class BrowserRPA:
             raise PublishSubmitError(f"draft_submit backend rejected request: {message}")
 
         expected_draft_id = str(publish_config.get("expected_draft_id") or "").strip()
+        patch_mode = str(context.get("draft_request_patch_mode") or "").strip().lower()
+        if expected_draft_id and patch_mode == "identity_only":
+            effective_identity = (
+                identity_evidence.get("effective")
+                if isinstance(identity_evidence, dict)
+                else None
+            )
+            if not isinstance(effective_identity, dict):
+                raise PublishSubmitError(
+                    "draft_submit existing-draft request lacks structured identity evidence"
+                )
+            if str(effective_identity.get("draftId") or "").strip() != expected_draft_id:
+                raise PublishSubmitError(
+                    "draft_submit existing-draft request does not carry the expected draft identity"
+                )
+            if effective_identity.get("edit") is not True or effective_identity.get("isItemEdit") is not True:
+                raise PublishSubmitError(
+                    "draft_submit existing-draft request is missing edit=true/isItemEdit=true"
+                )
         if expected_draft_id and isinstance(response_json, dict):
             def find_draft_id(value: Any) -> str:
                 if isinstance(value, dict):
