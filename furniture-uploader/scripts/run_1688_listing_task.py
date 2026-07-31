@@ -16,7 +16,11 @@ RPA_ROOT = PROJECT_ROOT / "rpa"
 if str(RPA_ROOT) not in sys.path:
     sys.path.insert(0, str(RPA_ROOT))
 
-from auto_listing import advance_listing_state, validate_listing_payload
+from auto_listing import (
+    ListingContractError,
+    advance_listing_state,
+    validate_listing_payload,
+)
 from auto_listing_executor import (
     assert_execution_allowed,
     build_execution_payload,
@@ -71,7 +75,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--draft-id",
         default="",
-        help="known historical draft ID to rebind during an explicitly authorized review repair",
+        help=(
+            "known historical draft ID to rebind: required in draft mode when the task "
+            "already has a historical draft but no pending_draft_id; also used by "
+            "resume/invalidate-draft"
+        ),
     )
     parser.add_argument(
         "--capacity-evidence",
@@ -156,6 +164,93 @@ def _load_listing_audit_repository(shared_runtime_root: str) -> ListingAuditRepo
         missing = ", ".join(str(item) for item in contract.get("missing_tables") or [])
         raise RuntimeError(f"listing audit database contract is not ready: {missing}")
     return repository
+
+
+def _known_historical_draft_ids(payload: dict) -> set[str]:
+    workflow = payload.get("workflow") or {}
+    known: set[str] = set()
+    current = str(((workflow.get("draft") or {}).get("draft_id") or "")).strip()
+    if current:
+        known.add(current)
+    for item in list(workflow.get("event_history") or []):
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("event") or "").strip() != "draft_saved":
+            continue
+        draft_id = str(((item.get("evidence") or {}).get("draft_id") or "")).strip()
+        if draft_id:
+            known.add(draft_id)
+    return known
+
+
+def _apply_draft_rebind(
+    args: argparse.Namespace,
+    payload: dict,
+    execution_payload: dict,
+) -> dict:
+    """Bind draft execution to an existing 1688 draft or fail closed.
+
+    ``--draft-id`` is honored in draft mode only: it must reference a draft ID
+    that this task has already saved (workflow.draft.draft_id or any draft_saved
+    event), and it becomes the execution ``pending_draft_id`` so the publish URL
+    and the draft-request patch both carry the existing draft identity.
+
+    Without an explicit rebind, draft mode must never silently create a new
+    draft for a task that already has a historical draft; the only exception is
+    an explicitly authorized rebuild (last_event=authorized_draft_rebuild_resumed).
+    """
+    requested = str(getattr(args, "draft_id", "") or "").strip()
+    if args.mode != "draft":
+        if requested:
+            raise ValueError("--draft-id rebind is only valid for draft mode")
+        return execution_payload
+    workflow = execution_payload.setdefault("workflow", {})
+    if requested:
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", requested):
+            raise ValueError("--draft-id requires a valid draft ID")
+        if requested not in _known_historical_draft_ids(payload):
+            raise ValueError(
+                "--draft-id must reference a known historical draft ID for this task"
+            )
+        workflow["pending_draft_id"] = requested
+        return execution_payload
+    pending = str(workflow.get("pending_draft_id") or "").strip()
+    if pending:
+        return execution_payload
+    last_event = str((workflow.get("last_event") or "")).strip()
+    if last_event != "authorized_draft_rebuild_resumed" and _known_historical_draft_ids(payload):
+        raise ListingContractError(
+            "draft mode would create a new 1688 draft, but this task already has "
+            "a historical draft; re-run with --draft-id <known draft_id> to explicitly "
+            "rebind the existing draft"
+        )
+    return execution_payload
+
+
+def _record_controlled_saga_failure(
+    saga_repository: OperationSagaRepository,
+    *,
+    operation_key: str,
+    account_fencing_token: int,
+    exc: Exception,
+) -> str:
+    """Move the saga to failed_terminal for an expected, controlled failure.
+
+    Returns a short audit note for execution records. Unexpected exceptions must
+    not be routed here: they leave the saga in ``prepared`` so the next run is
+    forced through reconcile instead of a blind retry.
+    """
+    try:
+        saga_repository.record_ali1688_result(
+            operation_key=operation_key,
+            account_fencing_token=account_fencing_token,
+            status="failed",
+            error_code=type(exc).__name__,
+            error_summary=str(exc),
+        )
+    except Exception as saga_exc:
+        return f"saga_record_failed={type(saga_exc).__name__}: {saga_exc}"
+    return "saga=failed_terminal"
 
 
 def _resolve_listing_account_lock_path(args: argparse.Namespace, payload: dict) -> tuple[Path, str]:
@@ -356,6 +451,7 @@ def main() -> int:
         mode=args.mode,
         detail_limit=args.detail_limit,
     )
+    execution_payload = _apply_draft_rebind(args, payload, execution_payload)
     if args.detail_upload_resume_context:
         failure_payload = json.loads(
             Path(args.detail_upload_resume_context).read_text(encoding="utf-8-sig")
@@ -375,7 +471,7 @@ def main() -> int:
     repository = _load_listing_audit_repository(args.shared_runtime_root)
     repository.upsert_task(payload)
 
-    from browser_rpa import BrowserRPA
+    from browser_rpa import BrowserRPA, PublishValidationError
 
     config_dir = PROJECT_ROOT / "config"
     platform_config = load_json_with_local_override(config_dir / "platforms" / "1688.json")
@@ -475,6 +571,12 @@ def main() -> int:
             )
         except ImageAlbumFullError as exc:
             context = dict(browser.last_result_context or {})
+            saga_note = _record_controlled_saga_failure(
+                saga_repository,
+                operation_key=operation_key,
+                account_fencing_token=runtime_guard.account_fencing_token,
+                exc=exc,
+            )
             evidence = {
                 "reason": "image_album_full",
                 "message": str(exc),
@@ -491,7 +593,7 @@ def main() -> int:
                 status="blocked",
                 result=updated,
                 error_code="IMAGE_ALBUM_FULL",
-                error_summary=str(exc),
+                error_summary=f"{exc}; {saga_note}",
             )
             _write_result(updated, args.output)
             return 2
@@ -503,14 +605,25 @@ def main() -> int:
                 context=context,
                 error=exc,
             )
+            saga_note = ""
+            if isinstance(exc, (PublishValidationError, ListingContractError)):
+                saga_note = "; " + _record_controlled_saga_failure(
+                    saga_repository,
+                    operation_key=operation_key,
+                    account_fencing_token=runtime_guard.account_fencing_token,
+                    exc=exc,
+                )
             repository.finish_execution(
                 execution_id=execution_id,
                 status="failed",
                 error_code=type(exc).__name__,
                 error_summary=(
-                    f"{exc}; failure_context={failure_context_path}"
-                    if failure_context_path
-                    else str(exc)
+                    (
+                        f"{exc}; failure_context={failure_context_path}"
+                        if failure_context_path
+                        else str(exc)
+                    )
+                    + saga_note
                 ),
             )
             raise

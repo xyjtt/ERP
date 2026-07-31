@@ -296,3 +296,10 @@
 - `inspect_1688_saved_draft.py`: real-field acceptance for main image count, send address, and `24小时发货/essxsfh`; reapply-record fallback removed.
 - Local validation: listing `432/432`; title engine `89/89`; doctor `status: ok`.
 - Not done: live draft repair, independent saved-draft inspection, approval, submit, executor deployment. See `docs/handoff/1688_LISTING_DRAFT_FIELD_PERSISTENCE_HANDOFF_2026-07-30.md`.
+
+## 2026-07-31 Canary Failure Fix: Draft Rebind + Saga Failure Terminal
+
+- Root cause of the new-draft canary failure: `--draft-id` was parsed but never consumed in draft mode; the execution fell back to an `operator=new` publish URL with no `expected_draft_id`, so the full patch carried no edit identity and 1688 created draft `6a6c3d68e4b0651576fe9905`.
+- Fix 1: draft mode rebinds only known historical draft IDs via `--draft-id`, and fails closed instead of creating a duplicate draft when history exists but no `pending_draft_id` is set.
+- Fix 2: controlled failures write the saga `failed_terminal` state with `error_code` (`record_ali1688_result`), so retries no longer require manual reconcile; uncontrolled exceptions still require reconcile.
+- Local validation: listing `564/564`; doctor `status: ok`. Real canary rerun and independent inspection remain with the main session.
