@@ -254,6 +254,23 @@ def load_selected_replace_tasks(args: argparse.Namespace) -> list[Any]:
     return deduped[: args.limit] if args.limit > 0 else deduped
 
 
+def _protocol_enforcement_active(runtime_guard: RuntimeLeaseGuard | None) -> bool:
+    """True only when the cross-project lease protocol enforces bindings.
+
+    Any failure fails closed to the legacy global worker-idle gate.
+    """
+    if runtime_guard is None:
+        return False
+    try:
+        state = runtime_guard.repository.assert_protocol(
+            component="erp-sku-replace-gate",
+            build_sha=runtime_guard.build_sha,
+        )
+    except Exception:
+        return False
+    return bool(state.enforcement_enabled)
+
+
 def run(args: argparse.Namespace) -> int:
     if args.mode == "execute" and not args.yes:
         raise ValueError("execute mode requires --yes")
@@ -367,7 +384,11 @@ def run(args: argparse.Namespace) -> int:
         with lock:
             emit_pipeline_event(run_id, "shared_lock_acquired", lock_path=lock_path)
             worker_state = (
-                assert_crawler_worker_paused(args.crawler_worker_task_name, account_key)
+                assert_crawler_worker_paused(
+                    args.crawler_worker_task_name,
+                    account_key,
+                    allow_active_worker=_protocol_enforcement_active(runtime_guard),
+                )
                 if args.mode == "execute"
                 else {}
             )

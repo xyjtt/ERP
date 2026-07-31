@@ -537,15 +537,29 @@ def query_crawler_worker_state(task_name: str, account_key: str = "") -> dict[st
     return payload if isinstance(payload, dict) else {}
 
 
-def assert_crawler_worker_paused(task_name: str, account_key: str = "") -> dict[str, Any]:
+def assert_crawler_worker_paused(
+    task_name: str,
+    account_key: str = "",
+    *,
+    allow_active_worker: bool = False,
+) -> dict[str, Any]:
     state = query_crawler_worker_state(task_name, account_key)
     task_running = str(state.get("scheduled_task_state") or "").strip().lower() == "running"
     process_count = int(state.get("worker_process_count") or 0)
     profile_edge_count = int(state.get("profile_edge_process_count") or 0)
-    if task_running or process_count > 0 or profile_edge_count > 0:
+    if allow_active_worker and (task_running or process_count > 0):
+        # Cross-project lease protocol with enforcement enabled owns
+        # cross-account concurrency; only this account's Edge must stay idle.
+        state["worker_activity_bypassed_by_protocol"] = True
+    elif task_running or process_count > 0 or profile_edge_count > 0:
         raise RuntimeError(
             "Crawler Worker or an account Profile Edge process is still active. Confirm no active crawler task, "
             "pause the scheduled Worker, and wait for its owned processes to exit before stop-sale execute."
+        )
+    if profile_edge_count > 0:
+        raise RuntimeError(
+            "An account Profile Edge process is still active for this account. The runtime lease does not "
+            "cover browsers started outside the protocol; stop the leftover Edge before execute."
         )
     return state
 

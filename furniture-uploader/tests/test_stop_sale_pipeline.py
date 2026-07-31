@@ -11,7 +11,10 @@ SCRIPTS_ROOT = PROJECT_ROOT / "scripts"
 if str(SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_ROOT))
 
+from unittest import mock
+
 from run_1688_stop_sale_pipeline import (
+    assert_crawler_worker_paused,
     build_1688_command,
     build_jushuitan_command,
     resolve_shared_lock_path,
@@ -74,6 +77,50 @@ class StopSalePipelineTests(unittest.TestCase):
 
     def test_pipeline_notification_can_be_disabled_without_credentials(self) -> None:
         self.assertFalse(send_pipeline_notification("demo", disabled=True))
+
+    def test_worker_gate_blocks_active_worker_by_default(self) -> None:
+        state = {
+            "scheduled_task_exists": True,
+            "scheduled_task_state": "Running",
+            "worker_process_count": 1,
+            "profile_edge_process_count": 0,
+        }
+        with mock.patch(
+            "run_1688_stop_sale_pipeline.query_crawler_worker_state",
+            return_value=dict(state),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "still active"):
+                assert_crawler_worker_paused("YYDD-1688-Crawler-Worker", "gonglai")
+
+    def test_worker_gate_protocol_bypass_keeps_profile_edge_check(self) -> None:
+        state = {
+            "scheduled_task_exists": True,
+            "scheduled_task_state": "Running",
+            "worker_process_count": 1,
+            "profile_edge_process_count": 0,
+        }
+        with mock.patch(
+            "run_1688_stop_sale_pipeline.query_crawler_worker_state",
+            return_value=dict(state),
+        ):
+            result = assert_crawler_worker_paused(
+                "YYDD-1688-Crawler-Worker",
+                "gonglai",
+                allow_active_worker=True,
+            )
+        self.assertTrue(result["worker_activity_bypassed_by_protocol"])
+
+        state_with_edge = dict(state, profile_edge_process_count=1)
+        with mock.patch(
+            "run_1688_stop_sale_pipeline.query_crawler_worker_state",
+            return_value=state_with_edge,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "Profile Edge"):
+                assert_crawler_worker_paused(
+                    "YYDD-1688-Crawler-Worker",
+                    "gonglai",
+                    allow_active_worker=True,
+                )
 
 
 if __name__ == "__main__":
