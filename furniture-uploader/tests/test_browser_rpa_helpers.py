@@ -3795,5 +3795,105 @@ class BrowserRPAHelperTests(unittest.TestCase):
         )
 
 
+class TinyMCEEditorDetectionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.browser = BrowserRPA({}, PROJECT_ROOT)
+
+    def _driver_with_editors(self, editors: object) -> FakeDriver:
+        class EditorDriver(FakeDriver):
+            def execute_script(self, script: str, *args: object) -> object:
+                return editors
+
+        return EditorDriver()
+
+    def test_detect_prefers_configured_editor_when_present(self) -> None:
+        self.browser.driver = self._driver_with_editors(
+            [{"id": "tinyMCE-0", "visible": True}, {"id": "tinyMCE-1", "visible": True}]
+        )
+        editor_id = self.browser._detect_tinymce_editor_id({}, {"by": "css", "value": "#tinyMCE-0"})
+        self.assertEqual(editor_id, "tinyMCE-0")
+
+    def test_detect_falls_back_to_visible_editor_on_edit_page(self) -> None:
+        # The draft2offer edit page initializes the detail editor with a
+        # different ID; the configured tinyMCE-0 is absent.
+        self.browser.driver = self._driver_with_editors(
+            [{"id": "tinyMCE-1", "visible": True}]
+        )
+        editor_id = self.browser._detect_tinymce_editor_id({}, {"by": "css", "value": "#tinyMCE-0"})
+        self.assertEqual(editor_id, "tinyMCE-1")
+
+    def test_detect_falls_back_to_first_tinymce_editor_when_none_visible(self) -> None:
+        self.browser.driver = self._driver_with_editors(
+            [{"id": "other-editor", "visible": True}, {"id": "tinyMCE-2", "visible": False}]
+        )
+        editor_id = self.browser._detect_tinymce_editor_id({}, {"by": "css", "value": "#tinyMCE-0"})
+        self.assertEqual(editor_id, "tinyMCE-2")
+
+    def test_detect_returns_configured_when_no_editors(self) -> None:
+        self.browser.driver = self._driver_with_editors([])
+        editor_id = self.browser._detect_tinymce_editor_id({}, {"by": "css", "value": "#tinyMCE-0"})
+        self.assertEqual(editor_id, "tinyMCE-0")
+
+    def test_detect_returns_configured_when_probe_fails(self) -> None:
+        class BrokenDriver(FakeDriver):
+            def execute_script(self, script: str, *args: object) -> object:
+                raise RuntimeError("runtime unavailable")
+
+        self.browser.driver = BrokenDriver()
+        editor_id = self.browser._detect_tinymce_editor_id({}, {"by": "css", "value": "#tinyMCE-0"})
+        self.assertEqual(editor_id, "tinyMCE-0")
+
+    def test_detect_respects_step_editor_id_override(self) -> None:
+        self.browser.driver = self._driver_with_editors([{"id": "custom-editor", "visible": True}])
+        editor_id = self.browser._detect_tinymce_editor_id(
+            {"editor_id": "custom-editor"}, {"by": "css", "value": "#tinyMCE-0"}
+        )
+        self.assertEqual(editor_id, "custom-editor")
+
+    def test_tinymce_ready_accepts_any_editor_frame(self) -> None:
+        class FrameDriver(FakeDriver):
+            def execute_script(self, script: str, *args: object) -> object:
+                # JS now scans every tinyMCE iframe, not only the configured one.
+                self.scanned_any_frame = "iframe[id^='tinyMCE-'][id$='_ifr']" in script
+                return True
+
+        driver = FrameDriver()
+        self.browser.driver = driver
+        self.assertTrue(self.browser._tinymce_ready({"editor_timeout_seconds": 0.2}))
+        self.assertTrue(driver.scanned_any_frame)
+
+    def test_tinymce_ready_returns_false_on_timeout(self) -> None:
+        class NoFrameDriver(FakeDriver):
+            def execute_script(self, script: str, *args: object) -> object:
+                return False
+
+        self.browser.driver = NoFrameDriver()
+        self.assertFalse(self.browser._tinymce_ready({"editor_timeout_seconds": 0.2}))
+
+    def test_write_tinymce_content_uses_detected_editor_id(self) -> None:
+        calls: list[tuple[str, tuple]] = []
+
+        class WriteDriver(FakeDriver):
+            def execute_script(self, script: str, *args: object) -> object:
+                calls.append((script, args))
+                if "tinyMCE.editors" in script:
+                    return [{"id": "tinyMCE-1", "visible": True}]
+                if "editor_not_found" in script:
+                    return {"ok": True, "textareaValue": "<p>ok</p>"}
+                return True
+
+        self.browser.driver = WriteDriver()
+        self.browser._ensure_old_tinymce_mode = lambda _step: None  # type: ignore[assignment]
+        self.browser._pause = lambda _seconds: None  # type: ignore[assignment]
+        self.browser._write_tinymce_content(
+            {"editor_wait_seconds": 0},
+            {"by": "css", "value": "#tinyMCE-0"},
+            "<p>detail</p>",
+        )
+        write_calls = [args for script, args in calls if "editor_not_found" in script]
+        self.assertEqual(len(write_calls), 1)
+        self.assertEqual(write_calls[0][0], "tinyMCE-1")
+
+
 if __name__ == "__main__":
     unittest.main()

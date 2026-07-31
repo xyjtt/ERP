@@ -4344,7 +4344,7 @@ class BrowserRPA:
 
         fallback_selector = self._resolve_selector(step.get("fallback_picker_selector", {}), context)
         if not self._selector_is_configured(fallback_selector):
-            editor_id = self._resolve_tinymce_editor_id(step, selector)
+            editor_id = self._detect_tinymce_editor_id(step, selector)
             raise ValueError(
                 f"TinyMCE editor '{editor_id}' does not configure a picker upload opener."
             )
@@ -4391,7 +4391,7 @@ class BrowserRPA:
             raise RuntimeError("Browser has not been opened.")
 
         self._ensure_old_tinymce_mode(step)
-        editor_id = self._resolve_tinymce_editor_id(step, selector)
+        editor_id = self._detect_tinymce_editor_id(step, selector)
         html_value = self._build_tinymce_html(value)
         append_mode = str(step.get("append_mode", "replace")).strip().lower()
         result = self.driver.execute_script(
@@ -4508,12 +4508,27 @@ class BrowserRPA:
             wait.until(
                 lambda driver: driver.execute_script(
                     """
-                    const selector = arguments[0];
-                    const node = document.querySelector(selector);
-                    if (!node) return false;
-                    const rect = node.getBoundingClientRect();
-                    const style = window.getComputedStyle(node);
-                    return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+                    const configured = arguments[0];
+                    const candidates = [];
+                    if (configured) {
+                      candidates.push(configured);
+                    }
+                    document
+                      .querySelectorAll("iframe[id^='tinyMCE-'][id$='_ifr']")
+                      .forEach((node) => candidates.push('#' + node.id));
+                    const isVisible = (node) => {
+                      if (!node) return false;
+                      const rect = node.getBoundingClientRect();
+                      const style = window.getComputedStyle(node);
+                      return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+                    };
+                    return candidates.some((selector) => {
+                      try {
+                        return isVisible(document.querySelector(selector));
+                      } catch (error) {
+                        return false;
+                      }
+                    });
                     """,
                     resolved_frame_selector.get("value", ""),
                 )
@@ -4521,6 +4536,51 @@ class BrowserRPA:
             return True
         except TimeoutException:
             return False
+
+    def _detect_tinymce_editor_id(self, step: dict[str, Any], selector: dict[str, str]) -> str:
+        configured = self._resolve_tinymce_editor_id(step, selector)
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        try:
+            detected = self.driver.execute_script(
+                """
+                const editors = (window.tinyMCE && window.tinyMCE.editors) || [];
+                const list = Array.isArray(editors) ? editors : Object.values(editors || {});
+                return list.map((editor) => {
+                  const id = String((editor && editor.id) || '').trim();
+                  let visible = false;
+                  try {
+                    const element = editor && editor.getElement ? editor.getElement() : null;
+                    const frame = element && element.ownerDocument
+                      ? element.ownerDocument.querySelector('#' + id + '_ifr')
+                      : null;
+                    const node = frame || element;
+                    if (node) {
+                      const rect = node.getBoundingClientRect();
+                      const style = window.getComputedStyle(node);
+                      visible = style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+                    }
+                  } catch (error) {
+                    visible = false;
+                  }
+                  return {id, visible};
+                }).filter((entry) => entry.id);
+                """
+            )
+        except Exception:
+            return configured
+        entries = [item for item in (detected or []) if isinstance(item, dict)]
+        editor_ids = [str(item.get("id") or "").strip() for item in entries]
+        if configured in editor_ids:
+            return configured
+        for item in entries:
+            editor_id = str(item.get("id") or "").strip()
+            if item.get("visible") and editor_id.startswith("tinyMCE"):
+                return editor_id
+        for editor_id in editor_ids:
+            if editor_id.startswith("tinyMCE"):
+                return editor_id
+        return configured
 
     def _resolve_tinymce_editor_id(self, step: dict[str, Any], selector: dict[str, str]) -> str:
         configured = str(step.get("editor_id", "")).strip()
@@ -11325,15 +11385,20 @@ class BrowserRPA:
         return bool(
             self.driver.execute_script(
                 """
-                const textarea = document.querySelector('#tinyMCE-0');
-                const rawValue = textarea ? (textarea.value || '') : '';
-                if (rawValue.replace(/\\s+/g, '').length > 0) {
+                const textareas = Array.from(document.querySelectorAll("textarea[id^='tinyMCE-']"));
+                const hasText = textareas.some(
+                  (textarea) => String((textarea && textarea.value) || '').replace(/\\s+/g, '').length > 0
+                );
+                if (hasText) {
                   return true;
                 }
-                const editor = window.tinyMCE && window.tinyMCE.get && window.tinyMCE.get('tinyMCE-0');
-                const html = editor ? (editor.getContent() || '') : '';
-                const text = html.replace(/<[^>]+>/g, ' ').replace(/\\s+/g, ' ').trim();
-                return html.includes('<img') || text.length > 0;
+                const editors = (window.tinyMCE && window.tinyMCE.editors) || [];
+                const list = Array.isArray(editors) ? editors : Object.values(editors || {});
+                return list.some((editor) => {
+                  const html = editor && editor.getContent ? String(editor.getContent() || '') : '';
+                  const text = html.replace(/<[^>]+>/g, ' ').replace(/\\s+/g, ' ').trim();
+                  return html.includes('<img') || text.length > 0;
+                });
                 """
             )
         )
@@ -11348,10 +11413,13 @@ class BrowserRPA:
             const value = ((((state || {}).components || {}).description || {}).props || {}).value || {};
             const detailList = Array.isArray(value.detailList) ? value.detailList : [];
             const stateHtml = detailList.map((item) => String((item || {}).content || '')).join('');
-            const textarea = document.querySelector('#tinyMCE-0');
-            const textareaHtml = textarea ? String(textarea.value || '') : '';
-            const editor = window.tinyMCE && window.tinyMCE.get && window.tinyMCE.get('tinyMCE-0');
-            const editorHtml = editor ? String(editor.getContent() || '') : '';
+            const textareas = Array.from(document.querySelectorAll("textarea[id^='tinyMCE-']"));
+            const textareaHtml = textareas.map((textarea) => String((textarea && textarea.value) || '')).join('');
+            const editors = (window.tinyMCE && window.tinyMCE.editors) || [];
+            const list = Array.isArray(editors) ? editors : Object.values(editors || {});
+            const editorHtml = list
+              .map((editor) => (editor && editor.getContent ? String(editor.getContent() || '') : ''))
+              .join('');
             const html = stateHtml || textareaHtml || editorHtml;
             return (html.match(/<img\\b/gi) || []).length;
             """
