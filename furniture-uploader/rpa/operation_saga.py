@@ -255,11 +255,13 @@ class OperationSagaRepository:
                 ).fetchone()
                 if current is None:
                     raise SagaFencingError("saga_operation_missing")
-                if int(current[1] or 0) != account_fencing_token:
-                    raise SagaFencingError("stale_account_fencing_token")
+                # Idempotent replay of a terminal-success operation is a no-op
+                # regardless of fencing: no state transition happens anyway.
                 if str(current[0] or "") in {"completed", "jushuitan_pending", "ali1688_success"}:
                     connection.commit()
                     return
+                if int(current[1] or 0) != account_fencing_token:
+                    raise SagaFencingError("stale_account_fencing_token")
                 raise SagaReconcileRequiredError(f"saga_state_rejected:{current[0]}")
             if success and outbox_topic:
                 serialized = json.dumps(dict(outbox_payload or {}), ensure_ascii=False, sort_keys=True, default=str)

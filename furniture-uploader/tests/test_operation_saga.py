@@ -11,7 +11,7 @@ RPA_ROOT = PROJECT_ROOT / "rpa"
 if str(RPA_ROOT) not in sys.path:
     sys.path.insert(0, str(RPA_ROOT))
 
-from operation_saga import SagaOperation
+from operation_saga import OperationSagaRepository, SagaOperation
 from sku_operation_saga import (
     build_saga_operation,
     persist_ali1688_results,
@@ -94,3 +94,60 @@ class OperationSagaTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _FakeCursor:
+    def __init__(self, rowcount: int, current: tuple | None) -> None:
+        self.rowcount = rowcount
+        self._current = current
+        self.executed: list[tuple] = []
+
+    def execute(self, sql, params=None):
+        self.executed.append((sql, params))
+        return self
+
+    def fetchone(self):
+        return self._current
+
+
+class _FakeConnection:
+    def __init__(self, cursor: _FakeCursor) -> None:
+        self._cursor = cursor
+        self.commits = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def cursor(self):
+        return self._cursor
+
+    def commit(self):
+        self.commits += 1
+
+
+class _FakeConfig:
+    schema = "app"
+    database = "JSReportReplica"
+
+
+class RecordAli1688ResultIdempotencyTests(unittest.TestCase):
+    def test_completed_state_replay_is_noop_despite_new_fencing(self) -> None:
+        cursor = _FakeCursor(rowcount=0, current=("completed", 15))
+        connection = _FakeConnection(cursor)
+        repository = OperationSagaRepository(
+            _FakeConfig(),
+            connect=lambda _config: connection,
+        )
+        repository.record_ali1688_result(
+            operation_key="k" * 64,
+            account_fencing_token=19,
+            status="already_offline",
+            outbox_topic="jushuitan.cleanup_1688_link",
+            outbox_payload={"operation_key": "k" * 64},
+        )
+        self.assertEqual(connection.commits, 1)
+        insert_count = sum(1 for sql, _ in cursor.executed if "INSERT INTO" in sql)
+        self.assertEqual(insert_count, 0)
