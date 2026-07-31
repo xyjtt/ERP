@@ -340,3 +340,10 @@
 - Local validation: listing `432/432`; title engine `89/89` (requires the declared `jieba` dependency installed); doctor `status: ok` with the two pre-existing empty-selector warnings only.
 - The unique draft remains `6a69bee6e4b01cad1b297a52`; no new draft, no delete, no submit. Live repair and independent inspection are still pending browser-mutex clearance.
 - Full status and next steps: `docs/handoff/1688_LISTING_DRAFT_FIELD_PERSISTENCE_HANDOFF_2026-07-30.md`.
+
+## 2026-07-31 Canary Failure Fix: Draft Rebind + Saga Failure Terminal
+
+- Canary dry-run (draft `6a69bee6e4b01cad1b297a52` rebind) created a new draft `6a6c3d68e4b0651576fe9905` because `--draft-id` was ignored in draft mode: `pending_draft_id` stayed empty, `expected_draft_id` was never set, and the full patch went out without edit identity.
+- `run_1688_listing_task.py` now honors `--draft-id` in draft mode (must reference a known historical draft ID) and fails closed when draft mode would silently create a new draft for a task that already has one; authorized rebuild remains the only allowed new-draft path.
+- Controlled failures (`PublishValidationError`, `ListingContractError`, `ImageAlbumFullError`) now record the saga as `failed_terminal` with `error_code`; unexpected exceptions still leave the saga in `prepared` for reconcile.
+- Local validation: listing `564/564`; new entry tests `13/13`; doctor `status: ok`.
