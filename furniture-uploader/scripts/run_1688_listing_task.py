@@ -36,6 +36,12 @@ from cross_project_runtime import (
     resolve_executor_binding,
 )
 from operation_saga import OperationSagaRepository, SagaOperation, build_operation_key
+from sku_offline_auth import (
+    OfflineLoginRequiredError,
+    OfflineRiskControlError,
+    OfflineStoreMismatchError,
+    ensure_1688_authenticated_session,
+)
 from stop_sale_audit import resolve_stop_sale_app_config
 
 
@@ -430,7 +436,20 @@ def main() -> int:
         try:
             browser.open()
             if not args.skip_login:
-                browser.run_system_workflow(system_config, {})
+                # Bounded automatic login first (one password login + slider RPA
+                # via the shared 1688 runtime CLI); fail closed on risk control,
+                # fall back to the configured interactive flow on other errors.
+                shop_name_for_login = str(((payload.get("shop") or {}).get("shop_name") or "")).strip()
+                try:
+                    ensure_1688_authenticated_session(
+                        args.shared_runtime_root,
+                        account_key,
+                        shop_name_for_login,
+                    )
+                except (OfflineRiskControlError, OfflineStoreMismatchError):
+                    raise
+                except OfflineLoginRequiredError:
+                    browser.run_system_workflow(system_config, {})
             updated, _context = execute_browser_task(
                 execution_payload,
                 mode=args.mode,

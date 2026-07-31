@@ -19,7 +19,12 @@
       "campaign_restriction",
       "delivery_service_backfill_failed",
       "submit_blocked_before_request"
-    ]
+    ],
+    "auto_login_fallback": {
+      "enabled": true,
+      "timeout_seconds": 300,
+      "max_attempts_per_store": 1
+    }
   },
   "reporting": {
     "run_report_dir": "logs/sku_replace/run_reports"
