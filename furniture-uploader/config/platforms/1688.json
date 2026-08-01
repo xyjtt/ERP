@@ -625,7 +625,7 @@
         },
         "selector": {
           "by": "css",
-          "value": "#tinyMCE-0"
+          "value": "[id^='tinyMCE-']"
         }
       },
       {
@@ -636,7 +636,7 @@
         "append_mode": "prepend",
         "selector": {
           "by": "css",
-          "value": "#tinyMCE-0"
+          "value": "[id^='tinyMCE-']"
         }
       },
       {
