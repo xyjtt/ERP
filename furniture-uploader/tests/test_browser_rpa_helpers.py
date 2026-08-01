@@ -778,16 +778,25 @@ class BrowserRPAHelperTests(unittest.TestCase):
         self.browser.driver = FakeDriver()
         self.browser._pause = lambda _seconds: None  # type: ignore[assignment]
         self.browser._encode_file_as_data_url = lambda value: f"data:{value}"  # type: ignore[assignment]
+        state: list[dict] = []
+        ensured_slots: list[int] = []
         cleared_slots: list[int] = []
         invoked_slots: list[int] = []
+        self.browser._ensure_primary_picture_bridge_slot = (  # type: ignore[assignment]
+            lambda _selector, slot: ensured_slots.append(slot)
+        )
         self.browser._clear_primary_picture_bridge_slot = (  # type: ignore[assignment]
             lambda _selector, slot: cleared_slots.append(slot)
         )
-        self.browser._invoke_primary_picture_bridge_upload = (  # type: ignore[assignment]
-            lambda _selector, _data_url, slot: invoked_slots.append(slot) or {"ok": True}
-        )
-        self.browser._read_primary_picture_bridge_slot = (  # type: ignore[assignment]
-            lambda _selector, slot: {"url": f"https://example.com/{slot}.jpg"}
+
+        def invoke(_selector: dict, _data_url: str, slot: int) -> dict:
+            invoked_slots.append(slot)
+            state.append({"url": f"https://example.com/{slot}.jpg", "key": ""})
+            return {"ok": True}
+
+        self.browser._invoke_primary_picture_bridge_upload = invoke  # type: ignore[assignment]
+        self.browser._read_primary_picture_bridge_state = (  # type: ignore[assignment]
+            lambda _selector: [dict(entry) for entry in state]
         )
 
         uploaded = self.browser._upload_images_via_primary_picture_bridge(
@@ -797,9 +806,96 @@ class BrowserRPAHelperTests(unittest.TestCase):
             {},
         )
 
+        self.assertEqual(ensured_slots, [1, 2, 3, 4])
         self.assertEqual(cleared_slots, [1, 2, 3, 4])
         self.assertEqual(invoked_slots, [1, 2, 3, 4])
         self.assertEqual(len(uploaded), 4)
+
+    def test_primary_picture_bridge_ignores_persisted_image_on_edit_page(self) -> None:
+        # draft2offer edit page: one server-persisted image already occupies a
+        # slot; landing detection must only count NEW remote URLs.
+        self.browser.driver = FakeDriver()
+        self.browser._pause = lambda _seconds: None  # type: ignore[assignment]
+        self.browser._encode_file_as_data_url = lambda value: f"data:{value}"  # type: ignore[assignment]
+        persisted = {"url": "https://cbu01.alicdn.com/img/ibank/persisted.jpg", "key": ""}
+        state: list[dict] = [persisted]
+        ensured_slots: list[int] = []
+        self.browser._ensure_primary_picture_bridge_slot = (  # type: ignore[assignment]
+            lambda _selector, slot: ensured_slots.append(slot)
+        )
+        self.browser._clear_primary_picture_bridge_slot = lambda _selector, _slot: None  # type: ignore[assignment]
+
+        def invoke(_selector: dict, _data_url: str, slot: int) -> dict:
+            state.append({"url": f"https://cbu01.alicdn.com/img/ibank/new-{slot}.jpg", "key": ""})
+            return {"ok": True}
+
+        self.browser._invoke_primary_picture_bridge_upload = invoke  # type: ignore[assignment]
+        self.browser._read_primary_picture_bridge_state = (  # type: ignore[assignment]
+            lambda _selector: [dict(entry) for entry in state]
+        )
+
+        uploaded = self.browser._upload_images_via_primary_picture_bridge(
+            {},
+            {"by": "css", "value": "#guid-primaryPicture"},
+            ["1.jpg", "2.jpg", "3.jpg", "4.jpg"],
+            {},
+        )
+
+        self.assertEqual(ensured_slots, [0, 1, 2, 3])
+        self.assertEqual(len(uploaded), 4)
+        self.assertNotIn(persisted["url"], uploaded)
+
+    def test_primary_picture_bridge_records_slot_mismatch(self) -> None:
+        # The component may ignore the requested slot index; the actual
+        # landing slot must be recorded for diagnostics.
+        self.browser.driver = FakeDriver()
+        self.browser._pause = lambda _seconds: None  # type: ignore[assignment]
+        self.browser._encode_file_as_data_url = lambda value: f"data:{value}"  # type: ignore[assignment]
+        state: list[dict] = []
+        self.browser._ensure_primary_picture_bridge_slot = lambda _selector, _slot: None  # type: ignore[assignment]
+        self.browser._clear_primary_picture_bridge_slot = lambda _selector, _slot: None  # type: ignore[assignment]
+
+        def invoke(_selector: dict, _data_url: str, slot: int) -> dict:
+            state.insert(0, {"url": f"https://example.com/landed-{len(state)}.jpg", "key": ""})
+            return {"ok": True}
+
+        self.browser._invoke_primary_picture_bridge_upload = invoke  # type: ignore[assignment]
+        self.browser._read_primary_picture_bridge_state = (  # type: ignore[assignment]
+            lambda _selector: [dict(entry) for entry in state]
+        )
+
+        context: dict = {}
+        uploaded = self.browser._upload_images_via_primary_picture_bridge(
+            {},
+            {"by": "css", "value": "#guid-primaryPicture"},
+            ["1.jpg", "2.jpg"],
+            context,
+        )
+
+        self.assertEqual(len(uploaded), 2)
+        mismatches = context.get("main_image_bridge_slot_mismatches") or []
+        self.assertTrue(any(item.get("landed_slot") == 0 and item.get("expected_slot") == 1 for item in mismatches))
+
+    def test_primary_picture_bridge_times_out_when_upload_never_lands(self) -> None:
+        self.browser.driver = FakeDriver()
+        self.browser._pause = lambda _seconds: None  # type: ignore[assignment]
+        self.browser._encode_file_as_data_url = lambda value: f"data:{value}"  # type: ignore[assignment]
+        self.browser._ensure_primary_picture_bridge_slot = lambda _selector, _slot: None  # type: ignore[assignment]
+        self.browser._clear_primary_picture_bridge_slot = lambda _selector, _slot: None  # type: ignore[assignment]
+        self.browser._invoke_primary_picture_bridge_upload = (  # type: ignore[assignment]
+            lambda _selector, _data_url, _slot: {"ok": True}
+        )
+        self.browser._read_primary_picture_bridge_state = (  # type: ignore[assignment]
+            lambda _selector: [{"url": "https://example.com/old.jpg", "key": ""}]
+        )
+
+        with self.assertRaises(TimeoutException):
+            self.browser._upload_images_via_primary_picture_bridge(
+                {"bridge_upload_timeout_seconds": 0.3},
+                {"by": "css", "value": "#guid-primaryPicture"},
+                ["1.jpg"],
+                {},
+            )
 
     def test_resolve_category_levels_supports_list_and_path(self) -> None:
         self.assertEqual(

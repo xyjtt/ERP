@@ -4686,6 +4686,18 @@ class BrowserRPA:
         for image_index, value in enumerate(values):
             current_slot_index = slot_index + image_index
             data_url = self._encode_file_as_data_url(value)
+            self._ensure_primary_picture_bridge_slot(bridge_selector, current_slot_index)
+            pre_upload_state = self._read_primary_picture_bridge_state(bridge_selector)
+            pre_upload_urls = {
+                str(entry.get("url") or "").strip()
+                for entry in pre_upload_state
+                if str(entry.get("url") or "").strip()
+            }
+            pre_upload_keys = {
+                str(entry.get("key") or "").strip()
+                for entry in pre_upload_state
+                if str(entry.get("key") or "").strip()
+            }
             self._clear_primary_picture_bridge_slot(bridge_selector, current_slot_index)
             self._pause(clear_wait_seconds)
 
@@ -4700,40 +4712,46 @@ class BrowserRPA:
                     f"{result.get('reason', 'unknown error')}"
                 )
 
-            wait = WebDriverWait(self.driver, upload_timeout_seconds)
-            wait.until(
-                lambda _driver: bool(
-                    str(
-                        self._read_primary_picture_bridge_slot(
-                            bridge_selector,
-                            current_slot_index,
-                        ).get("url", "")
-                    ).strip()
-                    or (
-                        not require_remote_url
-                        and str(
-                            self._read_primary_picture_bridge_slot(
-                                bridge_selector,
-                                current_slot_index,
-                            ).get("key", "")
-                        ).strip()
-                    )
-                )
-            )
+            # The edit page may ignore the requested slot index or materialize
+            # slots lazily, so wait for a NEW remote reference to appear
+            # anywhere in the image list and record where it actually landed.
+            landed: dict[str, Any] = {}
 
-            slot_state = self._read_primary_picture_bridge_slot(bridge_selector, current_slot_index)
-            remote_url = str(slot_state.get("url", "")).strip()
-            remote_key = str(slot_state.get("key", "")).strip()
+            def _upload_landed(_driver: Any) -> bool:
+                state = self._read_primary_picture_bridge_state(bridge_selector)
+                for index, entry in enumerate(state):
+                    url = str(entry.get("url") or "").strip()
+                    key = str(entry.get("key") or "").strip()
+                    if url and url not in pre_upload_urls:
+                        landed.update({"slot": index, "url": url, "key": key})
+                        return True
+                    if not require_remote_url and key and key not in pre_upload_keys:
+                        landed.update({"slot": index, "url": "", "key": key})
+                        return True
+                return False
+
+            wait = WebDriverWait(self.driver, upload_timeout_seconds)
+            wait.until(_upload_landed)
+
+            remote_url = str(landed.get("url", "")).strip()
+            remote_key = str(landed.get("key", "")).strip()
             if require_remote_url and not remote_url:
                 raise TimeoutException("Primary picture bridge upload did not produce a remote image URL.")
             if not remote_url and not remote_key:
                 raise TimeoutException("Primary picture bridge upload completed without a remote image reference.")
             if not remote_url and remote_key:
                 remote_url = f"bridge-key:{remote_key}"
+            landed_slot = int(landed.get("slot", current_slot_index))
+            if landed_slot != current_slot_index:
+                mismatches = context.setdefault("main_image_bridge_slot_mismatches", [])
+                if isinstance(mismatches, list):
+                    mismatches.append(
+                        {"expected_slot": current_slot_index, "landed_slot": landed_slot}
+                    )
             uploaded_urls.append(remote_url)
 
             if clear_after_upload:
-                self._clear_primary_picture_bridge_slot(bridge_selector, current_slot_index)
+                self._clear_primary_picture_bridge_slot(bridge_selector, landed_slot)
                 self._pause(clear_wait_seconds)
 
         return uploaded_urls
@@ -4774,6 +4792,70 @@ class BrowserRPA:
             data_url,
             slot_index,
         )
+
+    def _read_primary_picture_bridge_state(
+        self,
+        selector: dict[str, str],
+    ) -> list[dict[str, Any]]:
+        result = self._execute_primary_picture_bridge_script(
+            selector,
+            """
+            const value = bridge.props && bridge.props.value ? bridge.props.value : {};
+            const imageList = Array.isArray(value.imageList) ? value.imageList : [];
+            return {
+              ok: true,
+              images: imageList.map((slot) => ({
+                url: String((slot && slot.url) || '').trim(),
+                key: String((slot && slot.key) || '').trim(),
+                isAiTaskLoading: Boolean(slot && slot.isAiTaskLoading),
+              })),
+            };
+            """,
+        )
+        if not result.get("ok"):
+            raise ValueError(
+                "Failed to read primary picture bridge state: "
+                f"{result.get('reason', 'unknown error')}"
+            )
+        images = result.get("images")
+        return [dict(item) for item in images if isinstance(item, dict)] if isinstance(images, list) else []
+
+    def _ensure_primary_picture_bridge_slot(
+        self,
+        selector: dict[str, str],
+        slot_index: int,
+    ) -> None:
+        # The draft2offer edit page materializes imageList entries only for
+        # persisted images, so extend the list with placeholder entries before
+        # writing to a slot that does not exist yet.
+        result = self._execute_primary_picture_bridge_script(
+            selector,
+            """
+            const slotIndex = arguments[1];
+            try {
+              bridge.handleUpdateWith('imageList', function(imageList) {
+                if (!Array.isArray(imageList)) {
+                  return;
+                }
+                while (imageList.length <= slotIndex) {
+                  imageList.push({url: null, isAiTaskLoading: false});
+                }
+              });
+              return {ok: true};
+            } catch (error) {
+              return {
+                ok: false,
+                reason: String((error && error.message) || error),
+              };
+            }
+            """,
+            slot_index,
+        )
+        if not result.get("ok"):
+            raise ValueError(
+                "Failed to extend primary picture bridge slots: "
+                f"{result.get('reason', 'unknown error')}"
+            )
 
     def _read_primary_picture_bridge_slot(
         self,
