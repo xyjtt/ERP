@@ -367,3 +367,10 @@
 - `_repair_main_images_before_save` now re-uploads the local main images immediately before the save request when the pre-save count is below the configured minimum (default on; `repair_main_image_before_save` in draft_verification gates it). The post-repair engine state is recorded, so a bridge-write/SDK-state mismatch shows up in the failure context.
 - The saga failure-terminal change proved itself in production: R6's PublishValidationError auto-recorded `failed_terminal` with the original error, no manual reconcile needed.
 - Local validation: listing `585/585`; doctor `status: ok`.
+
+## 2026-08-01 Adaptive Bridge Slots for Edit-Page Main Images
+
+- Canary R7 evidence (`draft4-r7.failure-context.json`): the edit page held one server-persisted main image (`imageList` length 1), the bridge upload to slot 1 never landed (slots 1-3 do not exist until created), and the picker fallback then waited for a `cover-empty` slot that an occupied edit page does not render.
+- The bridge upload is now slot-adaptive: `_ensure_primary_picture_bridge_slot` extends `imageList` with placeholder entries before writing; landing detection waits for a NEW remote URL anywhere in the list (robust to the component ignoring the requested slot index) and records `main_image_bridge_slot_mismatches` diagnostics.
+- The pre-save repair from the previous round automatically inherits the adaptive upload.
+- Local validation: listing `588/588`; doctor `status: ok`.

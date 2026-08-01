@@ -322,3 +322,10 @@
 - Fix for the R6 canary `main images are incomplete before save (1/4)` failure on the draft2offer edit page.
 - Pre-save gate now re-uploads local main images once when the count is below minimum, right before the save request; repair evidence (uploaded URLs, post-repair state, skip/error reasons) is written into the run context.
 - 6 new repair tests; full listing regression `585/585`; doctor `status: ok`.
+
+## 2026-08-01 Adaptive Bridge Slots for Edit-Page Main Images
+
+- Fix for the R7 canary `Step 'main_image' timed out` (cover-empty XPath) on the draft2offer edit page.
+- Root cause from the R7 failure context: edit-page `imageList` only materializes persisted entries (length 1), so writes to slots 1-3 could not land; the picker fallback's empty-slot opener does not exist on an occupied edit page.
+- Bridge upload now extends missing slots with placeholders and detects landing by new remote URL (any slot), recording slot mismatches.
+- 4 updated/new bridge tests; full listing regression `588/588`; doctor `status: ok`.
