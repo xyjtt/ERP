@@ -303,3 +303,10 @@
 - Fix 1: draft mode rebinds only known historical draft IDs via `--draft-id`, and fails closed instead of creating a duplicate draft when history exists but no `pending_draft_id` is set.
 - Fix 2: controlled failures write the saga `failed_terminal` state with `error_code` (`record_ali1688_result`), so retries no longer require manual reconcile; uncontrolled exceptions still require reconcile.
 - Local validation: listing `564/564`; doctor `status: ok`. Real canary rerun and independent inspection remain with the main session.
+
+## 2026-07-31 Edit-Page TinyMCE Adaptation
+
+- Fix for the canary `detail_images` timeout (`selector=#tinyMCE-0`) on the draft2offer edit page.
+- Runtime editor detection replaces the hardcoded `tinyMCE-0` ID across readiness wait, content write, and post-save description checks.
+- 9 new helper tests; full listing regression `573/573`; doctor `status: ok`.
+- Saga from this canary stays `prepared` by design (uncontrolled TimeoutException); the main session reconciles before the next rerun.

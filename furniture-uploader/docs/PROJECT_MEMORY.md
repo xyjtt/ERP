@@ -347,3 +347,9 @@
 - `run_1688_listing_task.py` now honors `--draft-id` in draft mode (must reference a known historical draft ID) and fails closed when draft mode would silently create a new draft for a task that already has one; authorized rebuild remains the only allowed new-draft path.
 - Controlled failures (`PublishValidationError`, `ListingContractError`, `ImageAlbumFullError`) now record the saga as `failed_terminal` with `error_code`; unexpected exceptions still leave the saga in `prepared` for reconcile.
 - Local validation: listing `564/564`; new entry tests `13/13`; doctor `status: ok`.
+
+## 2026-07-31 Edit-Page TinyMCE Adaptation
+
+- Canary rerun confirmed the draft rebind works (draft2offer edited `6a69bee6e4b01cad1b297a52`, no new draft), then `detail_images` timed out on selector `#tinyMCE-0`: the TinyMCE helpers hardcoded the editor ID, but the draft2offer edit page may initialize the detail editor with a different ID.
+- `browser_rpa.py` now resolves the editor at runtime: `_detect_tinymce_editor_id` prefers the configured ID, then the first visible `tinyMCE-*` editor, then any `tinyMCE-*` editor; `_tinymce_ready` waits for any visible `iframe[id^='tinyMCE-'][id$='_ifr']`; `_write_tinymce_content`, `_draft_description_present`, and `_draft_description_image_count` are editor-ID agnostic.
+- Local validation: listing `573/573`; doctor `status: ok`.
