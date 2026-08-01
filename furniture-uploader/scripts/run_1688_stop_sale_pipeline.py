@@ -764,7 +764,15 @@ def run_pipeline(
         if args.mode == "execute" and runtime_guard is not None:
             if saga_repository is None:
                 raise RuntimeError("execute mode requires the Saga repository")
-            with runtime_guard:
+            guard_acquired_here = False
+            if runtime_guard.account_lease is None:
+                # Direct unit-level entry: acquire here. CLI main() acquires the
+                # guard before the legacy crawler wait so the high-priority
+                # request is registered first (write-priority takes effect).
+                runtime_guard.acquire()
+                guard_acquired_here = True
+            guard_outcome = "completed"
+            try:
                 saga_repository.prepare_many(
                     saga_operations or [],
                     owner_token=runtime_guard.owner_token,
@@ -804,6 +812,12 @@ def run_pipeline(
                 )
                 if audit_heartbeat is not None:
                     audit_heartbeat()
+            except BaseException:
+                guard_outcome = "failed"
+                raise
+            finally:
+                if guard_acquired_here:
+                    runtime_guard.release(guard_outcome, suppress_errors=True)
         else:
             # Direct unit-level calls keep the legacy path. The CLI main always
             # supplies runtime_guard for execute mode.
@@ -1078,13 +1092,6 @@ def main() -> int:
     jushuitan_lock, jushuitan_lock_path = build_jushuitan_lock(args, run_id)
     pipeline_invoked = False
     try:
-        if args.mode == "execute":
-            wait_for_active_crawler_tasks(
-                audit_repository,
-                account_key=account_key,
-                timeout_seconds=args.crawler_task_wait_seconds,
-                poll_seconds=args.crawler_task_poll_seconds,
-            )
         emit_pipeline_event(
             run_id,
             "shared_lock_acquire_started",
@@ -1093,6 +1100,39 @@ def main() -> int:
         )
         with lock:
             emit_pipeline_event(run_id, "shared_lock_acquired", lock_path=lock_path)
+            if args.mode == "execute" and runtime_guard is not None:
+                # Register the high-priority write request BEFORE waiting for the
+                # current crawler: new crawler claims for this account are blocked
+                # by the lease layer while we wait (write-priority takes effect).
+                with runtime_guard:
+                    wait_for_active_crawler_tasks(
+                        audit_repository,
+                        account_key=account_key,
+                        timeout_seconds=args.crawler_task_wait_seconds,
+                        poll_seconds=args.crawler_task_poll_seconds,
+                    )
+                    assert_no_recent_stop_sale_runs(
+                        audit_repository,
+                        args.active_stop_sale_max_age_minutes,
+                        [store_name],
+                    )
+                    pipeline_invoked = True
+                    return run_pipeline(
+                        args,
+                        run_id=run_id,
+                        pipeline_dir=pipeline_dir,
+                        jushuitan_root=jushuitan_root,
+                        shared_lock_path=lock_path,
+                        audit_repository=audit_repository,
+                        audit_tasks=audit_tasks,
+                        execute_guard=None,
+                        account_key=account_key,
+                        jushuitan_lock=jushuitan_lock,
+                        jushuitan_lock_path=jushuitan_lock_path,
+                        runtime_guard=runtime_guard,
+                        saga_repository=saga_repository,
+                        saga_operations=saga_operations,
+                    )
             execute_guard: Callable[[], None] | None = None
             if args.mode == "execute":
                 assert_no_recent_stop_sale_runs(

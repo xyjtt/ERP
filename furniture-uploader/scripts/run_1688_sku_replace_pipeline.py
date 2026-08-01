@@ -393,6 +393,12 @@ def run(args: argparse.Namespace) -> int:
                 else {}
             )
             if args.mode == "execute":
+                if runtime_guard is None or saga_repository is None:
+                    raise RuntimeError("execute mode requires runtime lease and Saga repositories")
+                # Register the high-priority write request BEFORE waiting for the
+                # current crawler so the lease layer blocks new crawler claims
+                # for this account while we wait (write-priority takes effect).
+                runtime_guard.acquire()
                 wait_for_active_crawler_tasks(
                     crawler_repository,
                     account_key=account_key,
@@ -421,9 +427,8 @@ def run(args: argparse.Namespace) -> int:
                 else None
             )
             if args.mode == "execute":
-                if runtime_guard is None or saga_repository is None:
-                    raise RuntimeError("execute mode requires runtime lease and Saga repositories")
-                with runtime_guard:
+                guard_outcome = "completed"
+                try:
                     saga_repository.prepare_many(
                         saga_operations,
                         owner_token=runtime_guard.owner_token,
@@ -462,6 +467,11 @@ def run(args: argparse.Namespace) -> int:
                     )
                     if heartbeat is not None:
                         heartbeat()
+                except BaseException:
+                    guard_outcome = "failed"
+                    raise
+                finally:
+                    runtime_guard.release(guard_outcome, suppress_errors=True)
             else:
                 emit_pipeline_event(
                     run_id,
