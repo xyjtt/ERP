@@ -310,3 +310,9 @@
 - Runtime editor detection replaces the hardcoded `tinyMCE-0` ID across readiness wait, content write, and post-save description checks.
 - 9 new helper tests; full listing regression `573/573`; doctor `status: ok`.
 - Saga from this canary stays `prepared` by design (uncontrolled TimeoutException); the main session reconciles before the next rerun.
+
+## 2026-08-01 TinyMCE Lazy-Init Probe Loop
+
+- Fix for the R4 canary timing flake: the draft2offer edit page lazy-initializes the detail editor, so a single selector wait is unreliable.
+- `_ensure_old_tinymce_mode` probes for editor-or-toggle while triggering lazy load via scroll; `_tinymce_ready` accepts a per-call timeout override.
+- 6 new probe-loop tests; full listing regression `579/579`; doctor `status: ok`.
