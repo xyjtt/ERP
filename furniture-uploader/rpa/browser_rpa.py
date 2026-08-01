@@ -4444,25 +4444,46 @@ class BrowserRPA:
         if not self.driver:
             raise RuntimeError("Browser has not been opened.")
 
+        # Fast path: the editor is already initialized (e.g. fresh publish page).
+        if self._tinymce_ready(step, timeout_seconds=1.0):
+            return
+
         toggle_selector = step.get(
             "mode_toggle_selector",
             {"by": "css", "value": ".editor-type-toggle-btn button"},
         )
         resolved_toggle_selector = self._resolve_selector(toggle_selector, {})
-        if not self._selector_is_configured(resolved_toggle_selector):
-            return
+        toggle_configured = self._selector_is_configured(resolved_toggle_selector)
 
-        toggle_buttons = self.driver.find_elements(
-            BY_MAPPING.get(resolved_toggle_selector.get("by", "css"), By.CSS_SELECTOR),
-            resolved_toggle_selector.get("value", ""),
-        )
-        if not toggle_buttons:
-            return
+        # Probe loop: the draft2offer edit page lazy-initializes the detail
+        # editor, so poll for the editor or the old-mode toggle while scrolling
+        # the description module into view to trigger lazy loading.
+        init_timeout = max(1.0, float(step.get("editor_init_timeout_seconds", 60) or 60))
+        poll_seconds = max(0.5, float(step.get("editor_init_poll_seconds", 2.5) or 2.5))
+        deadline = time.monotonic() + init_timeout
+        toggle_button = None
+        while time.monotonic() < deadline:
+            if self._tinymce_ready(step, timeout_seconds=0.5):
+                return
+            if toggle_configured:
+                toggle_buttons = self.driver.find_elements(
+                    BY_MAPPING.get(resolved_toggle_selector.get("by", "css"), By.CSS_SELECTOR),
+                    resolved_toggle_selector.get("value", ""),
+                )
+                if toggle_buttons:
+                    toggle_button = toggle_buttons[0]
+                    break
+            self._trigger_description_lazy_load(step)
+            self._pause(poll_seconds)
 
-        if self._tinymce_ready(step):
-            return
+        if toggle_button is None:
+            if self._tinymce_ready(step, timeout_seconds=1.0):
+                return
+            raise TimeoutException(
+                "TinyMCE editor did not initialize on the publish page "
+                "(lazy-load probe exhausted)."
+            )
 
-        toggle_button = toggle_buttons[0]
         self.driver.execute_script("arguments[0].click();", toggle_button)
         self._pause(float(step.get("toggle_wait_seconds", 0.5)))
         confirm_buttons = self.driver.find_elements(By.CSS_SELECTOR, ".ant-modal-root button")
@@ -4472,29 +4493,53 @@ class BrowserRPA:
 
         if not self._tinymce_ready(step):
             raise TimeoutException("TinyMCE editor did not become ready after switching to old mode.")
-        return
 
-        toggle_button = toggle_buttons[0]
-        toggle_text = " ".join(toggle_button.text.split())
-        if "返回到旧版" in toggle_text:
-            self.driver.execute_script("arguments[0].click();", toggle_button)
-            self._pause(float(step.get("toggle_wait_seconds", 0.5)))
-            confirm_buttons = self.driver.find_elements(By.CSS_SELECTOR, ".ant-modal-root button")
-            if confirm_buttons:
-                self.driver.execute_script("arguments[0].click();", confirm_buttons[-1])
-            self._pause(float(step.get("confirm_wait_seconds", 1.5)))
-        if "返回到旧版" in toggle_text:
-            self.driver.execute_script("arguments[0].click();", toggle_button)
-            self._pause(float(step.get("toggle_wait_seconds", 0.5)))
-            confirm_buttons = self.driver.find_elements(By.CSS_SELECTOR, ".ant-modal-root button")
-            if confirm_buttons:
-                self.driver.execute_script("arguments[0].click();", confirm_buttons[-1])
-            self._pause(float(step.get("confirm_wait_seconds", 1.5)))
+    def _trigger_description_lazy_load(self, step: dict[str, Any]) -> None:
+        if not self.driver:
+            return
+        module_selector = str(step.get("description_module_selector", "")).strip()
+        try:
+            self.driver.execute_script(
+                """
+                const configured = String(arguments[0] || '').trim();
+                const candidates = [];
+                if (configured) {
+                  candidates.push(configured);
+                }
+                candidates.push('#guid-description');
+                candidates.push("[id^='guid-'][id*='escription']");
+                candidates.push('.module-description');
+                candidates.push("[class*='description']");
+                let target = null;
+                for (const selector of candidates) {
+                  try {
+                    const node = document.querySelector(selector);
+                    if (node) {
+                      target = node;
+                      break;
+                    }
+                  } catch (error) {
+                    continue;
+                  }
+                }
+                if (!target) {
+                  target = document.body;
+                }
+                try {
+                  target.scrollIntoView({block: 'center'});
+                } catch (error) {
+                  // A detached or non-layout node cannot be scrolled; events below still fire.
+                }
+                window.dispatchEvent(new Event('scroll'));
+                window.dispatchEvent(new Event('resize'));
+                return true;
+                """,
+                module_selector,
+            )
+        except Exception:
+            return
 
-        if not self._tinymce_ready(step):
-            raise TimeoutException("TinyMCE editor did not become ready after switching to old mode.")
-
-    def _tinymce_ready(self, step: dict[str, Any]) -> bool:
+    def _tinymce_ready(self, step: dict[str, Any], timeout_seconds: float | None = None) -> bool:
         if not self.driver:
             raise RuntimeError("Browser has not been opened.")
 
@@ -4503,7 +4548,12 @@ class BrowserRPA:
             {"by": "css", "value": "#tinyMCE-0_ifr"},
         )
         resolved_frame_selector = self._resolve_selector(frame_selector, {})
-        wait = WebDriverWait(self.driver, float(step.get("editor_timeout_seconds", 15)))
+        wait_seconds = (
+            float(timeout_seconds)
+            if timeout_seconds is not None
+            else float(step.get("editor_timeout_seconds", 15))
+        )
+        wait = WebDriverWait(self.driver, max(0.1, wait_seconds))
         try:
             wait.until(
                 lambda driver: driver.execute_script(

@@ -3895,5 +3895,101 @@ class TinyMCEEditorDetectionTests(unittest.TestCase):
         self.assertEqual(write_calls[0][0], "tinyMCE-1")
 
 
+class TinyMCELazyInitProbeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.browser = BrowserRPA({}, PROJECT_ROOT)
+        self.browser._pause = lambda _seconds: None  # type: ignore[assignment]
+        self.step = {
+            "editor_init_timeout_seconds": 5,
+            "editor_init_poll_seconds": 0.5,
+            "toggle_wait_seconds": 0,
+            "confirm_wait_seconds": 0,
+            "editor_timeout_seconds": 0.2,
+        }
+
+    def _patch_ready_sequence(self, outcomes: list[bool]) -> None:
+        remaining = list(outcomes)
+
+        def fake_ready(step: dict, timeout_seconds: float | None = None) -> bool:
+            if remaining:
+                return remaining.pop(0)
+            return False
+
+        self.browser._tinymce_ready = fake_ready  # type: ignore[assignment]
+
+    def test_fast_path_returns_without_lazy_load_when_editor_ready(self) -> None:
+        self._patch_ready_sequence([True])
+        lazy_calls: list[dict] = []
+        self.browser._trigger_description_lazy_load = lambda step: lazy_calls.append(step)  # type: ignore[assignment]
+        self.browser.driver = FakeDriver()
+        self.browser._ensure_old_tinymce_mode(self.step)
+        self.assertEqual(lazy_calls, [])
+
+    def test_probe_loop_waits_for_lazy_initialized_editor(self) -> None:
+        # R4 scenario: no editor and no toggle at first; the editor appears
+        # after the page is scrolled/probed.
+        self._patch_ready_sequence([False, False, True])
+        lazy_calls: list[dict] = []
+        self.browser._trigger_description_lazy_load = lambda step: lazy_calls.append(step)  # type: ignore[assignment]
+        self.browser.driver = FakeDriver()  # no toggle buttons
+        self.browser._ensure_old_tinymce_mode(self.step)
+        self.assertGreaterEqual(len(lazy_calls), 1)
+
+    def test_probe_loop_raises_clear_timeout_when_editor_never_appears(self) -> None:
+        self._patch_ready_sequence([])
+        lazy_calls: list[dict] = []
+        self.browser._trigger_description_lazy_load = lambda step: lazy_calls.append(step)  # type: ignore[assignment]
+        self.browser.driver = FakeDriver()
+        with self.assertRaises(TimeoutException) as ctx:
+            self.browser._ensure_old_tinymce_mode(self.step)
+        self.assertIn("lazy-load probe exhausted", str(ctx.exception))
+        self.assertGreaterEqual(len(lazy_calls), 1)
+
+    def test_probe_loop_clicks_old_mode_toggle_when_it_appears(self) -> None:
+        # Editor never ready before the toggle; ready after the toggle click.
+        self._patch_ready_sequence([False, False, True])
+        clicks: list[tuple[str, tuple]] = []
+
+        class ToggleDriver(FakeDriver):
+            def find_elements(self, by: object, value: object) -> list[FakeTextElement]:
+                if "editor-type-toggle-btn" in str(value):
+                    return [FakeTextElement("返回到旧版")]
+                return []
+
+            def execute_script(self, script: str, *args: object) -> object:
+                clicks.append((script, args))
+                return None
+
+        self.browser.driver = ToggleDriver()
+        self.browser._ensure_old_tinymce_mode(self.step)
+        click_scripts = [script for script, _args in clicks if "click()" in script]
+        self.assertGreaterEqual(len(click_scripts), 1)
+
+    def test_probe_loop_raises_when_toggle_switch_does_not_yield_editor(self) -> None:
+        self._patch_ready_sequence([])  # never ready
+
+        class ToggleDriver(FakeDriver):
+            def find_elements(self, by: object, value: object) -> list[FakeTextElement]:
+                if "editor-type-toggle-btn" in str(value):
+                    return [FakeTextElement("返回到旧版")]
+                return []
+
+            def execute_script(self, script: str, *args: object) -> object:
+                return None
+
+        self.browser.driver = ToggleDriver()
+        with self.assertRaises(TimeoutException) as ctx:
+            self.browser._ensure_old_tinymce_mode(self.step)
+        self.assertIn("did not become ready after switching to old mode", str(ctx.exception))
+
+    def test_trigger_description_lazy_load_swallows_driver_errors(self) -> None:
+        class BrokenDriver(FakeDriver):
+            def execute_script(self, script: str, *args: object) -> object:
+                raise RuntimeError("runtime unavailable")
+
+        self.browser.driver = BrokenDriver()
+        self.browser._trigger_description_lazy_load(self.step)  # must not raise
+
+
 if __name__ == "__main__":
     unittest.main()

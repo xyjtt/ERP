@@ -353,3 +353,10 @@
 - Canary rerun confirmed the draft rebind works (draft2offer edited `6a69bee6e4b01cad1b297a52`, no new draft), then `detail_images` timed out on selector `#tinyMCE-0`: the TinyMCE helpers hardcoded the editor ID, but the draft2offer edit page may initialize the detail editor with a different ID.
 - `browser_rpa.py` now resolves the editor at runtime: `_detect_tinymce_editor_id` prefers the configured ID, then the first visible `tinyMCE-*` editor, then any `tinyMCE-*` editor; `_tinymce_ready` waits for any visible `iframe[id^='tinyMCE-'][id$='_ifr']`; `_write_tinymce_content`, `_draft_description_present`, and `_draft_description_image_count` are editor-ID agnostic.
 - Local validation: listing `573/573`; doctor `status: ok`.
+
+## 2026-08-01 TinyMCE Lazy-Init Probe Loop
+
+- Canary R3/R4 proved the draft2offer edit page lazy-initializes the detail editor: R3 found `tinyMCE-0` in place, R4 found no `[id^='tinyMCE-']` editor at all within the wait window.
+- `_ensure_old_tinymce_mode` is now a probe loop (default 60s / 2.5s poll, configurable via `editor_init_timeout_seconds` / `editor_init_poll_seconds`): fast-path when the editor is ready, otherwise poll for the editor or the old-mode toggle while scrolling the description module into view (`_trigger_description_lazy_load`) to trigger lazy loading.
+- The previous silent return when no toggle exists is replaced by a clear `TimeoutException` ("lazy-load probe exhausted"), so optional steps skip via the standard timeout path instead of failing later with a hard write error.
+- Local validation: listing `579/579`; doctor `status: ok`.
