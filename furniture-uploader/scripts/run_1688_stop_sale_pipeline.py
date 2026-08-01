@@ -816,8 +816,10 @@ def run_pipeline(
                 guard_outcome = "failed"
                 raise
             finally:
-                if guard_acquired_here:
-                    runtime_guard.release(guard_outcome, suppress_errors=True)
+                # Always release BEFORE the Jushuitan stage (safe no-op when
+                # already released): slot+account leases and request completion
+                # must not be held while waiting on Jushuitan.
+                runtime_guard.release(guard_outcome, suppress_errors=True)
         else:
             # Direct unit-level calls keep the legacy path. The CLI main always
             # supplies runtime_guard for execute mode.
@@ -1104,7 +1106,12 @@ def main() -> int:
                 # Register the high-priority write request BEFORE waiting for the
                 # current crawler: new crawler claims for this account are blocked
                 # by the lease layer while we wait (write-priority takes effect).
-                with runtime_guard:
+                # run_pipeline's 1688-stage finally releases slot+account and
+                # completes the request BEFORE the Jushuitan stage; the release
+                # here is a safe no-op fallback for early exits.
+                runtime_guard.acquire()
+                guard_outcome = "completed"
+                try:
                     wait_for_active_crawler_tasks(
                         audit_repository,
                         account_key=account_key,
@@ -1133,6 +1140,11 @@ def main() -> int:
                         saga_repository=saga_repository,
                         saga_operations=saga_operations,
                     )
+                except BaseException:
+                    guard_outcome = "failed"
+                    raise
+                finally:
+                    runtime_guard.release(guard_outcome, suppress_errors=True)
             execute_guard: Callable[[], None] | None = None
             if args.mode == "execute":
                 assert_no_recent_stop_sale_runs(

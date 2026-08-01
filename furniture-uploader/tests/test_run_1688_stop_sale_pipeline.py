@@ -232,6 +232,114 @@ class Run1688StopSalePipelineTests(unittest.TestCase):
 
         self.assertEqual(status, "partial")
 
+
+    def test_runtime_lease_releases_before_jushuitan_stage(self) -> None:
+        events: list[str] = []
+
+        class FakeLease:
+            resource_type = "account"
+            resource_key = "gonglai"
+            owner_token = "owner"
+            fencing_token = 7
+
+        class FakeGuard:
+            def __init__(self) -> None:
+                self.account_lease = FakeLease()
+                self.owner_token = "owner"
+
+            @property
+            def account_fencing_token(self) -> int:
+                return 7
+
+            @property
+            def browser_slot_key(self) -> str:
+                return "HOST:1"
+
+            @property
+            def browser_slot_fencing_token(self) -> int:
+                return 3
+
+            def acquire(self) -> None:
+                events.append("acquire")
+
+            def environment(self) -> dict:
+                return {}
+
+            def assert_active(self) -> None:
+                return None
+
+            def release(self, status, suppress_errors=False) -> None:
+                events.append(f"release:{status}")
+
+        class FakeSagaRepository:
+            def prepare_many(self, operations, **kwargs) -> dict:
+                events.append("prepare")
+                return {}
+
+        class FakeAuditConfig:
+            def safe_dict(self):
+                return {"database": "JSReportReplica", "schema": "app"}
+
+        class FakeAuditRepository:
+            config = FakeAuditConfig()
+
+            def start_run(self, **kwargs) -> None:
+                return None
+
+            def finish_run(self, **kwargs) -> None:
+                return None
+
+            def record_1688_results(self, *args, **kwargs) -> None:
+                return None
+
+            def record_jushuitan_results(self, *args, **kwargs) -> None:
+                return None
+
+        def fake_stage(command, **kwargs):
+            stage = kwargs.get("stage", "")
+            events.append(f"stage:{stage}")
+            return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+        args = self.build_args()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pipeline_dir = Path(temp_dir)
+            handoff = pipeline_dir / "run_20260718_001.jushuitan.jsonl"
+            handoff.write_text(
+                '{"task_id": "t1"}' + chr(10),
+                encoding="utf-8",
+            )
+            with patch(
+                "run_1688_stop_sale_pipeline.run_stage_command",
+                side_effect=fake_stage,
+            ), patch(
+                "run_1688_stop_sale_pipeline.load_jsonl_records",
+                return_value=[{"status": "already_offline"}],
+            ), patch(
+                "run_1688_stop_sale_pipeline.persist_ali1688_results",
+                return_value=None,
+            ), patch(
+                "run_1688_stop_sale_pipeline.run_audit_heartbeat_process",
+                return_value=None,
+            ):
+                run_pipeline(
+                    args,
+                    run_id="run_20260718_001",
+                    pipeline_dir=pipeline_dir,
+                    jushuitan_root=pipeline_dir,
+                    shared_lock_path="D:/lock",
+                    audit_repository=FakeAuditRepository(),  # type: ignore[arg-type]
+                    audit_tasks=[],
+                    runtime_guard=FakeGuard(),  # type: ignore[arg-type]
+                    saga_repository=FakeSagaRepository(),  # type: ignore[arg-type]
+                    saga_operations=[],
+                )
+
+        self.assertIn("release:completed", events)
+        jushuitan_marks = [index for index, event in enumerate(events) if event.startswith("stage:jushuitan")]
+        self.assertTrue(jushuitan_marks, f"jushuitan stage did not run: {events}")
+        release_index = events.index("release:completed")
+        self.assertLess(release_index, jushuitan_marks[0], f"release must precede jushuitan stage: {events}")
+
     def test_execute_records_terminal_audit_when_subprocess_start_fails(self) -> None:
         class FakeConfig:
             def safe_dict(self):

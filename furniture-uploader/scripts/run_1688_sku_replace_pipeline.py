@@ -399,12 +399,18 @@ def run(args: argparse.Namespace) -> int:
                 # current crawler so the lease layer blocks new crawler claims
                 # for this account while we wait (write-priority takes effect).
                 runtime_guard.acquire()
-                wait_for_active_crawler_tasks(
-                    crawler_repository,
-                    account_key=account_key,
-                    timeout_seconds=args.crawler_task_wait_seconds,
-                    poll_seconds=args.crawler_task_poll_seconds,
-                )
+                guard_outcome = "completed"
+                try:
+                    wait_for_active_crawler_tasks(
+                        crawler_repository,
+                        account_key=account_key,
+                        timeout_seconds=args.crawler_task_wait_seconds,
+                        poll_seconds=args.crawler_task_poll_seconds,
+                    )
+                except BaseException:
+                    guard_outcome = "failed"
+                    runtime_guard.release(guard_outcome, suppress_errors=True)
+                    raise
             if audit_repository is not None:
                 audit_repository.start_run(
                     run_id=run_id,
