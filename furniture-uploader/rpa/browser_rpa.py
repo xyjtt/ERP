@@ -3648,6 +3648,11 @@ class BrowserRPA:
         if not step.get("skip_open", False):
             if self._is_picker_ui_ready() and not self._close_picker_dialog(cleanup_selector):
                 raise ValueError("Existing picker dialog could not be closed cleanly.")
+            selector_value = str((selector or {}).get("value") or "")
+            if "tinyMCE" in selector_value:
+                # The description editor is lazy-initialized on draft2offer edit
+                # pages; run the bounded probe loop so the opener anchor exists.
+                self._ensure_old_tinymce_mode(step)
             opener = self._wait_for_element(selector, clickable=True)
             self._trigger_picker_opener(opener)
 
