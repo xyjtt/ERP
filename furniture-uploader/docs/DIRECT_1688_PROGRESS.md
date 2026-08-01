@@ -316,3 +316,9 @@
 - Fix for the R4 canary timing flake: the draft2offer edit page lazy-initializes the detail editor, so a single selector wait is unreliable.
 - `_ensure_old_tinymce_mode` probes for editor-or-toggle while triggering lazy load via scroll; `_tinymce_ready` accepts a per-call timeout override.
 - 6 new probe-loop tests; full listing regression `579/579`; doctor `status: ok`.
+
+## 2026-08-01 Main-Image Pre-Save Repair
+
+- Fix for the R6 canary `main images are incomplete before save (1/4)` failure on the draft2offer edit page.
+- Pre-save gate now re-uploads local main images once when the count is below minimum, right before the save request; repair evidence (uploaded URLs, post-repair state, skip/error reasons) is written into the run context.
+- 6 new repair tests; full listing regression `585/585`; doctor `status: ok`.

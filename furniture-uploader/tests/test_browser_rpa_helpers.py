@@ -3991,5 +3991,96 @@ class TinyMCELazyInitProbeTests(unittest.TestCase):
         self.browser._trigger_description_lazy_load(self.step)  # must not raise
 
 
+class MainImagePreSaveRepairTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.browser = BrowserRPA({}, PROJECT_ROOT)
+        self.browser.driver = FakeDriver()
+        self.browser._pause = lambda _seconds: None  # type: ignore[assignment]
+        self.publish_config = {
+            "draft_verification": {
+                "enabled": True,
+                "require_title": False,
+                "require_main_image": True,
+                "minimum_main_image_count": 4,
+                "require_specs": False,
+            }
+        }
+        self.context: dict = {"main_images": ["f1.jpg", "f2.jpg", "f3.jpg", "f4.jpg"]}
+        self.browser._draft_main_image_present = lambda: True  # type: ignore[assignment]
+
+    def _patch_state_counts(self, counts: list[int]) -> None:
+        remaining = list(counts)
+
+        def fake_state() -> dict:
+            count = remaining.pop(0) if remaining else 1
+            return {"present": count > 0, "count": count, "square": True}
+
+        self.browser._draft_main_image_state = fake_state  # type: ignore[assignment]
+
+    def test_pre_save_repair_reuploads_and_passes(self) -> None:
+        self._patch_state_counts([1, 4])
+        uploads: list[list[str]] = []
+
+        def fake_upload(step: dict, selector: dict, values: list[str], context: dict) -> list[str]:
+            uploads.append(list(values))
+            return ["u1", "u2", "u3", "u4"]
+
+        self.browser._upload_images_via_primary_picture_bridge = fake_upload  # type: ignore[assignment]
+        self.browser._verify_core_fields_before_draft_save(self.publish_config, self.context)
+        self.assertEqual(uploads, [["f1.jpg", "f2.jpg", "f3.jpg", "f4.jpg"]])
+        self.assertTrue(self.context["main_image_pre_save_repair_attempted"])
+        self.assertEqual(self.context["main_image_pre_save_repair_uploaded_urls"], ["u1", "u2", "u3", "u4"])
+        self.assertEqual(self.context["main_image_uploaded_urls"], ["u1", "u2", "u3", "u4"])
+        self.assertEqual(self.context["draft_main_image_count_pre_save"], 4)
+
+    def test_pre_save_repair_failure_keeps_original_blocked_error(self) -> None:
+        self._patch_state_counts([1, 1])
+
+        def failing_upload(step: dict, selector: dict, values: list[str], context: dict) -> list[str]:
+            raise ValueError("bridge exploded")
+
+        self.browser._upload_images_via_primary_picture_bridge = failing_upload  # type: ignore[assignment]
+        with self.assertRaises(PublishValidationError) as ctx:
+            self.browser._verify_core_fields_before_draft_save(self.publish_config, self.context)
+        self.assertIn("main images are incomplete before save (1/4)", str(ctx.exception))
+        self.assertIn("bridge exploded", self.context["main_image_pre_save_repair_error"])
+
+    def test_pre_save_repair_skipped_without_local_images(self) -> None:
+        self._patch_state_counts([1])
+        self.context["main_images"] = []
+        with self.assertRaises(PublishValidationError):
+            self.browser._verify_core_fields_before_draft_save(self.publish_config, self.context)
+        self.assertEqual(self.context["main_image_pre_save_repair_skipped"], "no_local_main_images")
+
+    def test_pre_save_repair_records_bridge_sdk_mismatch(self) -> None:
+        # Uploads confirm per-slot but the engine state still shows 1 image:
+        # the failure context must carry the diagnostic state.
+        self._patch_state_counts([1, 1])
+
+        def fake_upload(step: dict, selector: dict, values: list[str], context: dict) -> list[str]:
+            return ["u1", "u2", "u3", "u4"]
+
+        self.browser._upload_images_via_primary_picture_bridge = fake_upload  # type: ignore[assignment]
+        with self.assertRaises(PublishValidationError):
+            self.browser._verify_core_fields_before_draft_save(self.publish_config, self.context)
+        repair_state = self.context["main_image_pre_save_repair_state"]
+        self.assertEqual(repair_state["count"], 1)
+        self.assertEqual(self.context["main_image_pre_save_repair_uploaded_urls"], ["u1", "u2", "u3", "u4"])
+
+    def test_pre_save_repair_disabled_by_config(self) -> None:
+        self._patch_state_counts([1])
+        self.publish_config["draft_verification"]["repair_main_image_before_save"] = False
+        with self.assertRaises(PublishValidationError):
+            self.browser._verify_core_fields_before_draft_save(self.publish_config, self.context)
+        self.assertNotIn("main_image_pre_save_repair_attempted", self.context)
+
+    def test_pre_save_repair_runs_only_once(self) -> None:
+        self._patch_state_counts([1])
+        self.context["main_image_pre_save_repair_attempted"] = True
+        with self.assertRaises(PublishValidationError):
+            self.browser._verify_core_fields_before_draft_save(self.publish_config, self.context)
+        self.assertNotIn("main_image_pre_save_repair_uploaded_urls", self.context)
+
+
 if __name__ == "__main__":
     unittest.main()
