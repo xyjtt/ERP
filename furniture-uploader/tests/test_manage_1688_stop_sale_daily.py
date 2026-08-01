@@ -701,6 +701,86 @@ class Manage1688StopSaleDailyTests(unittest.TestCase):
                 self.assertEqual(peak, expected_peak)
                 paused.assert_called_once_with("YYDD-1688-Crawler-Worker")
 
+    def test_protocol_managed_mode_skips_global_worker_pause(self) -> None:
+        parser = build_argument_parser()
+        args = parser.parse_args(
+            [
+                "run",
+                "--mode",
+                "execute",
+                "--yes",
+                "--date",
+                "2026-08-01",
+            ]
+        )
+        pause_calls: list[str] = []
+
+        @contextmanager
+        def recording_paused_worker(task_name):
+            pause_calls.append(task_name)
+            yield {
+                "before": {},
+                "paused": {},
+                "initial_actions": [],
+                "reassertions": [],
+                "restored": {},
+            }
+
+        preflight_json = json.dumps({"status": "ok"})
+        preview_json = json.dumps(
+            {
+                "status": "ok",
+                "selected_count": 1,
+                "required_null_counts": {},
+                "report_path": "D:/preview/report.json",
+                "per_store_preview_csv": [{"count": 1, "path": "D:/preview/store_a.csv"}],
+            }
+        )
+
+        def fake_run_capture(command, *, cwd, log_path):
+            if "build_1688_stop_sale_preview" in " ".join(command):
+                return 0, preview_json
+            return 0, preflight_json
+
+        store_outcome = {
+            "index": 1,
+            "store": {
+                "state": "success",
+                "store_name": "store_a",
+                "batches": [],
+                "batch_attempts": [],
+            },
+            "exhausted_retry_batch_count": 0,
+            "infrastructure_failed": False,
+        }
+
+        with patch(
+            "manage_1688_stop_sale_daily._protocol_enforcement_active",
+            return_value=True,
+        ), patch(
+            "manage_1688_stop_sale_daily.paused_worker",
+            recording_paused_worker,
+        ), patch(
+            "manage_1688_stop_sale_daily.build_manager_lock",
+            return_value=nullcontext(),
+        ), patch(
+            "manage_1688_stop_sale_daily._run_capture",
+            side_effect=fake_run_capture,
+        ), patch(
+            "manage_1688_stop_sale_daily._run_store_batches",
+            return_value=store_outcome,
+        ):
+            return_code, summary = run_daily(args)
+
+        self.assertEqual(
+            pause_calls,
+            [],
+            "global worker pause must not run when protocol manages concurrency",
+        )
+        self.assertEqual(summary["worker_before"], {"protocol_managed": True})
+        self.assertEqual(summary["status"], "success")
+        self.assertEqual(return_code, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -61,8 +61,12 @@ if str(SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_ROOT))
 
 from dingtalk import post_dingtalk_text_message
+from cross_project_runtime import (
+    RuntimeLeaseRepository,
+    resolve_build_sha,
+)
 from run_1688_stop_sale_pipeline import load_jsonl_records, query_crawler_worker_state
-from stop_sale_audit import hydrate_dingtalk_credentials
+from stop_sale_audit import hydrate_dingtalk_credentials, resolve_stop_sale_app_config
 
 
 class DailyManagerError(RuntimeError):
@@ -433,6 +437,33 @@ def paused_worker(task_name: str) -> Iterator[dict[str, Any]]:
             restore_error = str(exc)
         if restore_error:
             raise DailyManagerError(f"Worker restore failed: {restore_error}")
+
+
+def _protocol_enforcement_active(shared_runtime_root: str) -> bool:
+    """True only when the cross-project lease protocol enforces bindings.
+
+    Any failure fails closed to the legacy global worker pause.
+    """
+    try:
+        app_config = resolve_stop_sale_app_config(shared_runtime_root)
+        repository = RuntimeLeaseRepository(app_config)
+        state = repository.assert_protocol(
+            component="erp-stop-sale-daily-gate",
+            build_sha=resolve_build_sha(PROJECT_ROOT.parent),
+        )
+    except Exception:
+        return False
+    return bool(state.enforcement_enabled)
+
+
+def _null_worker_lifecycle() -> dict[str, Any]:
+    return {
+        "before": {"protocol_managed": True},
+        "paused": {"protocol_managed": True},
+        "initial_actions": [],
+        "reassertions": [],
+        "restored": {"protocol_managed": True},
+    }
 
 
 def _count_statuses(records: list[dict[str, Any]], status_key: str = "status") -> dict[str, int]:
@@ -917,18 +948,32 @@ def run_daily(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             worker_checks: list[dict[str, Any]] = []
             worker_guard_lock = Lock()
 
-            with paused_worker(str(args.worker_task_name)) as worker_info:
-                summary["worker_status"] = "paused"
+            if _protocol_enforcement_active(args.shared_runtime_root):
+                # Cross-project lease protocol enforces concurrency per account;
+                # no global worker pause is needed (capacity 2+).
+                worker_context = nullcontext(_null_worker_lifecycle())
+                worker_status_value = "protocol_managed"
+            else:
+                worker_context = paused_worker(str(args.worker_task_name))
+                worker_status_value = "paused"
+            with worker_context as worker_info:
+                summary["worker_status"] = worker_status_value
                 summary["worker_before"] = worker_info["before"]
                 summary["worker_paused"] = worker_info["paused"]
 
                 def worker_guard() -> dict[str, Any]:
                     with worker_guard_lock:
                         checked_at = datetime.now().isoformat(timespec="seconds")
-                        check = ensure_worker_paused(
-                            str(args.worker_task_name),
-                            allow_profile_edges=True,
-                        )
+                        if worker_status_value == "protocol_managed":
+                            check = {
+                                "protocol_managed": True,
+                                **query_crawler_worker_state(str(args.worker_task_name)),
+                            }
+                        else:
+                            check = ensure_worker_paused(
+                                str(args.worker_task_name),
+                                allow_profile_edges=True,
+                            )
                         event = {"checked_at": checked_at, **check}
                         worker_checks.append(event)
                         if check.get("actions"):
