@@ -8991,6 +8991,70 @@ class BrowserRPA:
             f"Too many committed values while resetting spec '{label}'."
         )
 
+    def _repair_main_images_before_save(
+        self,
+        publish_config: dict[str, Any],
+        context: dict[str, Any],
+        minimum_main_image_count: int,
+    ) -> dict[str, Any] | None:
+        """Re-upload local main images when the page state lost them before save.
+
+        The draft2offer edit page can reset the primary-picture module back to
+        the server-persisted draft state after the initial bridge upload (R6
+        canary: 4 uploads confirmed per-slot, only 1 image visible at pre-save).
+        Re-uploading immediately before the save request leaves no room for a
+        later re-hydration to wipe the images again. The post-repair state is
+        recorded so a bridge/SDK mismatch (writes invisible to the engine
+        state) shows up in the failure context.
+        """
+        verification = publish_config.get("draft_verification", {})
+        if not bool(verification.get("repair_main_image_before_save", True)):
+            return None
+        if context.get("main_image_pre_save_repair_attempted"):
+            return None
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        context["main_image_pre_save_repair_attempted"] = True
+
+        repair_step = {
+            "name": "main_image",
+            "source": str(verification.get("main_image_source", "main_images")).strip() or "main_images",
+            "max_files": max(1, int(minimum_main_image_count or 1)),
+            "bridge_selector": publish_config.get(
+                "main_image_bridge_selector",
+                {"by": "css", "value": "#guid-primaryPicture"},
+            ),
+            "bridge_upload_timeout_seconds": float(
+                verification.get("main_image_repair_upload_timeout_seconds", 60) or 60
+            ),
+            "bridge_require_remote_url": True,
+        }
+        values = self._resolve_file_values(repair_step, context)
+        if not values:
+            context["main_image_pre_save_repair_skipped"] = "no_local_main_images"
+            return None
+        try:
+            uploaded_urls = self._upload_images_via_primary_picture_bridge(
+                repair_step,
+                repair_step["bridge_selector"],
+                values,
+                context,
+            )
+        except Exception as exc:
+            context["main_image_pre_save_repair_error"] = f"{type(exc).__name__}: {exc}"
+            return None
+        context["main_image_pre_save_repair_uploaded_urls"] = list(uploaded_urls)
+        if uploaded_urls:
+            context["main_image_uploaded_urls"] = list(uploaded_urls)
+        repaired_state = self._draft_main_image_state()
+        repaired_state = repaired_state if isinstance(repaired_state, dict) else {}
+        repaired_state["present"] = self._draft_main_image_present()
+        repaired_state["count"] = int(
+            repaired_state.get("count") or (1 if repaired_state.get("present") else 0)
+        )
+        context["main_image_pre_save_repair_state"] = repaired_state
+        return repaired_state
+
     def _verify_core_fields_before_draft_save(
         self,
         publish_config: dict[str, Any],
@@ -9032,6 +9096,21 @@ class BrowserRPA:
             context["draft_main_image_pre_save"] = main_image_present
             context["draft_main_image_count_pre_save"] = main_image_count
             context["draft_main_image_count_expected_pre_save"] = minimum_main_image_count
+            if main_image_present and main_image_count < minimum_main_image_count:
+                repaired_state = self._repair_main_images_before_save(
+                    publish_config,
+                    context,
+                    minimum_main_image_count,
+                )
+                if repaired_state:
+                    main_image_state = repaired_state
+                    main_image_present = bool(main_image_state.get("present"))
+                    main_image_count = int(
+                        main_image_state.get("count") or (1 if main_image_present else 0)
+                    )
+                    context["draft_main_image_state_pre_save"] = main_image_state
+                    context["draft_main_image_pre_save"] = main_image_present
+                    context["draft_main_image_count_pre_save"] = main_image_count
             if not main_image_present:
                 raise PublishValidationError("draft save blocked: main image is empty before save.")
             if main_image_count < minimum_main_image_count:

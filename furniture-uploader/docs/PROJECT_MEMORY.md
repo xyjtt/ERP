@@ -360,3 +360,10 @@
 - `_ensure_old_tinymce_mode` is now a probe loop (default 60s / 2.5s poll, configurable via `editor_init_timeout_seconds` / `editor_init_poll_seconds`): fast-path when the editor is ready, otherwise poll for the editor or the old-mode toggle while scrolling the description module into view (`_trigger_description_lazy_load`) to trigger lazy loading.
 - The previous silent return when no toggle exists is replaced by a clear `TimeoutException` ("lazy-load probe exhausted"), so optional steps skip via the standard timeout path instead of failing later with a hard write error.
 - Local validation: listing `579/579`; doctor `status: ok`.
+
+## 2026-08-01 Main-Image Pre-Save Repair
+
+- Canary R6: `detail_images` passed; the pre-save gate failed with `main images are incomplete before save (1/4)`. Per-slot bridge readbacks had passed during upload, so the edit page appears to reset the primary-picture module back to the server-persisted draft state (1 image) before the save gate.
+- `_repair_main_images_before_save` now re-uploads the local main images immediately before the save request when the pre-save count is below the configured minimum (default on; `repair_main_image_before_save` in draft_verification gates it). The post-repair engine state is recorded, so a bridge-write/SDK-state mismatch shows up in the failure context.
+- The saga failure-terminal change proved itself in production: R6's PublishValidationError auto-recorded `failed_terminal` with the original error, no manual reconcile needed.
+- Local validation: listing `585/585`; doctor `status: ok`.
