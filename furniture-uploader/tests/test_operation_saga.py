@@ -151,3 +151,39 @@ class RecordAli1688ResultIdempotencyTests(unittest.TestCase):
         self.assertEqual(connection.commits, 1)
         insert_count = sum(1 for sql, _ in cursor.executed if "INSERT INTO" in sql)
         self.assertEqual(insert_count, 0)
+
+
+class _RequeueCursor:
+    def __init__(self) -> None:
+        self.rowcount = -1
+        self._row = (7, "failed_terminal", 3, "task_not_found", "missing", "failed_terminal", "run-1")
+        self.executed: list[tuple] = []
+
+    def execute(self, sql, params=None):
+        self.executed.append((sql, params))
+        self.rowcount = 1 if "UPDATE" in sql else -1
+        return self
+
+    def fetchone(self):
+        return self._row
+
+
+class OperationSagaOutboxRequeueTests(unittest.TestCase):
+    def test_controlled_requeue_updates_outbox_and_saga_with_cas(self) -> None:
+        cursor = _RequeueCursor()
+        connection = _FakeConnection(cursor)  # type: ignore[arg-type]
+        repository = OperationSagaRepository(
+            _FakeConfig(),
+            connect=lambda _config: connection,
+        )
+        result = repository.requeue_outbox(
+            "a" * 64,
+            expected_status="failed_terminal",
+            expected_error_code="task_not_found",
+            reason="verified target absence classifier deployed",
+        )
+        self.assertEqual(result["status"], "failed_retryable")
+        self.assertEqual(connection.commits, 1)
+        updates = [sql for sql, _ in cursor.executed if "UPDATE" in sql]
+        self.assertEqual(len(updates), 2)
+        self.assertTrue(all("WHERE operation_key = ?" in sql for sql in updates))

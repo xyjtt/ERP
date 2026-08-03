@@ -8,6 +8,7 @@ import {
   CleanupMode,
   CleanupResult,
   CleanupTask,
+  findIdentitySiblingRows,
   findMatchingRows,
   orderCleanupTasksForExecution,
   RowEvidence,
@@ -47,6 +48,12 @@ interface BrowserRunOptions {
 
 interface ProductPageSession {
   target?: Target;
+}
+
+interface EmptyQueryEvidence {
+  productValue: string;
+  onlineSkuValue: string;
+  explicitEmpty: boolean;
 }
 
 const productIdSelectors = [
@@ -118,6 +125,36 @@ async function fillExact(target: Target, candidates: readonly string[], value: s
   }
 }
 
+async function readExactInputValue(target: Target, candidates: readonly string[]): Promise<string> {
+  const input = await resolveFirstVisibleLocator(target, candidates, 8000);
+  return (await input.inputValue().catch(() => "")).trim();
+}
+
+async function hasExplicitNoSearchResults(target: Target): Promise<boolean> {
+  if (
+    await anyVisible(
+      target,
+      [".ant-empty", ".art-empty-wrapper", ".empty-tips", "text=暂无数据", "text=暂无店铺商品"],
+      800,
+    )
+  ) {
+    return true;
+  }
+  const visibleText = await target.locator("body").innerText().catch(() => "");
+  return /共\s*0\s*条/.test(visibleText);
+}
+
+export function isVerifiedEmptyCleanupQuery(
+  evidence: EmptyQueryEvidence,
+  task: Pick<CleanupTask, "product_id" | "online_sku">,
+): boolean {
+  return (
+    evidence.explicitEmpty &&
+    evidence.productValue === task.product_id.trim() &&
+    evidence.onlineSkuValue === task.online_sku.trim()
+  );
+}
+
 async function collectRows(target: Target): Promise<{ locator: Locator; rows: RowEvidence[] }> {
   const locator = target.locator(resultRowSelector);
   const count = await locator.count().catch(() => 0);
@@ -145,6 +182,7 @@ async function saveTaskEvidence(
   task: CleanupTask,
   stage: string,
   error?: unknown,
+  evidenceDetails: Record<string, unknown> = {},
 ): Promise<string> {
   const baseName = sanitizeFileName(`${task.task_id.slice(0, 12)}-${stage}`);
   const baseDir = path.join(options.artifactsDir, options.runId);
@@ -167,6 +205,7 @@ async function saveTaskEvidence(
         url: page.url(),
         rows,
         error_details: error instanceof CleanupBrowserError ? error.details : undefined,
+        evidence_details: evidenceDetails,
         store_picker_diagnostics: pickerDiagnostics,
         captured_at: now(),
       },
@@ -184,7 +223,12 @@ async function queryTaskRows(
   options: BrowserRunOptions,
   selectStore: boolean,
   existingTarget?: Target,
-): Promise<{ target: Target; rows: RowEvidence[]; locator: Locator }> {
+): Promise<{
+  target: Target;
+  rows: RowEvidence[];
+  locator: Locator;
+  emptyQueryEvidence: EmptyQueryEvidence;
+}> {
   await assertNoRiskControl(page);
   const target = existingTarget ?? await ensureProductPage(page);
   await fillExact(target, productIdSelectors, task.product_id);
@@ -213,16 +257,57 @@ async function queryTaskRows(
   await dismissVisibleGuides(page);
   await assertNoRiskControl(page);
   const collected = await collectRows(target);
-  await saveTaskEvidence(page, target, options, task, selectStore ? "query" : "verify");
-  return { target, ...collected };
+  const emptyQueryEvidence = {
+    productValue: await readExactInputValue(target, productIdSelectors),
+    onlineSkuValue: await readExactInputValue(target, onlineSkuSelectors),
+    explicitEmpty: collected.rows.length === 0 && await hasExplicitNoSearchResults(target),
+  };
+  await saveTaskEvidence(
+    page,
+    target,
+    options,
+    task,
+    selectStore ? "query" : "verify",
+    undefined,
+    { empty_query: emptyQueryEvidence },
+  );
+  return { target, ...collected, emptyQueryEvidence };
 }
 
 async function rowSelectionAccepted(row: Locator, input: Locator): Promise<boolean> {
   return (
     (await input.isChecked().catch(() => false)) ||
     (await input.getAttribute("aria-checked").catch(() => "")) === "true" ||
-    (await row.locator(".ant-checkbox-checked, [role='checkbox'][aria-checked='true']").count().catch(() => 0)) > 0
+    (await row.getAttribute("aria-selected").catch(() => "")) === "true" ||
+    /(?:^|\s)(?:art|ant)-table-row-selected(?:\s|$)/.test(
+      await row.getAttribute("class").catch(() => "") ?? "",
+    ) ||
+    (await row.locator(
+      ".ant-checkbox-checked, [role='checkbox'][aria-checked='true'], [data-checked='true']",
+    ).count().catch(() => 0)) > 0
   );
+}
+
+export async function activateRowSelectionWithFallback(
+  isSelected: () => Promise<boolean>,
+  actions: Array<() => Promise<void>>,
+  waitAfterAction: () => Promise<void> = async () => undefined,
+): Promise<boolean> {
+  if (await isSelected()) {
+    return true;
+  }
+  for (const action of actions) {
+    try {
+      await action();
+    } catch {
+      // Custom Ant/Art table checkboxes differ across deployed page versions.
+    }
+    await waitAfterAction();
+    if (await isSelected()) {
+      return true;
+    }
+  }
+  return false;
 }
 
 async function selectExactResultRow(page: Page, target: Target, task: CleanupTask): Promise<void> {
@@ -251,16 +336,34 @@ async function selectExactResultRow(page: Page, target: Target, task: CleanupTas
       if (await rowSelectionAccepted(row, input)) {
         return;
       }
-      await input.check({ force: true }).catch(() => undefined);
-      if (!(await rowSelectionAccepted(row, input))) {
-        const label = input
-          .locator("xpath=ancestor::label[contains(@class,'ant-checkbox-wrapper')][1]")
-          .or(row.locator("td:first-child label.ant-checkbox-wrapper, td:first-child .ant-checkbox-inner"))
-          .first();
-        await label.click({ force: true }).catch(() => undefined);
-      }
-      await page.waitForTimeout(300);
-      if (await rowSelectionAccepted(row, input)) {
+      const wrappers = [
+        input.locator("xpath=ancestor::label[contains(@class,'ant-checkbox-wrapper')][1]"),
+        input.locator("xpath=ancestor::*[contains(@class,'ant-checkbox')][1]"),
+        row.locator("td:first-child label.ant-checkbox-wrapper").first(),
+        row.locator("td:first-child .ant-checkbox-inner").first(),
+      ];
+      const selected = await activateRowSelectionWithFallback(
+        () => rowSelectionAccepted(row, input),
+        [
+          () => input.check({ force: true }),
+          () => input.click({ force: true }),
+          () => input.evaluate((element) => (element as HTMLElement).click()),
+          ...wrappers.map((wrapper) => () => wrapper.click({ force: true })),
+          () => input.evaluate((element) => {
+            if (element instanceof HTMLInputElement) {
+              if (!element.checked) {
+                element.click();
+              }
+              element.dispatchEvent(new Event("input", { bubbles: true }));
+              element.dispatchEvent(new Event("change", { bubbles: true }));
+              return;
+            }
+            (element as HTMLElement).click();
+          }),
+        ],
+        () => page.waitForTimeout(300),
+      );
+      if (selected) {
         return;
       }
     }
@@ -353,6 +456,36 @@ async function processTask(
   session.target = initial.target;
   const matches = findMatchingRows(task, initial.rows);
   if (matches.length === 0) {
+    const identitySiblings = findIdentitySiblingRows(task, initial.rows);
+    const verifiedEmpty = isVerifiedEmptyCleanupQuery(initial.emptyQueryEvidence, task);
+    if (options.mode === "execute" && (identitySiblings.length > 0 || verifiedEmpty)) {
+      const evidencePath = await saveTaskEvidence(
+        page,
+        initial.target,
+        options,
+        task,
+        "already-cleared",
+        undefined,
+        {
+          identity_sibling_count: identitySiblings.length,
+          empty_query: initial.emptyQueryEvidence,
+        },
+      );
+      return {
+        task_id: task.task_id,
+        status: "already_cleared",
+        store_name: task.store_name,
+        product_id: task.product_id,
+        online_sku: task.online_sku,
+        platform_store_item_code: task.platform_store_item_code,
+        category: "verified_target_absent",
+        message: identitySiblings.length > 0
+          ? `Target platform code is absent while ${identitySiblings.length} exact store/product/SKU sibling row(s) remain`
+          : "Exact store/product/SKU query returned an explicit zero-row result",
+        evidence_path: evidencePath,
+        recorded_at: now(),
+      };
+    }
     throw new CleanupBrowserError(
       "task_not_found",
       `No exact row matched store/product/SKU/platform code for ${task.product_id}/${task.online_sku}`,
@@ -503,7 +636,7 @@ export async function runBrowserCleanup(
         activeProduct = { key: sessionKey, session };
         selectedStoreName = task.store_name;
         results.push(result);
-        if (result.status === "success") {
+        if (result.status === "success" || result.status === "already_cleared") {
           await appendLedgerResult(options.ledgerPath, result);
         }
       } catch (error) {

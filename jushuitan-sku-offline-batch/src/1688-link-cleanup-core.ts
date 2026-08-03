@@ -52,6 +52,7 @@ export interface RowEvidence {
 
 const OPERATIONS_CATEGORY_LABELS: Record<string, string> = {
   ledger_idempotency: "历史已完成",
+  verified_target_absent: "目标链接已不存在",
   login_required: "登录失效",
   risk_control: "验证码或风控",
   store_picker_unavailable: "店铺选择器不可用",
@@ -174,6 +175,24 @@ export function findMatchingRows(task: CleanupTask, rows: RowEvidence[]): RowEvi
   });
 }
 
+export function findIdentitySiblingRows(task: CleanupTask, rows: RowEvidence[]): RowEvidence[] {
+  const storeName = normalizedKeyPart(task.store_name);
+  const storeSuffix = normalizedKeyPart(task.store_name.replace(/^阿里巴巴[-—–]?/, ""));
+  const productId = normalizedKeyPart(task.product_id);
+  const onlineSku = normalizedKeyPart(task.online_sku);
+  const platformCode = normalizedKeyPart(task.platform_store_item_code);
+
+  return rows.filter((row) => {
+    const text = normalizedKeyPart(row.text);
+    return (
+      (text.includes(storeName) || (text.includes("阿里巴巴") && text.includes(storeSuffix))) &&
+      text.includes(productId) &&
+      text.includes(onlineSku) &&
+      !text.includes(platformCode)
+    );
+  });
+}
+
 export function assertTasksAllowedForMode(mode: CleanupMode, tasks: CleanupTask[]): void {
   if (
     mode === "execute" &&
@@ -194,7 +213,7 @@ export async function loadSuccessfulLedgerTaskIds(ledgerPath: string): Promise<S
       }
       try {
         const payload = JSON.parse(text) as Partial<CleanupResult>;
-        if (payload.status === "success" && payload.task_id) {
+        if (["success", "already_cleared"].includes(String(payload.status)) && payload.task_id) {
           ids.add(payload.task_id);
         }
       } catch {

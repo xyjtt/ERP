@@ -398,3 +398,106 @@ class OperationSagaRepository:
                 ),
             )
             connection.commit()
+
+    def get_outbox_state(self, operation_key: str) -> dict[str, Any]:
+        outbox = self._table("ali1688_operation_outbox")
+        saga = self._table("ali1688_operation_saga")
+        with self._connect(self.config) as connection:
+            row = connection.cursor().execute(
+                f"""
+                SELECT outbox_row.outbox_id, outbox_row.status, outbox_row.attempt_count,
+                       outbox_row.last_error_code, outbox_row.last_error_summary,
+                       saga_row.state, saga_row.run_id
+                  FROM {outbox} AS outbox_row
+                  JOIN {saga} AS saga_row ON saga_row.operation_key = outbox_row.operation_key
+                 WHERE outbox_row.operation_key = ?
+                """,
+                (operation_key,),
+            ).fetchone()
+        if row is None:
+            raise SagaReconcileRequiredError("outbox_operation_missing")
+        return {
+            "outbox_id": int(row[0]),
+            "operation_key": operation_key,
+            "status": str(row[1] or ""),
+            "attempt_count": int(row[2] or 0),
+            "last_error_code": str(row[3] or ""),
+            "last_error_summary": str(row[4] or ""),
+            "saga_state": str(row[5] or ""),
+            "run_id": str(row[6] or ""),
+        }
+
+    def requeue_outbox(
+        self,
+        operation_key: str,
+        *,
+        expected_status: str,
+        expected_error_code: str = "",
+        reason: str,
+    ) -> dict[str, Any]:
+        if expected_status not in {"failed_retryable", "failed_terminal"}:
+            raise ValueError("Only failed Outbox rows may be requeued")
+        outbox = self._table("ali1688_operation_outbox")
+        saga = self._table("ali1688_operation_saga")
+        with self._connect(self.config) as connection:
+            cursor = connection.cursor()
+            row = cursor.execute(
+                f"""
+                SELECT outbox_row.outbox_id, outbox_row.status, outbox_row.attempt_count,
+                       outbox_row.last_error_code, outbox_row.last_error_summary,
+                       saga_row.state, saga_row.run_id
+                  FROM {outbox} AS outbox_row WITH (UPDLOCK, HOLDLOCK)
+                  JOIN {saga} AS saga_row WITH (UPDLOCK, HOLDLOCK)
+                    ON saga_row.operation_key = outbox_row.operation_key
+                 WHERE outbox_row.operation_key = ?
+                """,
+                (operation_key,),
+            ).fetchone()
+            if row is None:
+                raise SagaReconcileRequiredError("outbox_operation_missing")
+            current_status = str(row[1] or "")
+            current_error_code = str(row[3] or "")
+            saga_state = str(row[5] or "")
+            if current_status != expected_status:
+                raise SagaReconcileRequiredError(
+                    f"outbox_status_changed:{current_status}"
+                )
+            if expected_error_code and current_error_code != expected_error_code:
+                raise SagaReconcileRequiredError(
+                    f"outbox_error_changed:{current_error_code}"
+                )
+            if saga_state not in {"failed_retryable", "failed_terminal"}:
+                raise SagaReconcileRequiredError(f"saga_state_changed:{saga_state}")
+            cursor.execute(
+                f"""
+                UPDATE {outbox}
+                   SET status = 'failed_retryable', claim_owner = NULL, claim_token = NULL,
+                       claim_until = NULL, available_at = SYSUTCDATETIME(),
+                       completed_at = NULL, last_error_code = 'controlled_requeue',
+                       last_error_summary = ?, updated_at = SYSUTCDATETIME()
+                 WHERE operation_key = ? AND status = ?
+                """,
+                (reason[:2000], operation_key, expected_status),
+            )
+            if cursor.rowcount != 1:
+                raise SagaFencingError("outbox_requeue_compare_and_set_failed")
+            cursor.execute(
+                f"""
+                UPDATE {saga}
+                   SET state = 'failed_retryable', jushuitan_status = 'failed_retryable',
+                       error_code = 'controlled_requeue', error_summary = ?,
+                       finished_at = NULL, updated_at = SYSUTCDATETIME()
+                 WHERE operation_key = ? AND state = ?
+                """,
+                (reason[:2000], operation_key, saga_state),
+            )
+            if cursor.rowcount != 1:
+                raise SagaFencingError("saga_requeue_compare_and_set_failed")
+            connection.commit()
+        return {
+            "operation_key": operation_key,
+            "previous_status": current_status,
+            "previous_error_code": current_error_code,
+            "status": "failed_retryable",
+            "reason": reason,
+        }

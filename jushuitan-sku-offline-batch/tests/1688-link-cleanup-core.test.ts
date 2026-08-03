@@ -9,6 +9,7 @@ import {
   buildOperationsMessages,
   buildProductGroupKey,
   buildTaskId,
+  findIdentitySiblingRows,
   findMatchingRows,
   loadCleanupTasks,
   loadSuccessfulLedgerTaskIds,
@@ -85,6 +86,25 @@ test("row matching requires store, product, SKU and platform code", () => {
   assert.deepEqual(rows.map((row) => row.index), [0]);
 });
 
+test("identity siblings prove the query loaded while the target platform code is absent", () => {
+  const task = parseCleanupTask(rawTask);
+  const rows = findIdentitySiblingRows(task, [
+    {
+      index: 0,
+      text: "阿里巴巴-常州工莱家具 商品ID: 1005537490740 other-code CY001301N35",
+    },
+    {
+      index: 1,
+      text: "阿里巴巴-常州工莱家具 商品ID: 1005537490740 6166627859436 CY001301N35",
+    },
+    {
+      index: 2,
+      text: "阿里巴巴-其他店铺 商品ID: 1005537490740 another-code CY001301N35",
+    },
+  ]);
+  assert.deepEqual(rows.map((row) => row.index), [0]);
+});
+
 test("JSONL loading dedupes only identical four-field task identities", async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jst-cleanup-"));
   const file = path.join(dir, "tasks.jsonl");
@@ -99,7 +119,7 @@ test("JSONL loading dedupes only identical four-field task identities", async ()
   assert.equal(tasks.length, 2);
 });
 
-test("ledger recognizes only verified success records", async () => {
+test("ledger recognizes verified success and verified target absence records", async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jst-ledger-"));
   const ledger = path.join(dir, "ledger.jsonl");
   const task = parseCleanupTask(rawTask);
@@ -123,6 +143,22 @@ test("ledger recognizes only verified success records", async () => {
     recorded_at: new Date().toISOString(),
   });
   assert.deepEqual([...await loadSuccessfulLedgerTaskIds(ledger)], [task.task_id]);
+
+  const absentTask = parseCleanupTask({ ...rawTask, platform_store_item_code: "already-gone" });
+  await appendLedgerResult(ledger, {
+    task_id: absentTask.task_id,
+    status: "already_cleared",
+    store_name: absentTask.store_name,
+    product_id: absentTask.product_id,
+    online_sku: absentTask.online_sku,
+    platform_store_item_code: absentTask.platform_store_item_code,
+    category: "verified_target_absent",
+    recorded_at: new Date().toISOString(),
+  });
+  assert.deepEqual(
+    [...await loadSuccessfulLedgerTaskIds(ledger)].sort(),
+    [task.task_id, absentTask.task_id].sort(),
+  );
 });
 
 test("operations messages contain per-store counts and readable failure details", () => {

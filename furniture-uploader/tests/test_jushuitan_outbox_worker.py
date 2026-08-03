@@ -42,7 +42,7 @@ class JushuitanOutboxWorkerTests(unittest.TestCase):
         self.assertEqual(payload["task_id"], "a" * 64)
         self.assertEqual(payload["operation_key"], "a" * 64)
 
-    def test_worker_maps_success_and_bounded_retry(self) -> None:
+    def test_worker_preserves_verified_item_success_when_batch_exit_is_partial(self) -> None:
         repository = FakeRepository()
         first = self.item("a" * 64, attempts=1)
         last = self.item("b" * 64, attempts=3)
@@ -55,11 +55,25 @@ class JushuitanOutboxWorkerTests(unittest.TestCase):
             retry_delay_seconds=30,
         )
         self.assertEqual(repository.finished, [
-            (first.operation_key, "failed_retryable"),
+            (first.operation_key, "succeeded"),
             (last.operation_key, "failed_terminal"),
         ])
-        self.assertEqual(counts["failed_retryable"], 1)
+        self.assertEqual(counts["succeeded"], 1)
         self.assertEqual(counts["failed_terminal"], 1)
+
+    def test_worker_retries_missing_item_result_even_when_batch_exit_is_zero(self) -> None:
+        repository = FakeRepository()
+        item = self.item("a" * 64, attempts=1)
+        counts = finish_claimed_items(
+            repository,  # type: ignore[arg-type]
+            [item],
+            [],
+            return_code=0,
+            max_attempts=3,
+            retry_delay_seconds=30,
+        )
+        self.assertEqual(repository.finished, [(item.operation_key, "failed_retryable")])
+        self.assertEqual(counts["failed_retryable"], 1)
 
     def test_node_command_is_no_notify_and_explicit_execute(self) -> None:
         command = build_node_command(
