@@ -42,6 +42,15 @@ class Manage1688StopSaleDailyTests(unittest.TestCase):
         self.assertIn("[int]$MaxParallelStores = 1", source)
         self.assertIn('"--max-parallel-stores", [string]$MaxParallelStores', source)
         self.assertIn('"-MaxParallelStores", [string]$MaxParallelStores', source)
+        self.assertIn('[string]$SourceDatabase = "JSReportReplica"', source)
+        self.assertIn('[string]$SourceTable = "app.op_stop_sale"', source)
+        self.assertIn('[string]$SourceDriver = "ODBC Driver 17 for SQL Server"', source)
+        self.assertIn('"--source-database", $SourceDatabase', source)
+        self.assertIn('"--source-table", $SourceTable', source)
+        self.assertIn('"--source-driver", $SourceDriver', source)
+        self.assertIn('"-SourceDatabase",', source)
+        self.assertIn('"-SourceTable",', source)
+        self.assertIn('"-SourceDriver",', source)
 
     @staticmethod
     def write_store_csv(path: Path, rows: list[tuple[str, str, str]]) -> None:
