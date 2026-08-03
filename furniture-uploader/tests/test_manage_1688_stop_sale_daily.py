@@ -74,6 +74,8 @@ class Manage1688StopSaleDailyTests(unittest.TestCase):
             "D:/deploy/erp-stop-sale/jushuitan-sku-offline-batch",
             "--worker-task-name",
             "YYDD-1688-Crawler-Worker",
+            "--source-driver",
+            "ODBC Driver 17 for SQL Server",
             "--no-notify",
         ]
         if mode == "execute":
@@ -110,7 +112,10 @@ class Manage1688StopSaleDailyTests(unittest.TestCase):
         )
         self.assertEqual(command[command.index("--database") + 1], "JSReportReplica")
         self.assertEqual(command[command.index("--table") + 1], "app.op_stop_sale")
-        self.assertEqual(command[command.index("--driver") + 1], "ODBC Driver 17 for SQL Server")
+        self.assertEqual(
+            command[command.index("--driver") + 1],
+            "ODBC Driver 17 for SQL Server",
+        )
 
     def test_app_source_preflight_does_not_require_legacy_source_credentials(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
