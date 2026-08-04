@@ -119,12 +119,13 @@ def resolve_edge_driver_path(
     if cached_driver:
         return cached_driver
 
-    try:
-        return EdgeChromiumDriverManager().install()
-    except Exception:
-        if not version:
-            raise
+    if version:
+        # webdriver-manager resolves the newest Edge driver, which can be one
+        # major version ahead of the browser installed on long-running Windows
+        # executors. An attached CDP session requires a matching driver build.
         return download_edge_driver(version)
+
+    return EdgeChromiumDriverManager().install()
 
 
 def detect_edge_version(
