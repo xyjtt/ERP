@@ -1,5 +1,12 @@
 # Delivery Handover 2026-03-24
 
+## 2026-08-04 Combination SKU Skip Handover
+
+- `可替换商品编码（新）` 去除前后空格后等于 `运营自行组合替换` 时，按业务跳过处理，异常原因固定为 `组合货号`，编码为 `combination_sku`。
+- 数据源 preview 生成独立 `business_skipped` CSV/JSON；该类行不进入可执行 CSV，不触发异常拒绝通知。
+- 正式执行入口在租约、审计、Saga、浏览器和聚水潭之前再次过滤；全跳过输入返回 `business_skipped`，`online_actions_started=false`。
+- 本地测试不能替代执行机验收；部署前仍需确认没有正在运行的爬虫、下架、替换或上架浏览器任务。
+
 ## 2026-07-28 Automatic Login Handover
 
 - 下架/替换登录恢复调用共享 1688 CLI 时必须显式开启受限滑块 RPA 和身份核验；普通爬虫登录默认不变。

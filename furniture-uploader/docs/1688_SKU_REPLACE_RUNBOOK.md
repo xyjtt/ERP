@@ -1,13 +1,14 @@
 # 1688 SKU 替换运行手册
 
-更新时间：2026-07-23
+更新时间：2026-08-04
 
 ## 业务规则
 
 - 数据筛选：`平台=Alibaba`、`处理说明=全渠道替换`。
 - 旧货号：`线上商品编码`。
 - 新货号：`可替换商品编码（新）`，兼容读取旧表头 `可替换商品编码`。
-- 非 SKU 值、缺字段、旧新相同、冲突映射和链式映射进入 rejected CSV/JSON；其他合法任务继续生成。
+- `可替换商品编码（新）` 去除前后空格后等于 `运营自行组合替换` 时，按业务跳过，异常原因固定为 `组合货号`；明细进入独立 `business_skipped` CSV/JSON。
+- 其他非 SKU 值、缺字段、旧新相同、冲突映射和链式映射进入 rejected CSV/JSON；合法任务继续生成。
 - 1688 商品搜索必须使用“全部”Tab。
 - 同一店铺、同一商品 ID 的多个 SKU 在同一编辑页修改并一次提交。
 - 1688 成功或 `already_replaced` 后，聚水潭执行“手动同步商品 -> 按链接同步 -> 立即下载”。
@@ -35,7 +36,9 @@ python scripts\build_1688_stop_sale_preview.py `
   --shared-runtime-root E:\1688\1688-script-new
 ```
 
-`2026-07-23` 正式源只读验收：加载 568 条；42 条 `运营自行组合替换` 被拒绝；其余 526 条去除 26 条重复后，生成 500 条可执行 preview。合法任务分布为乐畅 6、工莱 400、沃来 4、淘淘 90。该结果不代表已执行线上替换。
+`2026-07-23` 正式源历史只读结果：加载 568 条；42 条 `运营自行组合替换` 现应归类为 `business_skipped / 组合货号`；其余 526 条去除 26 条重复后，生成 500 条可执行 preview。合法任务分布为乐畅 6、工莱 400、沃来 4、淘淘 90。该结果不代表已执行线上替换，新分类仍需部署后重新生成 preview 复核。
+
+`business_skipped` 行不会申请共享租约、创建审计运行或 Saga、启动 1688 浏览器，也不会生成聚水潭同步任务。全为该类行时，流水线返回 `status=business_skipped` 和 `online_actions_started=false`。
 
 验证完整 1688 + 聚水潭契约，不操作线上：
 
@@ -72,7 +75,7 @@ python scripts\run_1688_sku_replace_pipeline.py `
 ## 日志
 
 - Preview：`logs/sku_replace/previews/`
-- 数据源 Preview 与拒绝明细：`logs/sku_replace/db_previews/`
+- 数据源 Preview、业务跳过与拒绝明细：`logs/sku_replace/db_previews/`
 - 1688 结果：`logs/sku_replace/run_reports/`
 - 流水线：`logs/sku_replace/pipelines/`
 - 正式审计：`JSReportReplica.app.ali1688_sku_replace_run/item`
@@ -84,7 +87,7 @@ python scripts\run_1688_sku_replace_pipeline.py `
 - 不允许从“销售中”Tab搜索替换或下架商品。
 - 不允许把替换自动降级为整商品下架或新增 SKU。
 - 不允许在旧新货号冲突时继续提交。
-- 不允许把 `运营自行组合替换` 等说明文字当作 SKU 写入平台。
+- 不允许把 `运营自行组合替换` 当作 SKU 写入平台；必须按 `组合货号` 业务跳过。其他说明文字仍按非法 SKU 拒绝。
 - 不允许 `A->B、B->C` 或互换式链式映射；该映射无法保证幂等重跑。
 - 不处理短信、扫码、处罚页或未知验证码；滑块只允许受限恢复最多 4 次，不得无限重试。
 - 不使用 `--no-shared-lock` 执行生产任务。

@@ -15,6 +15,8 @@ if str(SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_ROOT))
 
 from build_1688_stop_sale_preview import (  # noqa: E402
+    BUSINESS_SKIP_REASON,
+    BUSINESS_SKIP_REASON_CODE,
     HANDLING,
     METRIC_DATE,
     ONLINE_SKU,
@@ -72,7 +74,7 @@ class Build1688StopSalePreviewTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "映射到多个目标编码"):
             validate_replacement_rows(rows)
 
-    def test_replacement_preview_isolates_invalid_rows_and_keeps_valid_rows(self) -> None:
+    def test_replacement_preview_skips_combination_sku_and_keeps_valid_rows(self) -> None:
         rows = [
             {
                 STORE_NAME: "阿里巴巴-常州工莱家具",
@@ -104,12 +106,33 @@ class Build1688StopSalePreviewTests(unittest.TestCase):
                 executable = list(csv.DictReader(handle))
             with Path(output["rejected_csv"]).open("r", encoding="utf-8-sig", newline="") as handle:
                 rejected = list(csv.DictReader(handle))
+            with Path(output["business_skipped_csv"]).open(
+                "r", encoding="utf-8-sig", newline=""
+            ) as handle:
+                business_skipped = list(csv.DictReader(handle))
 
         self.assertEqual(output["loaded_count"], 2)
         self.assertEqual(output["accepted_count"], 1)
         self.assertEqual(output["selected_count"], 1)
-        self.assertEqual(output["rejected_count"], 1)
+        self.assertEqual(output["rejected_count"], 0)
+        self.assertEqual(output["business_skipped_count"], 1)
         self.assertEqual(executable[0][REPLACEMENT_SKU], "NEW-A")
+        self.assertEqual(rejected, [])
+        self.assertEqual(business_skipped[0][BUSINESS_SKIP_REASON_CODE], "combination_sku")
+        self.assertEqual(business_skipped[0][BUSINESS_SKIP_REASON], "组合货号")
+
+    def test_replacement_preview_still_rejects_other_invalid_target_sku(self) -> None:
+        rows = [{
+            STORE_NAME: "S",
+            PRODUCT_ID: "P",
+            ONLINE_SKU: "OLD-A",
+            REPLACEMENT_SKU: "请运营处理",
+        }]
+
+        accepted, business_skipped, rejected = partition_replacement_rows(rows)
+
+        self.assertEqual(accepted, [])
+        self.assertEqual(business_skipped, [])
         self.assertEqual(rejected[0][REJECTED_REASON_CODE], "invalid_replacement_sku_format")
 
     def test_partition_rejects_all_conflict_rows_but_keeps_unrelated_mapping(self) -> None:
@@ -119,9 +142,10 @@ class Build1688StopSalePreviewTests(unittest.TestCase):
             {STORE_NAME: "S", PRODUCT_ID: "P", ONLINE_SKU: "OTHER", REPLACEMENT_SKU: "NEW-3"},
         ]
 
-        accepted, rejected = partition_replacement_rows(rows)
+        accepted, business_skipped, rejected = partition_replacement_rows(rows)
 
         self.assertEqual([row[ONLINE_SKU] for row in accepted], ["OTHER"])
+        self.assertEqual(business_skipped, [])
         self.assertEqual(len(rejected), 2)
         self.assertTrue(all("source_mapping_conflict" in row[REJECTED_REASON_CODE] for row in rejected))
 

@@ -34,9 +34,12 @@ from operation_saga import OperationSagaRepository
 from sku_operation_saga import build_saga_operations, persist_ali1688_results
 from sku_offline_main import resolve_store_account_binding
 from sku_offline_tasks import (
+    COMBINATION_SKU_REASON,
+    build_combination_sku_skip_record,
     dedupe_offline_tasks,
     filter_offline_tasks,
     load_offline_tasks,
+    partition_manual_combination_replacements,
     validate_tasks_for_operation,
 )
 from run_1688_stop_sale_pipeline import (
@@ -237,21 +240,29 @@ def build_pipeline_notification(summary: dict[str, Any]) -> str:
         f"状态：{summary.get('status', '')}\n"
         f"1688：{json.dumps(summary.get('replace_counts', {}), ensure_ascii=False)}\n"
         f"聚水潭：{json.dumps(summary.get('jushuitan_counts', {}), ensure_ascii=False)}\n"
+        f"组合货号跳过：{summary.get('business_skipped_count', 0)}\n"
         f"异常：{str(summary.get('error_message', '') or '无')[:500]}\n"
         f"报告：{summary.get('summary_path', '')}"
     )
 
 
-def load_selected_replace_tasks(args: argparse.Namespace) -> list[Any]:
+def load_partitioned_replace_tasks(args: argparse.Namespace) -> tuple[list[Any], list[Any]]:
     system_config = load_json_with_local_override(
         PROJECT_ROOT / "config" / "systems" / "1688_sku_replace.json"
     )
     input_config = dict(system_config.get("input", {}))
     tasks = load_offline_tasks(Path(args.file).resolve(), input_config)
     selected, _ = filter_offline_tasks(tasks, dict(input_config.get("filters", {})))
-    validate_tasks_for_operation(selected, "replace")
-    deduped, _ = dedupe_offline_tasks(selected)
-    return deduped[: args.limit] if args.limit > 0 else deduped
+    executable, business_skipped = partition_manual_combination_replacements(selected)
+    validate_tasks_for_operation(executable, "replace")
+    deduped, _ = dedupe_offline_tasks(executable)
+    selected_tasks = deduped[: args.limit] if args.limit > 0 else deduped
+    return selected_tasks, business_skipped
+
+
+def load_selected_replace_tasks(args: argparse.Namespace) -> list[Any]:
+    selected, _ = load_partitioned_replace_tasks(args)
+    return selected
 
 
 def _protocol_enforcement_active(runtime_guard: RuntimeLeaseGuard | None) -> bool:
@@ -284,6 +295,39 @@ def run(args: argparse.Namespace) -> int:
         raise ValueError("runtime lease wait must be non-negative and poll must be positive")
     if args.timeout_1688_seconds <= 0 or args.timeout_jushuitan_seconds <= 0:
         raise ValueError("stage timeouts must be positive")
+    run_id = str(args.run_id).strip() or datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    if not args.run_id:
+        args.run_id = run_id
+    started_at = datetime.now().isoformat(timespec="seconds")
+    audit_tasks: list[Any] = []
+    business_skipped_tasks: list[Any] = []
+    if args.mode == "execute":
+        audit_tasks, business_skipped_tasks = load_partitioned_replace_tasks(args)
+        if not audit_tasks:
+            pipeline_dir = PROJECT_ROOT / "logs" / "sku_replace" / "pipelines"
+            pipeline_dir.mkdir(parents=True, exist_ok=True)
+            summary_path = pipeline_dir / f"{run_id}.summary.json"
+            summary = {
+                "run_id": run_id,
+                "mode": args.mode,
+                "status": "business_skipped",
+                "started_at": started_at,
+                "finished_at": datetime.now().isoformat(timespec="seconds"),
+                "input_file": str(Path(args.file).resolve()),
+                "business_skipped_count": len(business_skipped_tasks),
+                "business_skipped_tasks": [
+                    build_combination_sku_skip_record(task) for task in business_skipped_tasks
+                ],
+                "exception_reason": COMBINATION_SKU_REASON,
+                "online_actions_started": False,
+                "summary_path": str(summary_path),
+            }
+            summary_path.write_text(
+                json.dumps(summary, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            print(json.dumps(summary, ensure_ascii=False, indent=2))
+            return 0
     if args.mode == "execute" and not args.no_notify:
         credentials = hydrate_dingtalk_credentials(args.shared_runtime_root)
         if not all(credentials.values()):
@@ -291,9 +335,6 @@ def run(args: argparse.Namespace) -> int:
                 "DingTalk credentials are missing from both the process environment "
                 "and the 1688 Credential Manager."
             )
-    run_id = str(args.run_id).strip() or datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    if not args.run_id:
-        args.run_id = run_id
     jushuitan_root = Path(args.jushuitan_root).resolve()
     if not (jushuitan_root / "package.json").exists():
         raise FileNotFoundError(f"Jushuitan project not found: {jushuitan_root}")
@@ -307,7 +348,6 @@ def run(args: argparse.Namespace) -> int:
     audit_repository: SkuReplaceAuditRepository | None = None
     crawler_repository: StopSaleAuditRepository | None = None
     audit_contract: dict[str, Any] | None = None
-    audit_tasks: list[Any] = []
     account_key = ""
     store_name = ""
     runtime_guard: RuntimeLeaseGuard | None = None
@@ -323,9 +363,6 @@ def run(args: argparse.Namespace) -> int:
                 "SKU replacement audit tables are missing: "
                 + ", ".join(audit_contract.get("missing_tables", []))
             )
-        audit_tasks = load_selected_replace_tasks(args)
-        if not audit_tasks:
-            raise ValueError("No executable SKU replacement tasks were selected")
         account_key, store_name = resolve_pipeline_account(args, audit_tasks)
         system_config = load_json_with_local_override(
             PROJECT_ROOT / "config" / "systems" / "1688_sku_replace.json"
@@ -368,7 +405,6 @@ def run(args: argparse.Namespace) -> int:
             raise RuntimeError(f"A recent SKU replacement audit run is still active for {store_name}")
     lock, lock_path = build_shared_lock(args, run_id, account_key)
     jushuitan_lock, jushuitan_lock_path = build_jushuitan_lock(args, run_id)
-    started_at = datetime.now().isoformat(timespec="seconds")
     error_message = ""
     return_1688 = 1
     return_jushuitan: int | None = None
@@ -584,6 +620,10 @@ def run(args: argparse.Namespace) -> int:
         "worker_state": worker_state,
         "audit_database": audit_contract,
         "audit_status": status if audit_started else None,
+        "business_skipped_count": len(business_skipped_tasks),
+        "business_skipped_tasks": [
+            build_combination_sku_skip_record(task) for task in business_skipped_tasks
+        ],
         "error_message": error_message,
         "summary_path": str(summary_path),
         "notification_sent": False,

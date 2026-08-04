@@ -23,6 +23,7 @@ from sku_offline_tasks import (
     FileIdentity,
     OfflineTask,
     ProcessedFileRegistry,
+    build_combination_sku_skip_record,
     build_preview_payload,
     dedupe_offline_tasks,
     discover_scan_files,
@@ -30,6 +31,7 @@ from sku_offline_tasks import (
     group_tasks_by_product,
     group_tasks_by_store,
     load_offline_tasks,
+    partition_manual_combination_replacements,
     store_name_matches,
     validate_tasks_for_operation,
 )
@@ -237,6 +239,11 @@ def load_preview_for_files(
         selected_candidates.extend(filtered)
         filtered_out_tasks.extend(skipped)
 
+    business_skipped_tasks: list[OfflineTask] = []
+    if operation == "replace":
+        selected_candidates, business_skipped_tasks = partition_manual_combination_replacements(
+            selected_candidates
+        )
     validate_tasks_for_operation(selected_candidates, operation)
     deduped_selected, duplicate_tasks = dedupe_offline_tasks(selected_candidates)
     if limit > 0:
@@ -271,6 +278,10 @@ def load_preview_for_files(
     preview_payload["selected_tasks"] = deduped_selected
     preview_payload["filtered_out_tasks"] = filtered_out_tasks
     preview_payload["duplicate_tasks"] = duplicate_tasks
+    preview_payload["business_skipped_count"] = len(business_skipped_tasks)
+    preview_payload["business_skipped_tasks"] = [
+        build_combination_sku_skip_record(task) for task in business_skipped_tasks
+    ]
     preview_payload["operation"] = operation
     return preview_payload
 
@@ -314,9 +325,18 @@ def execute_preview(
     jushuitan_handoff_path: Path | None = None,
 ) -> dict[str, Any]:
     selected_tasks = list(preview.get("selected_tasks", []))
-    store_groups = group_tasks_by_store(selected_tasks)
     execution_config = dict(system_config.get("execution", {}))
     operation = resolve_operation(system_config)
+    business_skipped_tasks: list[OfflineTask] = []
+    if operation == "replace":
+        selected_tasks, business_skipped_tasks = partition_manual_combination_replacements(
+            selected_tasks
+        )
+    business_skipped_records = [
+        build_combination_sku_skip_record(task) for task in business_skipped_tasks
+    ]
+    existing_business_skips = list(preview.get("business_skipped_tasks", []))
+    store_groups = group_tasks_by_store(selected_tasks)
     action_label = "replace" if operation == "replace" else "offline"
     if len(store_groups) > 1 and not bool(execution_config.get("allow_multi_store_batch", False)):
         raise ValueError(
@@ -338,6 +358,8 @@ def execute_preview(
         "browser_recovery_attempts": 0,
         "browser_recovery_success": 0,
         "browser_recovery_failed": 0,
+        "business_skipped_count": len(existing_business_skips) + len(business_skipped_records),
+        "business_skipped_tasks": [*existing_business_skips, *business_skipped_records],
     }
     max_attempts = max(1, int(execution_config.get("max_retry", 1)) + 1)
     successful_task_statuses: dict[tuple[str, str, str], str] = {}
@@ -1180,6 +1202,7 @@ def build_summary_notification_content(summary: dict[str, Any]) -> str:
         f"安全停止店铺：{summary.get('stopped_stores', 0)} {stopped_store_text}\n"
         f"重复数量：{summary.get('duplicate_count', 0)}\n"
         f"过滤数量：{summary.get('filtered_out_count', 0)}\n"
+        f"组合货号跳过：{summary.get('business_skipped_count', 0)}\n"
         f"报告路径：{summary.get('report_path', '')}\n"
         f"汇总路径：{summary.get('summary_path', '')}"
     )
@@ -1222,6 +1245,7 @@ def write_preview_report(project_root: Path, preview: dict[str, Any]) -> Path:
         }
         for task in preview.get("duplicate_tasks", [])
     ]
+    payload["business_skipped_tasks"] = list(preview.get("business_skipped_tasks", []))
     target_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return target_path
 
@@ -1233,6 +1257,7 @@ def print_preview(preview: dict[str, Any], preview_path: Path) -> None:
         "selected_count": preview.get("selected_count", 0),
         "filtered_out_count": preview.get("filtered_out_count", 0),
         "duplicate_count": preview.get("duplicate_count", 0),
+        "business_skipped_count": preview.get("business_skipped_count", 0),
         "stores": preview.get("stores", {}),
         "applied_filters": preview.get("applied_filters", {}),
         "loaded_store_names": preview.get("loaded_store_names", []),

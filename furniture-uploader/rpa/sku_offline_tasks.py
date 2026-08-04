@@ -11,6 +11,9 @@ from typing import Any
 DEFAULT_SHEET_NAME = "停产下架通知-链接维度"
 WATCH_FILE_SUFFIXES = {".csv", ".xlsx", ".xls"}
 SKU_CODE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+/#:-]*$")
+MANUAL_COMBINATION_REPLACEMENT = "运营自行组合替换"
+COMBINATION_SKU_REASON_CODE = "combination_sku"
+COMBINATION_SKU_REASON = "组合货号"
 
 
 @dataclass(frozen=True)
@@ -228,6 +231,38 @@ def resolve_input_column(
         if candidate and candidate in available_columns:
             return candidate
     return ""
+
+
+def is_manual_combination_replacement(value: Any) -> bool:
+    return normalize_cell(value) == MANUAL_COMBINATION_REPLACEMENT
+
+
+def partition_manual_combination_replacements(
+    tasks: list[OfflineTask],
+) -> tuple[list[OfflineTask], list[OfflineTask]]:
+    executable: list[OfflineTask] = []
+    business_skipped: list[OfflineTask] = []
+    for task in tasks:
+        if is_manual_combination_replacement(task.replacement_sku):
+            business_skipped.append(task)
+        else:
+            executable.append(task)
+    return executable, business_skipped
+
+
+def build_combination_sku_skip_record(task: OfflineTask) -> dict[str, Any]:
+    return {
+        "store_name": task.store_name,
+        "product_id": task.product_id,
+        "online_sku": task.online_sku,
+        "replacement_sku": task.replacement_sku,
+        "platform_store_item_code": task.platform_store_item_code,
+        "source_file": task.source_file,
+        "source_sheet": task.source_sheet,
+        "source_row_number": task.source_row_number,
+        "skip_reason_code": COMBINATION_SKU_REASON_CODE,
+        "exception_reason": COMBINATION_SKU_REASON,
+    }
 
 
 def validate_tasks_for_operation(tasks: list[OfflineTask], operation: str) -> None:

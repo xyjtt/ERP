@@ -1,5 +1,11 @@
 # Project Evolution
 
+## 2026-08-04 Combination SKU Classification Evolution
+
+- `运营自行组合替换` 从“非法替换货号”调整为明确业务终态 `combination_sku`，中文异常原因为 `组合货号`。
+- 数据模型从 accepted/rejected 两类扩展为 executable/business-skipped/rejected 三类，避免把运营主动组合货号误报为数据质量异常。
+- 业务跳过必须在共享租约、审计运行、Saga、浏览器和聚水潭之前完成；正常非法值仍 fail closed。
+
 ## 2026-07-28 Login Recovery Evolution
 
 - 账号恢复从“遇到滑块直接停店”演进为“仅下架/替换显式启用既有滑块 RPA，最多 4 次”；普通爬虫和普通登录仍默认不自动处理。

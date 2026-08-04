@@ -143,6 +143,41 @@ class SkuOfflineMainTests(unittest.TestCase):
         self.assertEqual(summary["jushuitan_action"], "sync_by_link")
         self.assertIn('"source_status": "already_replaced"', payload)
 
+    def test_execute_preview_skips_combination_sku_before_browser_creation(self) -> None:
+        task = OfflineTask(
+            source_file="replace.csv", source_sheet="CSV", source_row_number=2,
+            store_name="STORE-A", platform="Alibaba", product_id="1001",
+            online_sku="OLD", handling="全渠道替换", replacement_sku="运营自行组合替换",
+            change_image="", platform_store_item_code="CODE", raw={},
+        )
+        config = {
+            "execution": {"operation": "replace"},
+            "notifications": {"dingtalk": {"enabled": False}},
+        }
+
+        with (
+            tempfile.TemporaryDirectory() as temp_dir,
+            patch(
+                "sku_offline_main.SkuOfflineBrowser",
+                side_effect=AssertionError("browser must not be created for combination SKU"),
+            ),
+            patch("sku_offline_main.send_summary_notification"),
+        ):
+            summary = execute_preview(
+                project_root=PROJECT_ROOT,
+                operator_config={"browser": {}},
+                system_config=config,
+                preview={"selected_tasks": [task], "duplicate_count": 0, "filtered_out_count": 0},
+                skip_login=True,
+                no_notify=True,
+                run_report=FakeRunReport(),  # type: ignore[arg-type]
+                jushuitan_handoff_path=Path(temp_dir) / "sync.jsonl",
+            )
+
+        self.assertEqual(summary["selected_count"], 0)
+        self.assertEqual(summary["business_skipped_count"], 1)
+        self.assertEqual(summary["business_skipped_tasks"][0]["exception_reason"], "组合货号")
+
     def build_task(self) -> SimpleNamespace:
         return SimpleNamespace(
             store_name="阿里巴巴-常州速班达家居有限公司",

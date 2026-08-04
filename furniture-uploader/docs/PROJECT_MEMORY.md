@@ -1,5 +1,12 @@
 # Project Memory
 
+## 2026-08-04 Managed Update (Combination SKU Business Skip)
+
+- `可替换商品编码（新）` 规范化后等于 `运营自行组合替换` 时，不再按非法 SKU 处理，而是业务跳过，异常原因为 `组合货号`，结构化编码为 `combination_sku`。
+- 数据源 preview 将该类行写入独立 `business_skipped` CSV/JSON，不进入可执行 CSV，也不计入 rejected 数据异常；其他非 SKU 占位值仍按格式错误拒绝。
+- 正式替换流水线和直接执行入口均有二次拦截；全为组合货号时返回 `business_skipped` 成功终态，不申请租约、不创建审计运行或 Saga、不启动浏览器、不触发聚水潭。
+- 本地定向回归 `61/61`、全仓库回归 `599/599` 通过；尚未部署执行机，生产替换仍需等待当前业务任务自然排空并按既有 Canary 门禁验收。
+
 ## 2026-07-28 Managed Update (Bounded Slider Login Recovery)
 
 - 下架和替换仍先复用账号独立真实 Edge/Profile；登录失效时调用共享 1688 `src.cli login`，仅该调用显式启用既有滑块 RPA，最多 4 次，不处理短信、扫码、处罚页或未知风控。

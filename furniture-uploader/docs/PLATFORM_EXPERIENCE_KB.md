@@ -1,5 +1,12 @@
 # Platform Experience Knowledge Base
 
+## 2026-08-04 Combination SKU Business Rule
+
+- BI 字段 `可替换商品编码（新）` 中的固定值 `运营自行组合替换` 是运营指令，不是 1688 SKU，也不是脏数据。
+- 规范化匹配需先去除前后空格；命中后写 `skip_reason_code=combination_sku`、`exception_reason=组合货号`，并保留店铺、商品 ID、线上 SKU、平台店铺商品编码和源行号。
+- 该类行不得进入 1688 可执行 CSV、聚水潭 handoff、共享租约、审计运行或 Saga。混合批次只执行其余合法映射；全跳过批次返回 `business_skipped`。
+- 不要把其他中文占位值一并放宽；除精确值 `运营自行组合替换` 外，非 SKU 新货号仍按 `invalid_replacement_sku_format` 拒绝。
+
 ## 2026-07-28 Bounded Slider and Identity Findings
 
 - 账号独立 Profile 登录恢复必须由业务调用方显式开启，不能改变普通爬虫登录的默认行为。现行命令同时携带 `--auto-solve-slider`、`--slider-max-attempts 4` 和 `--verify-account-identity`。

@@ -14,13 +14,17 @@ if str(RPA_ROOT) not in sys.path:
     sys.path.insert(0, str(RPA_ROOT))
 
 from sku_offline_tasks import (
+    COMBINATION_SKU_REASON,
+    COMBINATION_SKU_REASON_CODE,
     ProcessedFileRegistry,
+    build_combination_sku_skip_record,
     build_preview_payload,
     dedupe_offline_tasks,
     filter_offline_tasks,
     group_tasks_by_product,
     group_tasks_by_store,
     load_offline_tasks,
+    partition_manual_combination_replacements,
     validate_tasks_for_operation,
 )
 
@@ -88,14 +92,35 @@ class OfflineTaskTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not idempotent"):
             validate_tasks_for_operation(tasks, "replace")
 
-    def test_replacement_validation_rejects_non_sku_placeholder(self) -> None:
+    def test_manual_combination_replacement_is_business_skipped(self) -> None:
         dataframe = pd.DataFrame([{
             "店铺名称": "S",
             "平台": "Alibaba",
             "商品ID": "P",
             "线上商品编码": "OLD-1",
             "处理说明": "全渠道替换",
-            "可替换商品编码（新）": "运营自行组合替换",
+            "可替换商品编码（新）": " 运营自行组合替换 ",
+        }])
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "replace.csv"
+            dataframe.to_csv(path, index=False)
+            tasks = load_offline_tasks(path, self.build_input_config())
+
+        executable, business_skipped = partition_manual_combination_replacements(tasks)
+        record = build_combination_sku_skip_record(business_skipped[0])
+
+        self.assertEqual(executable, [])
+        self.assertEqual(record["skip_reason_code"], COMBINATION_SKU_REASON_CODE)
+        self.assertEqual(record["exception_reason"], COMBINATION_SKU_REASON)
+
+    def test_replacement_validation_still_rejects_other_non_sku_placeholder(self) -> None:
+        dataframe = pd.DataFrame([{
+            "店铺名称": "S",
+            "平台": "Alibaba",
+            "商品ID": "P",
+            "线上商品编码": "OLD-1",
+            "处理说明": "全渠道替换",
+            "可替换商品编码（新）": "请运营处理",
         }])
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "replace.csv"

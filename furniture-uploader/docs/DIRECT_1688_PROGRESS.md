@@ -1,5 +1,12 @@
 # DIRECT 1688 Progress
 
+## 2026-08-04 Managed Update (Manual Combination Replacement Skip)
+
+- 新增业务规则：`可替换商品编码（新）=运营自行组合替换` 的 SKU 直接跳过，异常原因固定为 `组合货号`。
+- 规则同时覆盖正式数据源 preview、`sku_offline_main.py` 替换入口和 `run_1688_sku_replace_pipeline.py`；正常替换任务继续执行，其他非法新货号继续拒绝。
+- 全跳过批次在任何租约、Saga、浏览器和聚水潭动作之前结束，输出 `status=business_skipped` 和逐行结构化明细。
+- 本地定向测试 `61/61`、全仓库测试 `599/599` 通过；执行机部署和真实批次复核尚未执行。
+
 ## 2026-07-28 Managed Update (Automatic Login Identity Gate)
 
 - 下架/替换账号恢复改为显式 `--auto-solve-slider --slider-max-attempts 4 --verify-account-identity`，普通爬虫登录默认行为不变。

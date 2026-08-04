@@ -22,6 +22,11 @@ from stop_sale_audit import hydrate_source_database_credentials
 from stop_sale_audit import hydrate_dingtalk_credentials
 from stop_sale_audit import resolve_stop_sale_app_config
 from dingtalk import post_dingtalk_text_message
+from sku_offline_tasks import (
+    COMBINATION_SKU_REASON,
+    COMBINATION_SKU_REASON_CODE,
+    is_manual_combination_replacement,
+)
 
 
 STORE_NAME = "店铺名称"
@@ -48,6 +53,8 @@ SKU_CODE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+/#:-]*$")
 REJECTED_ROW_NUMBER = "源数据行号"
 REJECTED_REASON_CODE = "拒绝原因编码"
 REJECTED_REASON = "拒绝原因"
+BUSINESS_SKIP_REASON_CODE = "跳过原因编码"
+BUSINESS_SKIP_REASON = "异常原因"
 
 SOURCE_ENV_FALLBACKS = {
     "STOP_SALE_SOURCE_SQLSERVER_HOST": "STOP_SALE_SQLSERVER_HOST",
@@ -94,6 +101,13 @@ REJECTED_COLUMNS = [
     REJECTED_ROW_NUMBER,
     REJECTED_REASON_CODE,
     REJECTED_REASON,
+]
+
+BUSINESS_SKIPPED_COLUMNS = [
+    *REPORT_COLUMNS,
+    REJECTED_ROW_NUMBER,
+    BUSINESS_SKIP_REASON_CODE,
+    BUSINESS_SKIP_REASON,
 ]
 
 DB_FIELD_MAP = {
@@ -426,8 +440,9 @@ def _reject_row(
 
 def partition_replacement_rows(
     rows: Iterable[dict[str, str]],
-) -> tuple[list[dict[str, str]], list[dict[str, Any]]]:
+) -> tuple[list[dict[str, str]], list[dict[str, Any]], list[dict[str, Any]]]:
     candidates: dict[int, dict[str, str]] = {}
+    business_skipped: dict[int, dict[str, Any]] = {}
     rejected: dict[int, dict[str, Any]] = {}
     for index, source_row in enumerate(rows, start=1):
         row = dict(source_row)
@@ -468,6 +483,14 @@ def partition_replacement_rows(
                 reason_code="invalid_source_sku_format",
                 reason=f"线上商品编码不是可执行的 SKU 格式：{old_sku}",
             )
+            continue
+        if is_manual_combination_replacement(new_sku):
+            business_skipped[index] = {
+                **row,
+                REJECTED_ROW_NUMBER: index,
+                BUSINESS_SKIP_REASON_CODE: COMBINATION_SKU_REASON_CODE,
+                BUSINESS_SKIP_REASON: COMBINATION_SKU_REASON,
+            }
             continue
         if not is_valid_sku_code(new_sku):
             _reject_row(
@@ -557,20 +580,18 @@ def partition_replacement_rows(
             )
 
     accepted = [row for index, row in candidates.items() if index not in rejected]
+    business_skipped_rows = [business_skipped[index] for index in sorted(business_skipped)]
     rejected_rows = [rejected[index] for index in sorted(rejected)]
-    return accepted, rejected_rows
+    return accepted, business_skipped_rows, rejected_rows
 
 
 def validate_replacement_rows(rows: Iterable[dict[str, str]]) -> None:
-    _, rejected_rows = partition_replacement_rows(rows)
+    _, _, rejected_rows = partition_replacement_rows(rows)
     if rejected_rows:
         errors = [
             f"row {row[REJECTED_ROW_NUMBER]}: {row[REJECTED_REASON]}"
             for row in rejected_rows
         ]
-        raise ValueError("Invalid 1688 SKU replacement source rows: " + "; ".join(errors[:20]))
-
-    if errors:
         raise ValueError("Invalid 1688 SKU replacement source rows: " + "; ".join(errors[:20]))
 
 
@@ -615,6 +636,23 @@ def write_rejected_outputs(
         writer.writeheader()
         for row in rows:
             writer.writerow({column: row.get(column, "") for column in REJECTED_COLUMNS})
+    json_path.write_text(
+        json.dumps(rows, ensure_ascii=False, indent=2, default=str) + "\n",
+        encoding="utf-8",
+    )
+
+
+def write_business_skipped_outputs(
+    csv_path: Path,
+    json_path: Path,
+    rows: list[dict[str, Any]],
+) -> None:
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    with csv_path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=BUSINESS_SKIPPED_COLUMNS)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({column: row.get(column, "") for column in BUSINESS_SKIPPED_COLUMNS})
     json_path.write_text(
         json.dumps(rows, ensure_ascii=False, indent=2, default=str) + "\n",
         encoding="utf-8",
@@ -719,9 +757,10 @@ def build_preview_outputs(
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     rejected_rows: list[dict[str, Any]] = []
+    business_skipped_rows: list[dict[str, Any]] = []
     accepted_rows = rows
     if normalize_value(handling) == REPLACEMENT_HANDLING:
-        accepted_rows, rejected_rows = partition_replacement_rows(rows)
+        accepted_rows, business_skipped_rows, rejected_rows = partition_replacement_rows(rows)
     selected_rows, duplicate_rows = dedupe_rows(accepted_rows)
     deduped_count = len(selected_rows)
     if limit > 0:
@@ -735,6 +774,14 @@ def build_preview_outputs(
     rejected_json = output_dir / f"{prefix}_rejected_{metric_date:%Y%m%d}_{timestamp}.json"
     if normalize_value(handling) == REPLACEMENT_HANDLING:
         write_rejected_outputs(rejected_csv, rejected_json, rejected_rows)
+    business_skipped_csv = output_dir / f"{prefix}_business_skipped_{metric_date:%Y%m%d}_{timestamp}.csv"
+    business_skipped_json = output_dir / f"{prefix}_business_skipped_{metric_date:%Y%m%d}_{timestamp}.json"
+    if normalize_value(handling) == REPLACEMENT_HANDLING:
+        write_business_skipped_outputs(
+            business_skipped_csv,
+            business_skipped_json,
+            business_skipped_rows,
+        )
 
     per_store_files: list[dict[str, Any]] = []
     for store, store_rows in rows_by_store(selected_rows).items():
@@ -755,6 +802,18 @@ def build_preview_outputs(
         "rejected_csv": str(rejected_csv) if normalize_value(handling) == REPLACEMENT_HANDLING else "",
         "rejected_json": str(rejected_json) if normalize_value(handling) == REPLACEMENT_HANDLING else "",
         "rejected_rows": rejected_rows,
+        "business_skipped_count": len(business_skipped_rows),
+        "business_skipped_reason_counts": {
+            COMBINATION_SKU_REASON_CODE: len(business_skipped_rows)
+        } if business_skipped_rows else {},
+        "business_skipped_store_counts": group_counts(business_skipped_rows),
+        "business_skipped_csv": str(business_skipped_csv)
+        if normalize_value(handling) == REPLACEMENT_HANDLING
+        else "",
+        "business_skipped_json": str(business_skipped_json)
+        if normalize_value(handling) == REPLACEMENT_HANDLING
+        else "",
+        "business_skipped_rows": business_skipped_rows,
         "duplicate_count": len(duplicate_rows),
         "duplicates": duplicate_rows,
         "loaded_store_counts": group_counts(rows),
@@ -910,6 +969,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         "rejected_reason_counts": report["rejected_reason_counts"],
         "rejected_csv": report["rejected_csv"],
         "rejected_json": report["rejected_json"],
+        "business_skipped_count": report["business_skipped_count"],
+        "business_skipped_reason_counts": report["business_skipped_reason_counts"],
+        "business_skipped_csv": report["business_skipped_csv"],
+        "business_skipped_json": report["business_skipped_json"],
         "rejection_notification": report["rejection_notification"],
         "duplicate_count": report["duplicate_count"],
         "selected_store_counts": report["selected_store_counts"],
