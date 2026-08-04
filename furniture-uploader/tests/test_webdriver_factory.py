@@ -130,6 +130,26 @@ class WebdriverFactoryTests(unittest.TestCase):
         self.assertEqual(resolve_edge_driver_path(), "C:/cache/msedgedriver.exe")
         manager_mock.assert_not_called()
 
+    @patch("webdriver_factory.EdgeChromiumDriverManager")
+    @patch(
+        "webdriver_factory.download_edge_driver",
+        return_value="C:/cache/150.0.4078.105/msedgedriver.exe",
+    )
+    @patch("webdriver_factory.find_compatible_cached_edge_driver", return_value="")
+    @patch("webdriver_factory.detect_edge_version", return_value="150.0.4078.105")
+    def test_resolve_edge_driver_downloads_detected_version_not_latest(
+        self,
+        _detect_mock,
+        _cache_mock,
+        download_mock,
+        manager_mock,
+    ) -> None:
+        resolved = resolve_edge_driver_path(debugger_address="127.0.0.1:9306")
+
+        self.assertEqual(resolved, "C:/cache/150.0.4078.105/msedgedriver.exe")
+        download_mock.assert_called_once_with("150.0.4078.105")
+        manager_mock.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

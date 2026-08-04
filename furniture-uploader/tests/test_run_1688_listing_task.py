@@ -191,11 +191,14 @@ class OpenAuthenticatedListingBrowserTests(unittest.TestCase):
         events: list[str] = []
         browser = _FakeBrowser(events)
 
-        def login(*_args) -> None:
+        def login(*_args, **kwargs) -> dict:
             events.append("shared_login")
+            self.assertTrue(kwargs["keep_browser_open"])
+            self.assertTrue(kwargs["allow_unconfirmed_identity"])
+            return {"status": "success", "browser_runtime_preserved": True}
 
         with patch("run_1688_listing_task.ensure_1688_authenticated_session", side_effect=login):
-            _open_authenticated_listing_browser(
+            owns_runtime = _open_authenticated_listing_browser(
                 browser,
                 shared_runtime_root="runtime",
                 account_key="muke_lixiang",
@@ -205,24 +208,48 @@ class OpenAuthenticatedListingBrowserTests(unittest.TestCase):
             )
 
         self.assertEqual(events, ["shared_login", "browser_open"])
+        self.assertTrue(owns_runtime)
 
-    def test_login_required_attaches_then_runs_interactive_fallback(self) -> None:
+    def test_login_required_fails_closed_without_interactive_fallback(self) -> None:
         events: list[str] = []
         browser = _FakeBrowser(events)
         with patch(
             "run_1688_listing_task.ensure_1688_authenticated_session",
             side_effect=OfflineLoginRequiredError("login required"),
         ):
-            _open_authenticated_listing_browser(
+            with self.assertRaises(OfflineLoginRequiredError):
+                _open_authenticated_listing_browser(
+                    browser,
+                    shared_runtime_root="runtime",
+                    account_key="muke_lixiang",
+                    shop_name="木刻理想",
+                    system_config={"login": {}},
+                    skip_login=False,
+                )
+
+        self.assertEqual(events, [])
+
+    def test_identity_unconfirmed_session_can_attach_without_manual_prompt(self) -> None:
+        events: list[str] = []
+        browser = _FakeBrowser(events)
+        with patch(
+            "run_1688_listing_task.ensure_1688_authenticated_session",
+            return_value={
+                "status": "identity_unconfirmed",
+                "browser_runtime_preserved": True,
+            },
+        ):
+            owns_runtime = _open_authenticated_listing_browser(
                 browser,
                 shared_runtime_root="runtime",
                 account_key="muke_lixiang",
                 shop_name="木刻理想",
-                system_config={"login": {}},
+                system_config={"login": {"mode": "manual"}},
                 skip_login=False,
             )
 
-        self.assertEqual(events, ["browser_open", "interactive_login"])
+        self.assertEqual(events, ["browser_open"])
+        self.assertTrue(owns_runtime)
 
     def test_risk_control_fails_before_browser_attach(self) -> None:
         events: list[str] = []

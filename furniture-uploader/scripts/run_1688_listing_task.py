@@ -42,9 +42,8 @@ from cross_project_runtime import (
 from operation_saga import OperationSagaRepository, SagaOperation, build_operation_key
 from sku_offline_auth import (
     OfflineLoginRequiredError,
-    OfflineRiskControlError,
-    OfflineStoreMismatchError,
     ensure_1688_authenticated_session,
+    stop_owned_1688_account_runtime,
 )
 from stop_sale_audit import resolve_stop_sale_app_config
 
@@ -295,27 +294,28 @@ def _open_authenticated_listing_browser(
     shop_name: str,
     system_config: dict,
     skip_login: bool,
-) -> None:
+) -> bool:
     if skip_login:
         browser.open()
-        return
+        return False
 
-    try:
-        ensure_1688_authenticated_session(
-            shared_runtime_root,
-            account_key,
-            shop_name,
-        )
-    except (OfflineRiskControlError, OfflineStoreMismatchError):
-        raise
-    except OfflineLoginRequiredError:
-        browser.open()
-        browser.run_system_workflow(system_config, {})
-        return
+    del system_config
+    login_result = ensure_1688_authenticated_session(
+        shared_runtime_root,
+        account_key,
+        shop_name,
+        keep_browser_open=True,
+        allow_unconfirmed_identity=True,
+    )
+    if str(login_result.get("status") or "") not in {"success", "identity_unconfirmed"}:
+        raise OfflineLoginRequiredError("1688 automatic login did not return a usable session.")
+    if not login_result.get("browser_runtime_preserved"):
+        raise OfflineLoginRequiredError("1688 automatic login did not preserve the account browser runtime.")
 
     # The shared login flow owns startup of the account CDP runtime. Connect
     # BrowserRPA only after that runtime is ready.
     browser.open()
+    return True
 
 
 def _build_listing_browser_config(operator_config: dict, *, cdp_port: int) -> dict:
@@ -572,7 +572,7 @@ def main() -> int:
         )
         execution_id = repository.start_execution(task_id=task_id, mode=args.mode)
         try:
-            _open_authenticated_listing_browser(
+            owns_account_runtime = _open_authenticated_listing_browser(
                 browser,
                 shared_runtime_root=args.shared_runtime_root,
                 account_key=account_key,
@@ -580,6 +580,18 @@ def main() -> int:
                 system_config=system_config,
                 skip_login=args.skip_login,
             )
+            if owns_account_runtime:
+                if not binding.browser_profile_dir:
+                    raise OfflineLoginRequiredError(
+                        f"Account browser profile directory is missing: account_key={account_key}."
+                    )
+                stack.callback(
+                    stop_owned_1688_account_runtime,
+                    args.shared_runtime_root,
+                    account_key,
+                    binding.browser_profile_dir,
+                    binding.cdp_port,
+                )
             updated, _context = execute_browser_task(
                 execution_payload,
                 mode=args.mode,

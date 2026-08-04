@@ -91,6 +91,8 @@ def ensure_1688_authenticated_session(
     *,
     timeout_seconds: int = 300,
     command_runner: CommandRunner = subprocess.run,
+    keep_browser_open: bool = False,
+    allow_unconfirmed_identity: bool = False,
 ) -> dict[str, Any]:
     """Reuse the 1688 runtime's account-scoped login without exposing credentials."""
     runtime_root = Path(shared_runtime_root).resolve()
@@ -127,6 +129,8 @@ def ensure_1688_authenticated_session(
         "4",
         "--verify-account-identity",
     ]
+    if keep_browser_open:
+        command.append("--keep-browser-open")
 
     result: subprocess.CompletedProcess[Any] | None = None
     for identity_attempt in range(2):
@@ -159,6 +163,7 @@ def ensure_1688_authenticated_session(
             "status": "success",
             "account_key": normalized_account_key,
             "store_name": normalized_store_name,
+            "browser_runtime_preserved": bool(keep_browser_open),
         }
     if return_code == 2:
         diagnostic = extract_login_failure_diagnostic(result.stdout, result.stderr)
@@ -173,6 +178,13 @@ def ensure_1688_authenticated_session(
             + (f" Diagnostic: {diagnostic}" if diagnostic else "")
         )
     if return_code == 4:
+        if allow_unconfirmed_identity:
+            return {
+                "status": "identity_unconfirmed",
+                "account_key": normalized_account_key,
+                "store_name": normalized_store_name,
+                "browser_runtime_preserved": bool(keep_browser_open),
+            }
         diagnostic = extract_login_failure_diagnostic(result.stdout, result.stderr)
         raise OfflineLoginRequiredError(
             "1688 automatic login could not prove the configured member_id and store identity."
@@ -183,3 +195,35 @@ def ensure_1688_authenticated_session(
         f"1688 automatic login failed with exit code {return_code}; the store was stopped."
         + (f" Diagnostic: {diagnostic}" if diagnostic else "")
     )
+
+
+def stop_owned_1688_account_runtime(
+    shared_runtime_root: str | Path,
+    account_key: str,
+    browser_profile_dir: str | Path,
+    cdp_port: int,
+) -> None:
+    """Stop only the account Edge runtime preserved for the current leased ERP task."""
+    runtime_root = Path(shared_runtime_root).resolve()
+    normalized_account_key = str(account_key or "").strip()
+    profile_dir = Path(browser_profile_dir).resolve()
+    port = int(cdp_port)
+    if not normalized_account_key or not profile_dir.is_absolute() or port <= 0:
+        raise OfflineLoginRequiredError("Invalid account Edge runtime handoff metadata.")
+    if str(runtime_root) not in sys.path:
+        sys.path.insert(0, str(runtime_root))
+
+    from src.runtime.edge_worker import AccountEdgeRuntime, AccountEdgeSpec
+
+    runtime = AccountEdgeRuntime(
+        AccountEdgeSpec(
+            account_key=normalized_account_key,
+            user_data_dir=profile_dir,
+            cdp_port=port,
+            profile_directory="Default",
+        )
+    )
+    if not runtime.stop_owned():
+        raise OfflineLoginRequiredError(
+            f"Account Edge runtime could not be released safely: account_key={normalized_account_key}."
+        )

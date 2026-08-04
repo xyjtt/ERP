@@ -106,6 +106,7 @@ class CrossProjectRuntimeTests(unittest.TestCase):
             binding = resolve_executor_binding("gonglai", config_root=root)
 
         self.assertEqual(binding.profile_ref, "D:/profiles/gonglai")
+        self.assertEqual(binding.browser_profile_dir, "D:/profiles/gonglai")
         self.assertEqual(binding.cdp_port, 9301)
         self.assertEqual(binding.config_revision, "20260730-1")
 
@@ -131,6 +132,7 @@ class CrossProjectRuntimeTests(unittest.TestCase):
             binding = resolve_executor_binding("gonglai", config_root=root)
 
         self.assertEqual(binding.profile_ref, "gonglai")
+        self.assertEqual(binding.browser_profile_dir, "D:/profiles/gonglai")
 
     def test_binding_rejects_changed_config_without_hash_refresh(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
