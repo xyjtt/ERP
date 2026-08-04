@@ -137,6 +137,54 @@ class BrowserRPAHelperTests(unittest.TestCase):
                 wait_seconds=0,
             )
 
+    def test_reopen_saved_draft_uses_previously_validated_category_when_url_omits_cat_id(self) -> None:
+        saved_url = (
+            "https://offer-new.1688.com/popular/publish.htm?"
+            "draftId=draft-1&operator=draft2offer"
+        )
+
+        class ReopenDriver(FakeDriver):
+            def get(self, url: str) -> None:
+                if "fillProductInfo.htm" in url:
+                    self.current_url = saved_url
+                else:
+                    self.current_url = url
+
+        self.browser.driver = ReopenDriver(current_url=saved_url)
+        context: dict[str, object] = {"actual_category_id": "122942001"}
+        with (
+            patch.object(self.browser, "_pause"),
+            patch.object(self.browser, "_wait_for_publish_runtime_ready"),
+        ):
+            self.browser._reopen_saved_draft_from_server(
+                {
+                    "expected_draft_id": "draft-1",
+                    "expected_category_id": "122942001",
+                },
+                context,
+                wait_seconds=0,
+            )
+
+        self.assertEqual(context["draft_server_reopen_category_id"], "122942001")
+        self.assertTrue(context["draft_verify_server_reopened"])
+
+    def test_reopen_saved_draft_rejects_mismatched_validated_category(self) -> None:
+        saved_url = (
+            "https://offer-new.1688.com/popular/publish.htm?"
+            "draftId=draft-1&operator=draft2offer"
+        )
+        self.browser.driver = FakeDriver(current_url=saved_url)
+
+        with self.assertRaisesRegex(PublishValidationError, "expected draft and category"):
+            self.browser._reopen_saved_draft_from_server(
+                {
+                    "expected_draft_id": "draft-1",
+                    "expected_category_id": "122942001",
+                },
+                {"actual_category_id": "123620022"},
+                wait_seconds=0,
+            )
+
     def test_build_picker_album_name_uses_prefix(self) -> None:
         album_name = self.browser._build_picker_album_name({"auto_album_name_prefix": "DETAIL"})
         self.assertTrue(album_name.startswith("DETAIL_"))
@@ -736,6 +784,37 @@ class BrowserRPAHelperTests(unittest.TestCase):
         self.assertEqual(len(context["detail_images_uploaded_urls"]), 2)
         self.assertEqual(captured["step"]["append_mode"], "replace")
         self.assertIn("https://images.example.com/1.webp", captured["value"])
+
+    def test_tinymce_images_reuses_complete_remote_source_without_picker(self) -> None:
+        self.browser.driver = FakeDriver()
+        self.browser._ensure_old_tinymce_mode = lambda _step: None  # type: ignore[assignment]
+        self.browser._upload_images_via_picker_batches = (  # type: ignore[assignment]
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("picker must be skipped"))
+        )
+        captured: dict[str, object] = {}
+        self.browser._write_tinymce_content = (  # type: ignore[assignment]
+            lambda _step, _selector, value: captured.update(value=value)
+        )
+        context: dict[str, object] = {
+            "detail_images_remote_list": [
+                "https://images.example.com/1.webp",
+                "https://images.example.com/2.webp",
+            ]
+        }
+
+        self.browser._insert_tinymce_images(
+            {
+                "name": "detail_images",
+                "fallback_picker_selector": {"by": "css", "value": "#picker"},
+            },
+            {"by": "css", "value": "#tinyMCE-0"},
+            ["C:/images/1.jpg", "C:/images/2.jpg"],
+            context,
+        )
+
+        self.assertEqual(context["detail_images_delivery_mode"], "external_url_capacity_fallback")
+        self.assertEqual(len(context["detail_images_uploaded_urls"]), 2)
+        self.assertIn("https://images.example.com/2.webp", captured["value"])
 
     def test_encode_file_as_data_url_uses_file_contents(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

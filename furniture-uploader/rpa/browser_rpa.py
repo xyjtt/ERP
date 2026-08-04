@@ -4354,12 +4354,16 @@ class BrowserRPA:
                 f"TinyMCE editor '{editor_id}' does not configure a picker upload opener."
             )
 
-        if step.get("use_remote_detail_urls", False):
-            uploaded_urls = [
-                str(item).strip()
-                for item in context.get("detail_images_remote_list", [])
-                if str(item).strip()
-            ]
+        remote_detail_urls = [
+            str(item).strip()
+            for item in context.get("detail_images_remote_list", [])
+            if str(item).strip()
+        ]
+        use_remote_detail_urls = bool(step.get("use_remote_detail_urls", False)) or (
+            bool(remote_detail_urls) and len(remote_detail_urls) == len(values)
+        )
+        if use_remote_detail_urls:
+            uploaded_urls = remote_detail_urls
             if len(uploaded_urls) != len(values):
                 raise PublishValidationError(
                     "External detail URL fallback count does not match prepared images: "
@@ -10826,13 +10830,18 @@ class BrowserRPA:
         saved_draft_id = str(
             (query.get("draftId") or query.get("offerDraftId") or [""])[0]
         ).strip()
+        url_category_id = str((query.get("catId") or [""])[0]).strip()
+        validated_category_id = str(context.get("actual_category_id") or "").strip()
+        expected_category_id = str(publish_config.get("expected_category_id") or "").strip()
+        saved_category_id = url_category_id or validated_category_id
         expected_draft_id = str(publish_config.get("expected_draft_id") or "").strip()
         if (
             parsed.scheme != "https"
             or parsed.hostname != "offer-new.1688.com"
             or parsed.path != "/popular/publish.htm"
             or not saved_draft_id
-            or not str((query.get("catId") or [""])[0]).strip()
+            or not saved_category_id
+            or (expected_category_id and saved_category_id != expected_category_id)
             or (expected_draft_id and saved_draft_id != expected_draft_id)
         ):
             raise PublishValidationError(
@@ -10841,6 +10850,7 @@ class BrowserRPA:
 
         context["draft_server_reopen_url"] = saved_url
         context["draft_server_reopen_draft_id"] = saved_draft_id
+        context["draft_server_reopen_category_id"] = saved_category_id
         official_entry_url = (
             "https://offer.1688.com/offer/post/fillProductInfo.htm?"
             + urlencode({"operator": "draft2offer", "offerDraftId": saved_draft_id})
