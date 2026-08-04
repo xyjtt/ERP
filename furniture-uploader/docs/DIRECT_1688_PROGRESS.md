@@ -329,3 +329,10 @@
 - Root cause from the R7 failure context: edit-page `imageList` only materializes persisted entries (length 1), so writes to slots 1-3 could not land; the picker fallback's empty-slot opener does not exist on an occupied edit page.
 - Bridge upload now extends missing slots with placeholders and detects landing by new remote URL (any slot), recording slot mismatches.
 - 4 updated/new bridge tests; full listing regression `588/588`; doctor `status: ok`.
+
+## 2026-08-04 Stop-Sale System Prompt Handling
+
+- Development now classifies explicit submit-blocking platform text such as `毛重必须为数字` as `system_prompt` / `系统提示`.
+- The affected product ID/SKU is recorded as failed and skipped; execution continues with the next item in the same store.
+- This category is non-retryable and does not stop the store. It is not counted as an offline success and does not create a Jushuitan handoff.
+- Targeted behavior tests and the related stop-sale suite pass `126/126`. Executor deployment and a real hidden-validation Canary remain pending.

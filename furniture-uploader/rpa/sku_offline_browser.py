@@ -1769,11 +1769,14 @@ class SkuOfflineBrowser(BrowserRPA):
             ]
             summary = " | ".join((assist_messages + hidden_messages)[:3])
             error_text = "提交按钮未产生平台请求" + (f"：{summary}" if summary else "")
-            error_category = (
-                "sole_sku_requires_product_offline"
-                if normalized_operation == "offline" and self._contains_sole_online_sku_validation(summary)
-                else "submit_blocked_before_request"
-            )
+            if normalized_operation == "offline" and self._contains_sole_online_sku_validation(summary):
+                error_category = "sole_sku_requires_product_offline"
+            elif summary:
+                error_category = "system_prompt"
+                error_text = summary
+                context["system_prompt"] = summary
+            else:
+                error_category = "submit_blocked_before_request"
             self._annotate_page_error_context(
                 context,
                 stage_name="submit_before_request",

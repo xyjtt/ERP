@@ -188,6 +188,7 @@ class SkuOfflineMainTests(unittest.TestCase):
             "唯一在线SKU禁止单独下架",
         )
         self.assertEqual(localize_error_category("campaign_restriction"), "平台活动限制SKU下架")
+        self.assertEqual(localize_error_category("system_prompt"), "系统提示")
         self.assertEqual(localize_error_category("submit_failed"), "提交失败")
         self.assertEqual(localize_error_category("browser_window_closed"), "浏览器窗口异常关闭")
         self.assertEqual(
@@ -339,6 +340,7 @@ class SkuOfflineMainTests(unittest.TestCase):
         self.assertTrue(should_stop_store_on_error("management_tab_mismatch", execution_config))
         self.assertFalse(should_stop_store_on_error("delivery_service_backfill_failed", execution_config))
         self.assertFalse(should_stop_store_on_error("management_search_timeout", execution_config))
+        self.assertFalse(should_stop_store_on_error("system_prompt", execution_config))
         self.assertFalse(should_stop_store_on_error("submit_blocked_before_request", execution_config))
         self.assertFalse(should_stop_store_on_error("sku_not_found", execution_config))
 
@@ -473,11 +475,12 @@ class SkuOfflineMainTests(unittest.TestCase):
                 self.calls += 1
                 if self.calls == 1:
                     self.last_result_context = {
-                        "page_error_category": "sole_sku_requires_product_offline",
+                        "page_error_category": "system_prompt",
                         "page_error_stage": "submit_before_request",
-                        "page_error_text": "at least one online sku is required",
+                        "page_error_text": "毛重必须为数字",
+                        "system_prompt": "毛重必须为数字",
                     }
-                    raise PublishSubmitError("at least one online sku is required")
+                    raise PublishSubmitError("毛重必须为数字")
                 self.last_result_context = {}
                 return {"execution_result": "submitted"}
 
@@ -547,6 +550,9 @@ class SkuOfflineMainTests(unittest.TestCase):
         self.assertEqual(summary["success"], 1)
         self.assertEqual(summary["stopped_stores"], 0)
         self.assertEqual(len(run_report.rows), 2)
+        self.assertEqual(run_report.rows[0]["error_category"], "system_prompt")
+        self.assertEqual(run_report.rows[0]["page_error_text"], "毛重必须为数字")
+        self.assertEqual(run_report.rows[1]["status"], "success")
         notify_failure.assert_called_once()
 
     def test_session_safety_exception_is_recorded_without_failing_the_process(self) -> None:
