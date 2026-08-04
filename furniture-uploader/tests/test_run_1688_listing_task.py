@@ -13,6 +13,7 @@ if str(SCRIPT_ROOT) not in sys.path:
 
 from run_1688_listing_task import (  # noqa: E402
     _apply_draft_rebind,
+    _build_listing_browser_config,
     _known_historical_draft_ids,
     _open_authenticated_listing_browser,
     _record_controlled_saga_failure,
@@ -241,6 +242,29 @@ class OpenAuthenticatedListingBrowserTests(unittest.TestCase):
                 )
 
         self.assertEqual(events, [])
+
+
+class BuildListingBrowserConfigTests(unittest.TestCase):
+    def test_uses_the_account_binding_cdp_port(self) -> None:
+        operator_config = {
+            "browser": {
+                "debugger_address": "127.0.0.1:9222",
+                "headless": False,
+            }
+        }
+
+        result = _build_listing_browser_config(operator_config, cdp_port=9317)
+
+        self.assertEqual(result["debugger_address"], "127.0.0.1:9317")
+        self.assertFalse(result["headless"])
+        self.assertEqual(
+            operator_config["browser"]["debugger_address"],
+            "127.0.0.1:9222",
+        )
+
+    def test_rejects_invalid_cdp_port(self) -> None:
+        with self.assertRaisesRegex(ValueError, "cdp_port must be positive"):
+            _build_listing_browser_config({}, cdp_port=0)
 
 
 if __name__ == "__main__":

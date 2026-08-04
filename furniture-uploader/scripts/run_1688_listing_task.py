@@ -318,6 +318,14 @@ def _open_authenticated_listing_browser(
     browser.open()
 
 
+def _build_listing_browser_config(operator_config: dict, *, cdp_port: int) -> dict:
+    browser_config = dict(operator_config.get("browser") or {})
+    if int(cdp_port) <= 0:
+        raise ValueError("cdp_port must be positive")
+    browser_config["debugger_address"] = f"127.0.0.1:{int(cdp_port)}"
+    return browser_config
+
+
 def main() -> int:
     args = build_parser().parse_args()
     payload = json.loads(Path(args.payload).read_text(encoding="utf-8-sig"))
@@ -509,7 +517,6 @@ def main() -> int:
     system_config = load_json_with_local_override(config_dir / "systems" / "1688_direct.json")
     operator_config = load_json_with_local_override(config_dir / "operator_config.json")
     category_config = load_json_with_local_override(config_dir / "furniture_categories.json")
-    browser = BrowserRPA(operator_config.get("browser", {}), PROJECT_ROOT)
     app_config = resolve_stop_sale_app_config(args.shared_runtime_root)
     saga_repository = OperationSagaRepository(app_config)
     saga_contract = saga_repository.check_contract()
@@ -523,6 +530,10 @@ def main() -> int:
     operation_key = build_operation_key("listing", account_key, task_id)
     build_sha = resolve_build_sha(PROJECT_ROOT.parent)
     binding = resolve_executor_binding(account_key)
+    browser = BrowserRPA(
+        _build_listing_browser_config(operator_config, cdp_port=binding.cdp_port),
+        PROJECT_ROOT,
+    )
     with ExitStack() as stack:
         stack.enter_context(_build_listing_account_lock(args, payload))
         runtime_guard = stack.enter_context(
