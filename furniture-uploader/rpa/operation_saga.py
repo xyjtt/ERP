@@ -102,6 +102,153 @@ class OperationSagaRepository:
             "ready": not missing,
         }
 
+    def get_saga_state(self, operation_key: str) -> dict[str, Any]:
+        saga = self._table("ali1688_operation_saga")
+        with self._connect(self.config) as connection:
+            row = connection.cursor().execute(
+                f"""
+                SELECT run_id, task_type, account_key, business_key, state,
+                       owner_token_hash, account_fencing_token,
+                       browser_slot_key, browser_slot_fencing_token,
+                       payload_json, evidence_json, error_code, error_summary,
+                       prepared_at, ali1688_finished_at, finished_at, updated_at
+                  FROM {saga} WITH (NOLOCK)
+                 WHERE operation_key = ?
+                """,
+                (operation_key,),
+            ).fetchone()
+        if row is None:
+            raise SagaReconcileRequiredError("saga_operation_missing")
+        columns = (
+            "run_id",
+            "task_type",
+            "account_key",
+            "business_key",
+            "state",
+            "owner_token_hash",
+            "account_fencing_token",
+            "browser_slot_key",
+            "browser_slot_fencing_token",
+            "payload_json",
+            "evidence_json",
+            "error_code",
+            "error_summary",
+            "prepared_at",
+            "ali1688_finished_at",
+            "finished_at",
+            "updated_at",
+        )
+        return {"operation_key": operation_key, **dict(zip(columns, row))}
+
+    def recover_reconcile_required(
+        self,
+        operation_key: str,
+        *,
+        expected_error_code: str,
+        expected_owner_token_hash: str,
+        expected_account_fencing_token: int,
+        expected_browser_slot_key: str,
+        expected_browser_slot_fencing_token: int,
+        evidence: Mapping[str, Any],
+        reason: str,
+    ) -> dict[str, Any]:
+        if expected_error_code != "owner_changed_after_prepare":
+            raise ValueError("Only owner_changed_after_prepare may use controlled recovery")
+        if expected_account_fencing_token <= 0 or expected_browser_slot_fencing_token <= 0:
+            raise ValueError("Controlled recovery requires positive fencing tokens")
+        if not expected_owner_token_hash or not expected_browser_slot_key:
+            raise ValueError("Controlled recovery requires the previous owner and browser slot")
+        if not evidence or not str(reason or "").strip():
+            raise ValueError("Controlled recovery requires evidence and a reason")
+
+        saga = self._table("ali1688_operation_saga")
+        outbox = self._table("ali1688_operation_outbox")
+        evidence_json = json.dumps(dict(evidence), ensure_ascii=False, sort_keys=True, default=str)
+        with self._connect(self.config) as connection:
+            cursor = connection.cursor()
+            row = cursor.execute(
+                f"""
+                SELECT state, error_code, owner_token_hash, account_fencing_token,
+                       browser_slot_key, browser_slot_fencing_token,
+                       evidence_json, ali1688_finished_at
+                  FROM {saga} WITH (UPDLOCK, HOLDLOCK)
+                 WHERE operation_key = ?
+                """,
+                (operation_key,),
+            ).fetchone()
+            if row is None:
+                raise SagaReconcileRequiredError("saga_operation_missing")
+            current = {
+                "state": str(row[0] or ""),
+                "error_code": str(row[1] or ""),
+                "owner_token_hash": str(row[2] or ""),
+                "account_fencing_token": int(row[3] or 0),
+                "browser_slot_key": str(row[4] or ""),
+                "browser_slot_fencing_token": int(row[5] or 0),
+                "evidence_json": row[6],
+                "ali1688_finished_at": row[7],
+            }
+            expected = {
+                "state": "reconcile_required",
+                "error_code": expected_error_code,
+                "owner_token_hash": expected_owner_token_hash,
+                "account_fencing_token": expected_account_fencing_token,
+                "browser_slot_key": expected_browser_slot_key,
+                "browser_slot_fencing_token": expected_browser_slot_fencing_token,
+                "evidence_json": None,
+                "ali1688_finished_at": None,
+            }
+            changed = [name for name, value in expected.items() if current[name] != value]
+            if changed:
+                raise SagaReconcileRequiredError(
+                    "saga_recovery_precondition_changed:" + ",".join(changed)
+                )
+            outbox_count = int(
+                cursor.execute(
+                    f"SELECT COUNT_BIG(1) FROM {outbox} WITH (UPDLOCK, HOLDLOCK) WHERE operation_key = ?",
+                    (operation_key,),
+                ).fetchone()[0]
+            )
+            if outbox_count:
+                raise SagaReconcileRequiredError("saga_recovery_outbox_exists")
+            cursor.execute(
+                f"""
+                UPDATE {saga}
+                   SET state = 'failed_retryable', evidence_json = ?,
+                       error_code = 'controlled_reconcile', error_summary = ?,
+                       finished_at = NULL, updated_at = SYSUTCDATETIME()
+                 WHERE operation_key = ?
+                   AND state = 'reconcile_required'
+                   AND error_code = ?
+                   AND owner_token_hash = ?
+                   AND account_fencing_token = ?
+                   AND browser_slot_key = ?
+                   AND browser_slot_fencing_token = ?
+                   AND evidence_json IS NULL
+                   AND ali1688_finished_at IS NULL
+                """,
+                (
+                    evidence_json,
+                    str(reason).strip()[:2000],
+                    operation_key,
+                    expected_error_code,
+                    expected_owner_token_hash,
+                    expected_account_fencing_token,
+                    expected_browser_slot_key,
+                    expected_browser_slot_fencing_token,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise SagaFencingError("saga_recovery_compare_and_set_failed")
+            connection.commit()
+        return {
+            "operation_key": operation_key,
+            "previous_state": "reconcile_required",
+            "state": "failed_retryable",
+            "reason": str(reason).strip(),
+            "evidence": dict(evidence),
+        }
+
     def prepare(
         self,
         operation: SagaOperation,

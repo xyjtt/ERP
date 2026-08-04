@@ -187,3 +187,76 @@ class OperationSagaOutboxRequeueTests(unittest.TestCase):
         updates = [sql for sql, _ in cursor.executed if "UPDATE" in sql]
         self.assertEqual(len(updates), 2)
         self.assertTrue(all("WHERE operation_key = ?" in sql for sql in updates))
+
+
+class _SagaRecoveryCursor:
+    def __init__(self, *, outbox_count: int = 0) -> None:
+        self.rowcount = -1
+        self._outbox_count = outbox_count
+        self._fetch = None
+        self.executed: list[tuple] = []
+
+    def execute(self, sql, params=None):
+        self.executed.append((sql, params))
+        if "SELECT state, error_code" in sql:
+            self._fetch = (
+                "reconcile_required",
+                "owner_changed_after_prepare",
+                "owner-hash",
+                3009,
+                "PC-20210622ARIU:2",
+                161,
+                None,
+                None,
+            )
+            self.rowcount = -1
+        elif "COUNT_BIG(1)" in sql:
+            self._fetch = (self._outbox_count,)
+            self.rowcount = -1
+        elif "UPDATE" in sql:
+            self._fetch = None
+            self.rowcount = 1
+        return self
+
+    def fetchone(self):
+        return self._fetch
+
+
+class OperationSagaControlledRecoveryTests(unittest.TestCase):
+    def repository(self, cursor: _SagaRecoveryCursor):
+        connection = _FakeConnection(cursor)  # type: ignore[arg-type]
+        return OperationSagaRepository(
+            _FakeConfig(),
+            connect=lambda _config: connection,
+        ), connection
+
+    def recover(self, repository: OperationSagaRepository):
+        return repository.recover_reconcile_required(
+            "b" * 64,
+            expected_error_code="owner_changed_after_prepare",
+            expected_owner_token_hash="owner-hash",
+            expected_account_fencing_token=3009,
+            expected_browser_slot_key="PC-20210622ARIU:2",
+            expected_browser_slot_fencing_token=161,
+            evidence={"classification": "verified_browser_pre_action_failure"},
+            reason="verified SessionNotCreatedException before browser attach",
+        )
+
+    def test_recovery_uses_locked_preconditions_and_compare_and_set(self) -> None:
+        cursor = _SagaRecoveryCursor()
+        repository, connection = self.repository(cursor)
+        result = self.recover(repository)
+        self.assertEqual(result["state"], "failed_retryable")
+        self.assertEqual(connection.commits, 1)
+        update_sql = next(sql for sql, _ in cursor.executed if "UPDATE" in sql)
+        self.assertIn("state = 'reconcile_required'", update_sql)
+        self.assertIn("account_fencing_token = ?", update_sql)
+        self.assertIn("evidence_json IS NULL", update_sql)
+        self.assertIn("ali1688_finished_at IS NULL", update_sql)
+
+    def test_recovery_rejects_existing_outbox(self) -> None:
+        cursor = _SagaRecoveryCursor(outbox_count=1)
+        repository, connection = self.repository(cursor)
+        with self.assertRaisesRegex(RuntimeError, "saga_recovery_outbox_exists"):
+            self.recover(repository)
+        self.assertEqual(connection.commits, 0)
