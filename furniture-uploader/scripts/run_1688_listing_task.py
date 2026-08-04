@@ -287,6 +287,37 @@ def _build_listing_account_lock(args: argparse.Namespace, payload: dict):
     )
 
 
+def _open_authenticated_listing_browser(
+    browser,
+    *,
+    shared_runtime_root: str,
+    account_key: str,
+    shop_name: str,
+    system_config: dict,
+    skip_login: bool,
+) -> None:
+    if skip_login:
+        browser.open()
+        return
+
+    try:
+        ensure_1688_authenticated_session(
+            shared_runtime_root,
+            account_key,
+            shop_name,
+        )
+    except (OfflineRiskControlError, OfflineStoreMismatchError):
+        raise
+    except OfflineLoginRequiredError:
+        browser.open()
+        browser.run_system_workflow(system_config, {})
+        return
+
+    # The shared login flow owns startup of the account CDP runtime. Connect
+    # BrowserRPA only after that runtime is ready.
+    browser.open()
+
+
 def main() -> int:
     args = build_parser().parse_args()
     payload = json.loads(Path(args.payload).read_text(encoding="utf-8-sig"))
@@ -530,22 +561,14 @@ def main() -> int:
         )
         execution_id = repository.start_execution(task_id=task_id, mode=args.mode)
         try:
-            browser.open()
-            if not args.skip_login:
-                # Bounded automatic login first (one password login + slider RPA
-                # via the shared 1688 runtime CLI); fail closed on risk control,
-                # fall back to the configured interactive flow on other errors.
-                shop_name_for_login = str(((payload.get("shop") or {}).get("shop_name") or "")).strip()
-                try:
-                    ensure_1688_authenticated_session(
-                        args.shared_runtime_root,
-                        account_key,
-                        shop_name_for_login,
-                    )
-                except (OfflineRiskControlError, OfflineStoreMismatchError):
-                    raise
-                except OfflineLoginRequiredError:
-                    browser.run_system_workflow(system_config, {})
+            _open_authenticated_listing_browser(
+                browser,
+                shared_runtime_root=args.shared_runtime_root,
+                account_key=account_key,
+                shop_name=str(((payload.get("shop") or {}).get("shop_name") or "")).strip(),
+                system_config=system_config,
+                skip_login=args.skip_login,
+            )
             updated, _context = execute_browser_task(
                 execution_payload,
                 mode=args.mode,

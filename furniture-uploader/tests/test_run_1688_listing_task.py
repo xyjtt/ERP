@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 import sys
 import unittest
+from unittest.mock import patch
 
 
 SCRIPT_ROOT = Path(__file__).resolve().parents[1] / "scripts"
@@ -13,9 +14,14 @@ if str(SCRIPT_ROOT) not in sys.path:
 from run_1688_listing_task import (  # noqa: E402
     _apply_draft_rebind,
     _known_historical_draft_ids,
+    _open_authenticated_listing_browser,
     _record_controlled_saga_failure,
 )
 from auto_listing import ListingContractError  # noqa: E402
+from exceptions import (  # noqa: E402
+    OfflineLoginRequiredError,
+    OfflineRiskControlError,
+)
 
 
 def _args(mode: str = "draft", draft_id: str = "") -> argparse.Namespace:
@@ -166,6 +172,75 @@ class RecordControlledSagaFailureTests(unittest.TestCase):
             exc=ValueError("controlled failure"),
         )
         self.assertTrue(note.startswith("saga_record_failed=RuntimeError"))
+
+
+class _FakeBrowser:
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+
+    def open(self) -> None:
+        self.events.append("browser_open")
+
+    def run_system_workflow(self, _config: dict, _context: dict) -> None:
+        self.events.append("interactive_login")
+
+
+class OpenAuthenticatedListingBrowserTests(unittest.TestCase):
+    def test_starts_authenticated_runtime_before_browser_attach(self) -> None:
+        events: list[str] = []
+        browser = _FakeBrowser(events)
+
+        def login(*_args) -> None:
+            events.append("shared_login")
+
+        with patch("run_1688_listing_task.ensure_1688_authenticated_session", side_effect=login):
+            _open_authenticated_listing_browser(
+                browser,
+                shared_runtime_root="runtime",
+                account_key="muke_lixiang",
+                shop_name="木刻理想",
+                system_config={},
+                skip_login=False,
+            )
+
+        self.assertEqual(events, ["shared_login", "browser_open"])
+
+    def test_login_required_attaches_then_runs_interactive_fallback(self) -> None:
+        events: list[str] = []
+        browser = _FakeBrowser(events)
+        with patch(
+            "run_1688_listing_task.ensure_1688_authenticated_session",
+            side_effect=OfflineLoginRequiredError("login required"),
+        ):
+            _open_authenticated_listing_browser(
+                browser,
+                shared_runtime_root="runtime",
+                account_key="muke_lixiang",
+                shop_name="木刻理想",
+                system_config={"login": {}},
+                skip_login=False,
+            )
+
+        self.assertEqual(events, ["browser_open", "interactive_login"])
+
+    def test_risk_control_fails_before_browser_attach(self) -> None:
+        events: list[str] = []
+        browser = _FakeBrowser(events)
+        with patch(
+            "run_1688_listing_task.ensure_1688_authenticated_session",
+            side_effect=OfflineRiskControlError("risk control"),
+        ):
+            with self.assertRaises(OfflineRiskControlError):
+                _open_authenticated_listing_browser(
+                    browser,
+                    shared_runtime_root="runtime",
+                    account_key="muke_lixiang",
+                    shop_name="木刻理想",
+                    system_config={},
+                    skip_login=False,
+                )
+
+        self.assertEqual(events, [])
 
 
 if __name__ == "__main__":
