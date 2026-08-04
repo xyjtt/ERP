@@ -24,11 +24,11 @@ class ListingSagaReconcileEvidenceTests(unittest.TestCase):
         path.write_text(json.dumps(payload), encoding="utf-8")
         return path
 
-    def valid_payload(self) -> dict:
+    def valid_payload(self, *, cdp_port: int = 9306) -> dict:
         return {
             "task_id": "1688-listing-CTG028601N1416V01",
             "error_type": "SessionNotCreatedException",
-            "error": "cannot connect to microsoft edge at 127.0.0.1:9222",
+            "error": f"cannot connect to microsoft edge at 127.0.0.1:{cdp_port}",
             "result_context": {},
         }
 
@@ -40,7 +40,27 @@ class ListingSagaReconcileEvidenceTests(unittest.TestCase):
         )
         self.assertEqual(evidence["error_type"], "SessionNotCreatedException")
         self.assertTrue(evidence["result_context_empty"])
+        self.assertEqual(evidence["cdp_port"], 9306)
+        self.assertEqual(evidence["pre_attach_signature"], "edge_127.0.0.1_9306_unreachable")
         self.assertEqual(len(evidence["sha256"]), 64)
+
+    def test_accepts_legacy_cdp_port_without_hardcoding_it(self) -> None:
+        path = self.write_context(self.valid_payload(cdp_port=9222))
+        evidence = MODULE._validate_failure_context(
+            path,
+            task_id="1688-listing-CTG028601N1416V01",
+        )
+        self.assertEqual(evidence["cdp_port"], 9222)
+
+    def test_rejects_non_loopback_pre_attach_endpoint(self) -> None:
+        payload = self.valid_payload()
+        payload["error"] = "cannot connect to microsoft edge at 192.168.1.5:9306"
+        path = self.write_context(payload)
+        with self.assertRaisesRegex(RuntimeError, "missing_pre_attach_signature"):
+            MODULE._validate_failure_context(
+                path,
+                task_id="1688-listing-CTG028601N1416V01",
+            )
 
     def test_rejects_any_browser_action_context(self) -> None:
         payload = self.valid_payload()

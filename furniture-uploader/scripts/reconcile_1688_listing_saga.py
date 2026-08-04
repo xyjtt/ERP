@@ -7,6 +7,7 @@ from datetime import date, datetime
 import hashlib
 import json
 from pathlib import Path
+import re
 import sys
 from typing import Any
 
@@ -21,6 +22,9 @@ from stop_sale_audit import connect_app_database, resolve_stop_sale_app_config
 
 
 SAFE_PRE_ACTION_ERROR = "SessionNotCreatedException"
+PRE_ATTACH_ENDPOINT_PATTERN = re.compile(
+    r"cannot connect to microsoft edge at 127\.0\.0\.1:(?P<port>\d{1,5})"
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -47,6 +51,16 @@ def _json_value(value: Any) -> Any:
     return value
 
 
+def _extract_pre_attach_cdp_port(error: str) -> int:
+    match = PRE_ATTACH_ENDPOINT_PATTERN.search(error)
+    if match is None:
+        raise RuntimeError("missing_pre_attach_signature")
+    port = int(match.group("port"))
+    if not 1 <= port <= 65535:
+        raise RuntimeError("invalid_pre_attach_cdp_port")
+    return port
+
+
 def _validate_failure_context(path: Path, *, task_id: str) -> dict[str, Any]:
     raw = path.read_bytes()
     payload = json.loads(raw.decode("utf-8-sig"))
@@ -57,14 +71,17 @@ def _validate_failure_context(path: Path, *, task_id: str) -> dict[str, Any]:
     if dict(payload.get("result_context") or {}):
         raise RuntimeError("failure_context_contains_browser_action_evidence")
     error = str(payload.get("error") or "")
-    if "cannot connect to microsoft edge at 127.0.0.1:9222" not in error:
-        raise RuntimeError("failure_context_missing_pre_attach_signature")
+    try:
+        cdp_port = _extract_pre_attach_cdp_port(error)
+    except RuntimeError as exc:
+        raise RuntimeError("failure_context_missing_pre_attach_signature") from exc
     return {
         "path": str(path.resolve()),
         "sha256": hashlib.sha256(raw).hexdigest(),
         "error_type": SAFE_PRE_ACTION_ERROR,
         "result_context_empty": True,
-        "pre_attach_signature": "edge_127.0.0.1_9222_unreachable",
+        "pre_attach_signature": f"edge_127.0.0.1_{cdp_port}_unreachable",
+        "cdp_port": cdp_port,
     }
 
 
@@ -74,6 +91,7 @@ def _load_execution_evidence(
     operation_key: str,
     task_id: str,
     execution_id: str,
+    expected_cdp_port: int,
 ) -> dict[str, Any]:
     with connect_app_database(config) as connection:
         cursor = connection.cursor()
@@ -109,10 +127,14 @@ def _load_execution_evidence(
             raise RuntimeError("listing_execution_not_safe_pre_action_error")
         if any(execution[name] is not None for name in ("offer_id", "offer_url", "result_json")):
             raise RuntimeError("listing_execution_contains_side_effect_result")
-        if "cannot connect to microsoft edge at 127.0.0.1:9222" not in str(
-            execution["error_summary"] or ""
-        ):
-            raise RuntimeError("listing_execution_missing_pre_attach_signature")
+        try:
+            execution_cdp_port = _extract_pre_attach_cdp_port(
+                str(execution["error_summary"] or "")
+            )
+        except RuntimeError as exc:
+            raise RuntimeError("listing_execution_missing_pre_attach_signature") from exc
+        if execution_cdp_port != expected_cdp_port:
+            raise RuntimeError("listing_execution_pre_attach_endpoint_mismatch")
         audit_count = int(
             cursor.execute(
                 """
@@ -147,6 +169,7 @@ def _load_execution_evidence(
         "offer_id": None,
         "offer_url": None,
         "result_json": None,
+        "cdp_port": execution_cdp_port,
         "audit_events_since_start": 0,
         "outbox_count": 0,
     }
@@ -182,6 +205,7 @@ def main() -> int:
         operation_key=operation_key,
         task_id=args.task_id,
         execution_id=args.execution_id,
+        expected_cdp_port=int(failure_context["cdp_port"]),
     )
     evidence = {
         "classification": "verified_browser_pre_action_failure",

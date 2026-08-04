@@ -374,3 +374,10 @@
 - The bridge upload is now slot-adaptive: `_ensure_primary_picture_bridge_slot` extends `imageList` with placeholder entries before writing; landing detection waits for a NEW remote URL anywhere in the list (robust to the component ignoring the requested slot index) and records `main_image_bridge_slot_mismatches` diagnostics.
 - The pre-save repair from the previous round automatically inherits the adaptive upload.
 - Local validation: listing `588/588`; doctor `status: ok`.
+
+## 2026-08-04 Account-Specific CDP Saga Recovery
+
+- The executor binds `muke_lixiang` to CDP port `9306`; `9222` is not a universal listing port.
+- A pre-browser `SessionNotCreatedException` left the listing Saga in `prepared`. The controlled recovery helper had hard-coded the old `127.0.0.1:9222` signature and could not validate the otherwise safe `127.0.0.1:9306` evidence.
+- Recovery now extracts the loopback CDP port from the failure context and requires the matching listing execution to contain the same endpoint. Non-loopback endpoints, browser action evidence, Offer/result data, audit events, or outbox rows still fail closed.
+- Local validation after the change: targeted Saga tests `12/12`, full listing regression `615/615`, doctor `status: ok`; executor deployment remains required. This change does not prove a saved draft, approval, submit, Offer, or writeback.

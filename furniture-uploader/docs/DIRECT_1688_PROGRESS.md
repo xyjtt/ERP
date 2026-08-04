@@ -329,3 +329,9 @@
 - Root cause from the R7 failure context: edit-page `imageList` only materializes persisted entries (length 1), so writes to slots 1-3 could not land; the picker fallback's empty-slot opener does not exist on an occupied edit page.
 - Bridge upload now extends missing slots with placeholders and detects landing by new remote URL (any slot), recording slot mismatches.
 - 4 updated/new bridge tests; full listing regression `588/588`; doctor `status: ok`.
+
+## 2026-08-04 Listing Saga Recovery Follows Account CDP Binding
+
+- The controlled pre-action recovery no longer assumes CDP port `9222`; it accepts the account-bound loopback port recorded by both the failure context and the failed execution row.
+- The new guard compares both evidence sources and continues to reject any context containing browser actions or any execution containing Offer/result, audit, or outbox evidence.
+- Targeted recovery tests pass `12/12`; full listing regression passes `615/615`; doctor is `ok`. The existing CTG0286 Saga still requires a fresh guarded preview/apply before the next draft attempt; no draft save or submit is claimed by this code result.

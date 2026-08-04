@@ -263,3 +263,10 @@
 - A required 1688 specification must be checked for exact persisted text after refresh; non-empty alone is insufficient.
 - Direct Chinese input plus Tab is valid for color, but review must compare the committed value with the payload.
 - For CTG028601N1416V01, expected persisted values are color `胡桃色` and size `48/40/50`.
+
+## 2026-08-04 CDP Pre-Attach Recovery Rule
+
+- Do not hard-code `9222` when classifying an ERP browser pre-attach failure. Each account may have a dedicated CDP port.
+- Parse only `127.0.0.1:<port>` from the failure context, then require the formal failed execution row to report the same endpoint.
+- Endpoint agreement is not enough by itself: `result_context` must be empty, the execution must have no Offer/result data, and no later audit event or outbox row may exist.
+- A different host, mismatched port, or any side-effect evidence must stop controlled recovery.

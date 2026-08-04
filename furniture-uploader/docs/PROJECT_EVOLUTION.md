@@ -142,3 +142,9 @@
 - The listing source lifecycle check moved from an executor artifact into a version-controlled read-only script.
 - SQL Server driver selection now follows the installed-driver preference used by the rest of the project.
 - Source eligibility remains a fail-closed browser prerequisite and is kept separate from draft, submission, and business acceptance.
+
+## 2026-08-04 Account-Bound Runtime Evidence
+
+- Listing recovery evolved from a fixed `9222` browser assumption to account-bound CDP evidence.
+- A recovery is valid only when the failure context and formal execution row identify the same loopback CDP port and both prove that no browser-side action occurred.
+- This preserves fail-closed Saga recovery while allowing accounts with dedicated ports such as `9306`.
