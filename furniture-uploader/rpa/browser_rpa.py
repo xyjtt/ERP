@@ -6018,28 +6018,27 @@ class BrowserRPA:
                 (groupItem) => Array.isArray(groupItem && groupItem.steps) && groupItem.steps.length > 0
               );
             };
-            const buildBuyerProtectionSpsCode = (dscGroups, jgdzGroups) => {
-              const values = [];
-              const pushValue = (rawValue) => {
-                const value = String(rawValue || '').trim();
-                if (value && !values.includes(value)) {
-                  values.push(value);
-                }
-              };
-              (Array.isArray(dscGroups) ? dscGroups : []).forEach((groupItem) => {
-                const logicGroupId = String((groupItem && groupItem.logicGroupId) || (groupItem && groupItem.groupId) || '').trim();
-                const steps = Array.isArray(groupItem && groupItem.steps) ? groupItem.steps : [];
-                if (logicGroupId === '1') {
-                  pushValue(((steps[0] || {}).value));
-                  return;
-                }
-                steps.forEach((stepItem) => pushValue(stepItem && stepItem.value));
-              });
-              (Array.isArray(jgdzGroups) ? jgdzGroups : []).forEach((groupItem) => {
-                const steps = Array.isArray(groupItem && groupItem.steps) ? groupItem.steps : [];
-                steps.forEach((stepItem) => pushValue(stepItem && stepItem.value));
-              });
-              return values;
+            const buildBuyerProtectionSpsCode = (dscGroups) => {
+              const groups = Array.isArray(dscGroups) ? dscGroups : [];
+              const shipmentGroup =
+                groups.find(
+                  (groupItem) =>
+                    String((groupItem && groupItem.logicGroupId) || (groupItem && groupItem.groupId) || '').trim() === '1'
+                ) ||
+                groups[0] ||
+                {};
+              const steps = Array.isArray(shipmentGroup.steps) ? shipmentGroup.steps : [];
+              const firstServiceCode = String(((steps[0] || {}).value) || '').trim();
+              return firstServiceCode ? [firstServiceCode] : [];
+            };
+            const buyerProtectionSpsCodeMatches = (buyerValue, dscGroups) => {
+              if (!includeBuyerProtectionSpsCode) {
+                return true;
+              }
+              const currentSpsCode = Array.isArray((buyerValue || {}).spsCode)
+                ? (buyerValue || {}).spsCode.map((item) => String(item || '').trim()).filter(Boolean)
+                : [];
+              return JSON.stringify(currentSpsCode) === JSON.stringify(buildBuyerProtectionSpsCode(dscGroups));
             };
             if (requiresProcessSupplyType && expectedSupplyTypes.length > 0) {
               if (JSON.stringify(currentSupplyTypes) !== JSON.stringify(expectedSupplyTypes)) {
@@ -6059,7 +6058,8 @@ class BrowserRPA:
               const currentItemMessage = String(((buyerProtectionProps.itemMessage || {})['dsc|1'] || '')).trim();
               if (
                 JSON.stringify(currentSimplifiedSteps) === JSON.stringify(expectedSimplifiedSteps) &&
-                !currentItemMessage
+                !currentItemMessage &&
+                buyerProtectionSpsCodeMatches(buyerProtectionValue, currentSelectedGroups)
               ) {
                 result.buyerProtectionApplied =
                   expectedBuyerSteps.map((item) => String(item.serviceName || '').trim()).filter(Boolean).join(' | ') ||
@@ -6195,7 +6195,8 @@ class BrowserRPA:
                 const refreshedItemMessage = String(((refreshedBuyerProps.itemMessage || {})['dsc|1'] || '')).trim();
                 if (
                   JSON.stringify(refreshedSimplifiedSteps) === JSON.stringify(expectedSimplifiedSteps) &&
-                  !refreshedItemMessage
+                  !refreshedItemMessage &&
+                  buyerProtectionSpsCodeMatches(refreshedBuyerProps.value || {}, refreshedSelectedGroups)
                 ) {
                   result.buyerProtectionApplied =
                     expectedBuyerSteps.map((item) => String(item.serviceName || '').trim()).filter(Boolean).join(' | ') ||
@@ -6221,10 +6222,7 @@ class BrowserRPA:
                   }
                   buyerProtectionValue.selectedServices = nextSelectedServices;
                   if (includeBuyerProtectionSpsCode) {
-                    buyerProtectionValue.spsCode = buildBuyerProtectionSpsCode(
-                      nextDscGroups,
-                      nextSelectedServices.jgdz || []
-                    );
+                    buyerProtectionValue.spsCode = buildBuyerProtectionSpsCode(nextDscGroups);
                   } else if (Object.prototype.hasOwnProperty.call(buyerProtectionValue, 'spsCode')) {
                     delete buyerProtectionValue.spsCode;
                   }
@@ -7269,28 +7267,18 @@ class BrowserRPA:
                   (groupItem) => Array.isArray(groupItem && groupItem.steps) && groupItem.steps.length > 0
                 );
               };
-              const buildBuyerProtectionSpsCode = (dscGroups, jgdzGroups) => {
-                const values = [];
-                const pushValue = (rawValue) => {
-                  const value = String(rawValue || '').trim();
-                  if (value && !values.includes(value)) {
-                    values.push(value);
-                  }
-                };
-                (Array.isArray(dscGroups) ? dscGroups : []).forEach((groupItem) => {
-                  const logicGroupId = String((groupItem && groupItem.logicGroupId) || (groupItem && groupItem.groupId) || '').trim();
-                  const steps = Array.isArray(groupItem && groupItem.steps) ? groupItem.steps : [];
-                  if (logicGroupId === '1') {
-                    pushValue(((steps[0] || {}).value));
-                    return;
-                  }
-                  steps.forEach((stepItem) => pushValue(stepItem && stepItem.value));
-                });
-                (Array.isArray(jgdzGroups) ? jgdzGroups : []).forEach((groupItem) => {
-                  const steps = Array.isArray(groupItem && groupItem.steps) ? groupItem.steps : [];
-                  steps.forEach((stepItem) => pushValue(stepItem && stepItem.value));
-                });
-                return values;
+              const buildBuyerProtectionSpsCode = (dscGroups) => {
+                const groups = Array.isArray(dscGroups) ? dscGroups : [];
+                const shipmentGroup =
+                  groups.find(
+                    (groupItem) =>
+                      String((groupItem && groupItem.logicGroupId) || (groupItem && groupItem.groupId) || '').trim() === '1'
+                  ) ||
+                  groups[0] ||
+                  {};
+                const steps = Array.isArray(shipmentGroup.steps) ? shipmentGroup.steps : [];
+                const firstServiceCode = String(((steps[0] || {}).value) || '').trim();
+                return firstServiceCode ? [firstServiceCode] : [];
               };
               const buyerProtectionGroups = buildBuyerProtectionGroups();
               const buyerProtectionJgdzGroups = buildBuyerProtectionJgdzGroups();
@@ -7304,7 +7292,7 @@ class BrowserRPA:
                 buyerProtectionGroups,
                 buyerProtectionJgdzGroups,
                 buyerProtectionSpsCode: includeBuyerProtectionSpsCode
-                  ? buildBuyerProtectionSpsCode(buyerProtectionGroups, buyerProtectionJgdzGroups)
+                  ? buildBuyerProtectionSpsCode(buyerProtectionGroups)
                   : [],
                 includeBuyerProtectionSpsCode,
                 detailHtml: String(window.__codexDraftPatchConfig.detailHtml || '').trim(),
@@ -7682,10 +7670,10 @@ class BrowserRPA:
                 }
 
                 if (Array.isArray(patchSnapshot.supplyTypeValues) && patchSnapshot.supplyTypeValues.length > 0) {
-                  if (String((node && node.id) || '').trim() === 'supplyType' && Array.isArray(node.value)) {
+                  if (nodeId === 'supplyType' && Array.isArray(node.value)) {
                     node.value = patchSnapshot.supplyTypeValues.slice();
                   }
-                  if (node.fields && Array.isArray(node.fields.value)) {
+                  if (nodeId === 'supplyType' && node.fields && Array.isArray(node.fields.value)) {
                     node.fields.value = patchSnapshot.supplyTypeValues.slice();
                   }
                   if (Array.isArray(node.supplyType)) {

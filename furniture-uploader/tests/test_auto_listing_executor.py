@@ -59,6 +59,14 @@ class AutoListingExecutorTests(unittest.TestCase):
                 section["buyer_protection_step_template"],
                 [{"from": 1, "service_name": expected_name, "service_code": expected_code}],
             )
+        request_patch = publish["draft_request_patch"]
+        page_state_patch = publish["draft_page_state_patch"]
+        self.assertTrue(request_patch["buyer_protection_include_sps_code"])
+        self.assertTrue(page_state_patch["buyer_protection_include_sps_code"])
+        self.assertEqual(
+            request_patch["buyer_protection_step_template"],
+            page_state_patch["buyer_protection_step_template"],
+        )
         buyer_step = next(
             step for step in publish["steps"] if step.get("name") == "buyer_protection_ship_time"
         )

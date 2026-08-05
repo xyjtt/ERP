@@ -3253,7 +3253,7 @@ class BrowserRPAHelperTests(unittest.TestCase):
             },
         )
 
-    def test_buyer_protection_single_step_uses_process_supply_type_and_sps_code(self) -> None:
+    def test_draft_request_patch_single_buyer_step_uses_process_supply_type_and_sps_code(self) -> None:
         class PatchDriver(FakeDriver):
             def __init__(self) -> None:
                 super().__init__()
@@ -3285,10 +3285,93 @@ class BrowserRPAHelperTests(unittest.TestCase):
 
         self.browser._install_draft_request_patch(publish_config, {})
 
-        self.assertTrue(driver.payloads[-1]["includeBuyerProtectionSpsCode"])
+        payload = driver.payloads[-1]
+        script = driver.scripts[-1]
+        self.assertTrue(payload["includeBuyerProtectionSpsCode"])
+        self.assertEqual(payload["buyerProtectionServiceName"], "24小时发货")
+        self.assertEqual(
+            payload["buyerProtectionStepTemplate"],
+            [
+                {
+                    "from": 1,
+                    "serviceName": "24小时发货",
+                    "serviceCode": "essxsfh",
+                }
+            ],
+        )
         self.assertIn(
             "const requiresProcessSupplyType = buyerProtectionSteps.length > 0;",
-            driver.scripts[-1],
+            script,
+        )
+        self.assertIn("const buildBuyerProtectionSpsCode = (dscGroups) =>", script)
+        self.assertIn("return firstServiceCode ? [firstServiceCode] : [];", script)
+        self.assertIn(
+            "nodeId === 'supplyType' && node.fields && Array.isArray(node.fields.value)",
+            script,
+        )
+        self.assertIn("nodeId === 'supplyType' && Array.isArray(node.value)", script)
+        self.assertIn("node.renderData.cbuSupplyType = patchSnapshot.supplyTypeValues.slice();", script)
+
+    def test_draft_page_state_patch_single_buyer_step_uses_process_supply_type_and_sps_code(self) -> None:
+        class PatchDriver(FakeDriver):
+            def __init__(self) -> None:
+                super().__init__()
+                self.script = ""
+                self.payload: dict[str, object] = {}
+
+            def execute_script(self, script: str, *args: object) -> object:
+                self.script = script
+                if args and isinstance(args[0], dict):
+                    self.payload = args[0]
+                return {"ok": True}
+
+        publish_config = {
+            "draft_page_state_patch": {
+                "enabled": True,
+                "buyer_protection_include_sps_code": True,
+                "buyer_protection_default_value": "24小时发货",
+                "buyer_protection_step_template": [
+                    {
+                        "from": 1,
+                        "service_name": "24小时发货",
+                        "service_code": "essxsfh",
+                    }
+                ],
+            }
+        }
+        driver = PatchDriver()
+        self.browser.driver = driver
+        self.browser._pause = lambda _seconds: None  # type: ignore[assignment]
+
+        self.browser._apply_draft_page_state_patch(publish_config, {})
+
+        self.assertTrue(driver.payload["includeBuyerProtectionSpsCode"])
+        self.assertEqual(driver.payload["buyerProtectionServiceName"], "24小时发货")
+        self.assertEqual(
+            driver.payload["buyerProtectionStepTemplate"],
+            [
+                {
+                    "from": 1,
+                    "serviceName": "24小时发货",
+                    "serviceCode": "essxsfh",
+                }
+            ],
+        )
+        self.assertIn(
+            "const requiresProcessSupplyType = expectedBuyerSteps.length > 0;",
+            driver.script,
+        )
+        self.assertIn(
+            "core.changeElementValue('supplyType', expectedSupplyTypes, { isDepth: false });",
+            driver.script,
+        )
+        self.assertIn(
+            "buyerProtectionValue.spsCode = buildBuyerProtectionSpsCode(",
+            driver.script,
+        )
+        self.assertIn(
+            "buyerProtectionSpsCodeMatches(buyerProtectionValue, currentSelectedGroups)",
+            driver.script,
         )
 
     def test_build_draft_page_state_patch_payload_includes_delivery_service_ids(self) -> None:
