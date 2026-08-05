@@ -1,5 +1,14 @@
 # Platform Experience Knowledge Base
 
+## 2026-08-05 Interrupted Manager and Jushuitan Recovery Findings
+
+- Manager 进程退出和计划任务变为 Ready 都不是日批收口证据。必须同时核对管理器锁、锁 PID、Manager run id、child run 范围、数据库终态和 child Summary。
+- 释放孤儿 Manager 锁之前必须先持久化可审计 Summary，再重新读取完整锁快照。只校验文件仍存在或 token 字符串不足以防止新 owner 接管；任何快照漂移都应保留锁并失败关闭。
+- 恢复范围必须从原始 Preview CSV 与 child reports 做四字段身份匹配。未执行、技术失败、业务终态、1688 已完成和聚水潭已完成不能混为一个“失败列表”。
+- 聚水潭搜索零行只有在商品 ID、线上 SKU 输入值精确回读且页面明确显示零行时，才能证明目标链接已不存在。存在同店铺/商品/SKU 的 sibling 行但目标平台编码不存在，也可形成 `already_cleared` 证据；普通 `task_not_found` 仍失败关闭。
+- Outbox 重排必须是一条 operation 的 compare-and-swap，至少绑定旧 status、error code、attempt count、run id 和 Saga state。批量 UPDATE 或先读取后无条件写入会覆盖并发恢复结果。
+- 批次子进程返回非零时，Outbox Worker 仍应逐项保留报告中已验证成功的 operation；不能把同批次所有 claim 一律回退为失败。
+
 ## 2026-07-28 Bounded Slider and Identity Findings
 
 - 账号独立 Profile 登录恢复必须由业务调用方显式开启，不能改变普通爬虫登录的默认行为。现行命令同时携带 `--auto-solve-slider`、`--slider-max-attempts 4` 和 `--verify-account-identity`。

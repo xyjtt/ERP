@@ -1,5 +1,15 @@
 # Project Memory
 
+## 2026-08-05 Managed Update (Interrupted Daily Manager Recovery)
+
+- 新增正式中断收口工具 `scripts/recover_interrupted_stop_sale_daily_manager.py`。它只在管理器锁的 `cycle/manager_run_id/token` 匹配、锁 PID 已死亡、artifact 与数据库 child run 范围完全一致、所有 child run 已终态且 Summary 与审计一致时继续。
+- 收口顺序固定为：原子写入管理器 `summary.json`，再次读取并校验完整锁快照和 fencing/token 证据，然后才释放管理器锁。二次校验漂移时保留锁并标记 `blocked_lock_revalidation`，禁止手删锁。
+- 新增 `scripts/build_interrupted_stop_sale_recovery_manifest.py`，仅接受已完成收口且 `lock_removed=true` 的管理器 Summary；按原始 Preview CSV 和 child reports 精确生成 `missing.csv`、`technical.csv`、`recovery.csv` 与 `manifest.json`。
+- 恢复清单排除业务终态、1688 与聚水潭已完成项；登录、风控、身份和页面技术异常单独归入 `technical`，缺少任何 1688 执行证据的项归入 `missing`。缺失不得伪装为 0 或成功。
+- Saga/Outbox 已兼容移植 `bfc3c6d`：逐项保留同批次中已验证成功结果；只有精确查询零行或目标链接已不存在时才记 `already_cleared`；单条重排使用 operation/status/error/attempt/run/saga 的锁内 CAS，禁止批量重排。
+- 当前仅完成开发验收。生产批次 `daily_20260804_130814_970163` 尚未收口；此前观察到的 52 个未执行、7 个技术失败和历史 11 条 Outbox 尚未通过新工具在生产重新核对或处理。
+- 开发验证：Python 全量 `608/608`，恢复与 Saga/Outbox 定向 `19/19`，扩展下架集合 `76/76`；聚水潭 TypeScript `24/24`、`check`、`build` 通过；Python `compileall` 与 `git diff --check` 通过。生产部署、Credential Manager、真实页面、数据库和浏览器验收仍待独立执行。
+
 ## 2026-07-28 Managed Update (Bounded Slider Login Recovery)
 
 - 下架和替换仍先复用账号独立真实 Edge/Profile；登录失效时调用共享 1688 `src.cli login`，仅该调用显式启用既有滑块 RPA，最多 4 次，不处理短信、扫码、处罚页或未知风控。
