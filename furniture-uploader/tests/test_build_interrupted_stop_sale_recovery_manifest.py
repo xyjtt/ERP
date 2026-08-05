@@ -16,6 +16,7 @@ if str(SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_ROOT))
 
 from build_interrupted_stop_sale_recovery_manifest import (
+    _format_cli_result,
     _canonical_scope_payload,
     _canonical_scope_sha256,
     _source_task_identity,
@@ -24,6 +25,12 @@ from build_interrupted_stop_sale_recovery_manifest import (
 
 
 class InterruptedStopSaleRecoveryManifestTests(unittest.TestCase):
+    def test_cli_result_is_safe_for_windows_gbk_stdout(self) -> None:
+        rendered = _format_cli_result({"marker": "范围©"})
+
+        rendered.encode("gbk")
+        self.assertIn(r"\u00a9", rendered)
+
     fieldnames = [
         "店铺名称",
         "平台",

@@ -562,9 +562,13 @@ def build_manifest(args: argparse.Namespace) -> dict[str, Any]:
     return manifest
 
 
+def _format_cli_result(result: dict[str, Any]) -> str:
+    return json.dumps(result, ensure_ascii=True, indent=2, default=str)
+
+
 def main() -> int:
     result = build_manifest(build_argument_parser().parse_args())
-    print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+    print(_format_cli_result(result))
     return 0 if result.get("status") == "approved" else 2
 
 
