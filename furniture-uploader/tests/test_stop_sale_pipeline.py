@@ -43,11 +43,11 @@ class StopSalePipelineTests(unittest.TestCase):
         args = self.build_args("preview")
         handoff = PROJECT_ROOT / "logs" / "handoff.jsonl"
         command_1688 = build_1688_command(args, handoff)
-        command_jushuitan = build_jushuitan_command(args, handoff, PROJECT_ROOT.parent)
 
         self.assertNotIn("--yes", command_1688)
-        self.assertNotIn("--yes", command_jushuitan)
         self.assertIn("--jushuitan-handoff-out", command_1688)
+        with self.assertRaisesRegex(ValueError, "execute-only"):
+            build_jushuitan_command(args, handoff, PROJECT_ROOT.parent)
 
     def test_execute_commands_require_explicit_live_flags(self) -> None:
         args = self.build_args("execute")

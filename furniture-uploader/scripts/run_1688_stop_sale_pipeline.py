@@ -317,9 +317,11 @@ def build_jushuitan_command(
     results_dir: Path | None = None,
 ) -> list[str]:
     run_id = str(getattr(args, "run_id", "") or "").strip()
-    if args.mode == "execute" and not run_id:
+    if args.mode != "execute":
+        raise ValueError("Jushuitan Outbox worker is execute-only")
+    if not run_id:
         raise ValueError("Jushuitan Outbox execution requires --run-id")
-    if args.mode == "execute" and not handoff_path.is_file():
+    if not handoff_path.is_file():
         raise FileNotFoundError(f"Jushuitan approved operation-key file is missing: {handoff_path}")
     command = [
         sys.executable,
@@ -337,19 +339,17 @@ def build_jushuitan_command(
     ]
     if run_id:
         command.extend(["--run-id", run_id])
-    if args.mode == "execute":
-        command.extend(
-            [
-                "--approved-operation-keys-file",
-                str(handoff_path.resolve()),
-                "--approved-operation-keys-sha256",
-                hashlib.sha256(handoff_path.read_bytes()).hexdigest(),
-            ]
-        )
+    command.extend(
+        [
+            "--approved-operation-keys-file",
+            str(handoff_path.resolve()),
+            "--approved-operation-keys-sha256",
+            hashlib.sha256(handoff_path.read_bytes()).hexdigest(),
+        ]
+    )
     if results_dir is not None:
         command.extend(["--results-dir", str(results_dir.resolve())])
-    if args.mode == "execute":
-        command.append("--yes")
+    command.append("--yes")
     return command
 
 
@@ -849,7 +849,9 @@ def run_pipeline(
         emit_pipeline_event(run_id, "1688_stage_finished", return_code=result_1688_return_code)
 
         handoff_count = count_handoff_records(handoff_path)
-        if result_1688_return_code == 0 and handoff_count > 0:
+        if args.mode == "preview":
+            emit_pipeline_event(run_id, "jushuitan_stage_skipped", reason="preview_mode")
+        elif result_1688_return_code == 0 and handoff_count > 0:
             command_jushuitan = build_jushuitan_command(
                 args,
                 handoff_path,

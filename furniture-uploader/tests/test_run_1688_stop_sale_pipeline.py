@@ -522,7 +522,7 @@ class Run1688StopSalePipelineTests(unittest.TestCase):
             with patch(
                 "run_1688_stop_sale_pipeline.run_stage_command",
                 return_value=SimpleNamespace(returncode=0),
-            ):
+            ) as run_stage:
                 return_code = run_pipeline(
                     args,
                     run_id=args.run_id,
@@ -535,6 +535,9 @@ class Run1688StopSalePipelineTests(unittest.TestCase):
             )
 
         self.assertEqual(return_code, 0)
+        self.assertEqual(run_stage.call_count, 1)
+        self.assertEqual(run_stage.call_args.kwargs["stage"], "1688")
+        self.assertIsNone(summary["jushuitan_return_code"])
         self.assertIsNone(summary["audit_database"])
         self.assertIsNone(summary["audit_status"])
 
