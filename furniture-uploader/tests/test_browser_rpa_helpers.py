@@ -3253,6 +3253,44 @@ class BrowserRPAHelperTests(unittest.TestCase):
             },
         )
 
+    def test_buyer_protection_single_step_uses_process_supply_type_and_sps_code(self) -> None:
+        class PatchDriver(FakeDriver):
+            def __init__(self) -> None:
+                super().__init__()
+                self.scripts: list[str] = []
+                self.payloads: list[dict[str, object]] = []
+
+            def execute_script(self, script: str, *args: object) -> object:
+                self.scripts.append(script)
+                if args and isinstance(args[0], dict):
+                    self.payloads.append(args[0])
+                return None
+
+        publish_config = {
+            "draft_request_patch": {
+                "enabled": True,
+                "buyer_protection_include_sps_code": True,
+                "buyer_protection_default_value": "24小时发货",
+                "buyer_protection_step_template": [
+                    {
+                        "from": 1,
+                        "service_name": "24小时发货",
+                        "service_code": "essxsfh",
+                    }
+                ],
+            }
+        }
+        driver = PatchDriver()
+        self.browser.driver = driver
+
+        self.browser._install_draft_request_patch(publish_config, {})
+
+        self.assertTrue(driver.payloads[-1]["includeBuyerProtectionSpsCode"])
+        self.assertIn(
+            "const requiresProcessSupplyType = buyerProtectionSteps.length > 0;",
+            driver.scripts[-1],
+        )
+
     def test_build_draft_page_state_patch_payload_includes_delivery_service_ids(self) -> None:
         payload = self.browser._build_draft_page_state_patch_payload(
             {

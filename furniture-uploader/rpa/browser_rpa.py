@@ -5874,9 +5874,7 @@ class BrowserRPA:
                   .map((item) => Number(item))
                   .filter((item) => Number.isFinite(item) && item > 0)
               : [];
-            const requiresProcessSupplyType =
-              expectedBuyerSteps.length > 1 ||
-              expectedBuyerSteps.some((item) => Number(item && item.from) > 1);
+            const requiresProcessSupplyType = expectedBuyerSteps.length > 0;
             const expectedSupplyTypes = Array.from(
               new Set(
                 (requiresProcessSupplyType ? currentSupplyTypes.concat([1, 2]) : currentSupplyTypes)
@@ -7128,9 +7126,7 @@ class BrowserRPA:
                     .map((item) => Number(item))
                     .filter((item) => Number.isFinite(item) && item > 0)
                 : [];
-              const requiresProcessSupplyType =
-                buyerProtectionSteps.length > 1 ||
-                buyerProtectionSteps.some((item) => Number(item && item.from) > 1);
+              const requiresProcessSupplyType = buyerProtectionSteps.length > 0;
               const supplyTypeValues = Array.from(
                 new Set(
                   (requiresProcessSupplyType ? currentSupplyTypes.concat([1, 2]) : currentSupplyTypes)

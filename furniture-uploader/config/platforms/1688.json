@@ -207,7 +207,7 @@
       "enabled": true,
       "timeout_seconds": 5,
       "capture_body_chars": 4000,
-      "buyer_protection_include_sps_code": false,
+      "buyer_protection_include_sps_code": true,
       "buyer_protection_source": "buyer_protection_ship_time",
       "buyer_protection_default_value": "24小时发货",
       "buyer_protection_step_template": [
@@ -234,7 +234,7 @@
     },
     "draft_page_state_patch": {
       "enabled": true,
-      "buyer_protection_include_sps_code": false,
+      "buyer_protection_include_sps_code": true,
       "buyer_protection_source": "buyer_protection_ship_time",
       "buyer_protection_default_value": "24小时发货",
       "buyer_protection_step_template": [
