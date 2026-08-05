@@ -588,8 +588,22 @@ class BrowserRPA:
                     context,
                 )
                 if not trace_detected and not success_navigation_detected:
+                    success_navigation_detected = self._wait_for_submit_success_navigation(
+                        publish_config,
+                        context,
+                    )
+                if not trace_detected and not success_navigation_detected:
                     context["submit_retry_mode"] = "dispatch_event_click"
-                    self._dispatch_click_with_events(submit_selector)
+                    try:
+                        self._dispatch_click_with_events(submit_selector)
+                    except TimeoutException:
+                        success_navigation_detected = self._submit_success_navigation_detected(
+                            publish_config,
+                            context,
+                        )
+                        if not success_navigation_detected:
+                            raise
+                        context["submit_retry_mode"] = "success_navigation_during_dispatch"
                     self._pause(1.0)
                     self._check_publish_error_state(
                         publish_config.get("submit_error_detection", {}),
@@ -8642,6 +8656,26 @@ class BrowserRPA:
             context["platform_link_url"] = f"https://detail.1688.com/offer/{offer_id}.html"
             context["submit_success_result_url"] = current_url
         return detected
+
+    def _wait_for_submit_success_navigation(
+        self,
+        publish_config: dict[str, Any],
+        context: dict[str, Any],
+    ) -> bool:
+        grace_seconds = max(
+            0.0,
+            float(publish_config.get("submit_success_navigation_grace_seconds", 8.0) or 0.0),
+        )
+        poll_seconds = 0.25
+        attempts = max(1, int(grace_seconds / poll_seconds) + 1)
+        context["submit_success_navigation_grace_seconds"] = grace_seconds
+        for attempt in range(attempts):
+            if self._submit_success_navigation_detected(publish_config, context):
+                context["submit_retry_suppressed"] = "success_navigation"
+                return True
+            if attempt + 1 < attempts:
+                self._pause(poll_seconds)
+        return False
 
     def _resolve_context_preferred_value(
         self,

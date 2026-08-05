@@ -487,6 +487,113 @@ class AutoListingExecutorTests(unittest.TestCase):
         self.assertEqual(evidence["offer_id"], "1068081966540")
         self.assertEqual(evidence["post_submit_verified"], "reconciled_success_page")
 
+    def test_submit_reconciliation_reconstructs_dropped_reviewed_replay_evidence(self) -> None:
+        contract = {
+            "contract_version": "listing_submit_reapply_v1",
+            "draft_id": "draft-1",
+            "required_fields": ["delivery_service", "send_address", "buyer_protection"],
+            "save": {
+                "http_status": 200,
+                "success": True,
+                "request_draft_id": "draft-1",
+                "response_draft_id": "draft-1",
+            },
+            "fields": {
+                "delivery_service": {
+                    "status": "submit_reapply_required",
+                    "requested_ids": [365841],
+                    "pre_save_selected_ids": [365841],
+                    "allowed_services": [
+                        {"id": 365841, "label": "送到楼下"},
+                        {"id": 4511641, "label": "市区物流点自提"},
+                    ],
+                },
+                "send_address": {
+                    "status": "submit_reapply_required",
+                    "pre_save_selected": True,
+                    "expected_value": "35281125",
+                    "requested_value": "35281125",
+                },
+                "buyer_protection": {
+                    "status": "submit_reapply_required",
+                    "pre_save_selected": True,
+                    "service_name": "24小时发货",
+                    "service_code": "essxsfh",
+                    "requested_steps": [
+                        {
+                            "from": 1,
+                            "serviceName": "24小时发货",
+                            "serviceCode": "essxsfh",
+                        }
+                    ],
+                    "available_services": [
+                        {"serviceName": "24小时发货", "serviceCode": "essxsfh"}
+                    ],
+                },
+            },
+        }
+        contract_hash = hashlib.sha256(
+            json.dumps(
+                contract,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        draft = advance_listing_state(
+            sample_payload(),
+            "draft_saved",
+            evidence={
+                "draft_id": "draft-1",
+                "draft_url": "draft",
+                "submit_reapply_required_fields": contract["required_fields"],
+                "submit_reapply_evidence": contract,
+                "submit_reapply_contract_sha256": contract_hash,
+            },
+        )
+        approved = advance_listing_state(
+            draft,
+            "review_approved",
+            evidence=review_approval_evidence(draft),
+        )
+        failure_payload = {
+            "task_id": approved["task_id"],
+            "result_context": {
+                "current_url": "https://offer-new.1688.com/result.htm?offerId=1072868453052",
+                "page_title": "商品发布成功 - 卖家工作台",
+                "submit_required_fields_verified": True,
+                "submit_send_address_value": "35281125",
+                "submit_delivery_service_state": {
+                    "selectedServiceIds": [365841],
+                    "allowedServiceIds": [365841, 4511641],
+                },
+                "submit_buyer_protection_value": "24小时发货",
+                "submit_buyer_protection_schedule": [
+                    {"from": 1, "serviceName": "24小时发货", "serviceCode": "essxsfh"}
+                ],
+                "submit_blocking_assist_messages": [],
+                "submit_reapply_results": {},
+            },
+        }
+
+        evidence = extract_submit_reconciliation_evidence(approved, failure_payload)
+
+        self.assertEqual(evidence["offer_id"], "1072868453052")
+        self.assertEqual(
+            evidence["submit_reapply_evidence_source"],
+            "reconstructed_from_failure_context",
+        )
+        self.assertEqual(
+            set(evidence["submit_reapply_results"]),
+            {"delivery_service", "send_address", "buyer_protection"},
+        )
+
+        failure_payload["result_context"]["submit_delivery_service_state"][
+            "selectedServiceIds"
+        ] = [4511641]
+        with self.assertRaisesRegex(ListingContractError, "delivery service"):
+            extract_submit_reconciliation_evidence(approved, failure_payload)
+
     def test_draft_reconciliation_requires_matching_success_and_read_only_inspection(self) -> None:
         payload = sample_payload()
         reapply_contract = {

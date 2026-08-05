@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from decimal import Decimal, InvalidOperation
 import os
 import re
 from pathlib import Path
@@ -436,6 +437,15 @@ def extract_submit_reconciliation_evidence(
     reapply_contract = build_submit_reapply_contract(payload)
     required_reapply_fields = set(reapply_contract["required_fields"])
     reapply_results = context.get("submit_reapply_results") or {}
+    reapply_evidence_source = "recorded_reapply_results"
+    if required_reapply_fields and not reapply_results:
+        reapply_results = _reconstruct_submit_reapply_results(
+            reapply_contract,
+            context,
+        )
+        reapply_evidence_source = "reconstructed_from_failure_context"
+    elif not required_reapply_fields:
+        reapply_evidence_source = "not_required"
     if not isinstance(reapply_results, dict) or set(reapply_results) != required_reapply_fields:
         raise ListingContractError(
             "submit reconciliation evidence does not cover the reviewed replay contract"
@@ -455,7 +465,113 @@ def extract_submit_reconciliation_evidence(
         "post_submit_verified": "reconciled_success_page",
         "required_fields_verified": True,
         "submit_reapply_contract_sha256": canonical_sha256(reapply_contract),
+        "submit_reapply_evidence_source": reapply_evidence_source,
+        "submit_reapply_results": reapply_results,
     }
+
+
+def _reconstruct_submit_reapply_results(
+    contract: dict[str, Any],
+    context: dict[str, Any],
+) -> dict[str, Any]:
+    fields = dict(contract.get("fields") or {})
+    required_fields = [str(item).strip() for item in contract.get("required_fields") or []]
+    results: dict[str, Any] = {}
+    for name in required_fields:
+        evidence = dict(fields.get(name) or {})
+        if name == "send_address":
+            expected = str(
+                evidence.get("expected_value") or evidence.get("requested_value") or ""
+            ).strip()
+            actual = str(context.get("submit_send_address_value") or "").strip()
+            if not expected or actual != expected:
+                raise ListingContractError(
+                    "submit reconciliation send address does not match the reviewed replay contract"
+                )
+            results[name] = {"status": "reapplied_and_read_back", "actual_value": actual}
+            continue
+
+        if name == "delivery_service":
+            state = dict(context.get("submit_delivery_service_state") or {})
+            expected_ids = _positive_integer_set(evidence.get("requested_ids") or [])
+            actual_ids = _positive_integer_set(state.get("selectedServiceIds") or [])
+            allowed_ids = _positive_integer_set(state.get("allowedServiceIds") or [])
+            if not expected_ids or actual_ids != expected_ids or not expected_ids.issubset(allowed_ids):
+                raise ListingContractError(
+                    "submit reconciliation delivery service does not match the reviewed replay contract"
+                )
+            results[name] = {
+                "status": "reapplied_and_read_back",
+                "actual_ids": sorted(actual_ids),
+                "allowed_ids": sorted(allowed_ids),
+            }
+            continue
+
+        if name == "logistics":
+            expected_values = dict(evidence.get("expected_values") or {})
+            actual_values = dict(context.get("submit_logistics_dimensions") or {})
+            required_dimensions = {"length", "width", "height", "weight"}
+            if set(expected_values) != required_dimensions or any(
+                not _decimal_values_equal(actual_values.get(key), expected_values.get(key))
+                for key in required_dimensions
+            ):
+                raise ListingContractError(
+                    "submit reconciliation logistics do not match the reviewed replay contract"
+                )
+            results[name] = {
+                "status": "reapplied_and_read_back",
+                "actual_values": actual_values,
+            }
+            continue
+
+        if name == "buyer_protection":
+            expected_name = str(evidence.get("service_name") or "").strip()
+            expected_code = str(evidence.get("service_code") or "").strip()
+            actual_name = str(context.get("submit_buyer_protection_value") or "").strip()
+            schedule = list(context.get("submit_buyer_protection_schedule") or [])
+            matching = [
+                item
+                for item in schedule
+                if isinstance(item, dict)
+                and int(item.get("from", 0) or 0) == 1
+                and str(item.get("serviceName") or "").strip() == expected_name
+                and str(item.get("serviceCode") or "").strip() == expected_code
+            ]
+            if not expected_name or not expected_code or actual_name != expected_name or not matching:
+                raise ListingContractError(
+                    "submit reconciliation buyer protection does not match the reviewed replay contract"
+                )
+            results[name] = {
+                "status": "reapplied_and_read_back",
+                "service_name": actual_name,
+                "service_code": expected_code,
+                "schedule": schedule,
+            }
+            continue
+
+        raise ListingContractError(
+            f"submit reconciliation cannot reconstruct unsupported replay field: {name}"
+        )
+    return results
+
+
+def _positive_integer_set(values: Any) -> set[int]:
+    normalized: set[int] = set()
+    for value in list(values or []):
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            continue
+        if parsed > 0:
+            normalized.add(parsed)
+    return normalized
+
+
+def _decimal_values_equal(left: Any, right: Any) -> bool:
+    try:
+        return Decimal(str(left).strip()) == Decimal(str(right).strip())
+    except (InvalidOperation, ValueError):
+        return False
 
 
 def _validated_submit_reapply_evidence(

@@ -2796,6 +2796,33 @@ class BrowserRPAHelperTests(unittest.TestCase):
             "https://detail.1688.com/offer/1068081966540.html",
         )
 
+    def test_submit_success_navigation_grace_suppresses_retry_click(self) -> None:
+        class DelayedNavigationDriver:
+            reads = 0
+
+            @property
+            def current_url(self) -> str:
+                self.reads += 1
+                if self.reads < 3:
+                    return "https://offer-new.1688.com/popular/publish.htm"
+                return "https://offer-new.1688.com/result.htm?offerId=1072868453052"
+
+        self.browser.driver = DelayedNavigationDriver()
+        self.browser._pause = lambda _seconds: None  # type: ignore[assignment]
+        context: dict[str, object] = {}
+
+        detected = self.browser._wait_for_submit_success_navigation(
+            {
+                "submit_success_navigation_grace_seconds": 1,
+                "submit_verification": {"success_url_keywords": ["/result.htm"]},
+            },
+            context,
+        )
+
+        self.assertTrue(detected)
+        self.assertEqual(context["platform_link_id"], "1072868453052")
+        self.assertEqual(context["submit_retry_suppressed"], "success_navigation")
+
     def test_verify_saved_draft_accepts_logistics_trace_fallback_from_patch_snapshot(self) -> None:
         self.browser.driver = FakeDriver(current_url="https://offer-new.1688.com/popular/publish.htm")
         self.browser._pause = lambda _seconds: None  # type: ignore[assignment]
