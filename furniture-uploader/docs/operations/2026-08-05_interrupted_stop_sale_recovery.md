@@ -16,11 +16,16 @@
 
 1. 校验锁的 `cycle`、`manager_run_id` 和 token。
 2. 确认锁 owner PID 已死亡。
-3. 要求 artifacts 与数据库 child run 集合完全一致。
+3. 只用正式 pipeline Summary/report 建立 artifact child 集合，并要求它与数据库 child run 集合完全一致。
 4. 要求每个 child run 已终态，数据库 `finished_at/status` 与 child Summary 一致。
 5. 原子写入 Manager `summary.json`。
 6. 再次读取并比对完整锁快照。
 7. 仅在二次校验一致时释放锁并写 `latest.summary.json`。
+
+Manager 子进程日志本身不是 child 证据。仅当日志含精确 `run_id`、
+`reason=higher_priority_browser_write`，且该 run id 没有正式 Summary/report 和数据库行时，
+才作为 `classification=orphan` 的 `pre_audit_evidence` 写入恢复 Summary；它不计入
+`child_run_count`。正常 audited child 的日志由其正式证据覆盖，其他未知日志立即阻塞。
 
 `scripts/build_interrupted_stop_sale_recovery_manifest.py` 负责生成精确恢复范围：
 

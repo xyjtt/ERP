@@ -3,6 +3,7 @@
 ## 2026-08-05 Interrupted Stop-Sale Recovery Becomes Evidence-Driven
 
 - 中断日批不再通过人工删除 Manager 锁恢复。恢复工具必须证明锁归属、owner PID 已死亡、child run 集合完整且全部终态，并采用“先 Summary、后二次锁校验、最后释放”的顺序。
+- Child 集合从“文件名中出现 run id”演进为“正式 Summary/report 与数据库审计交叉证明”。审计前被高优先级写操作拒绝的日志只能作为 orphan 证据，不能替代 child run。
 - 补跑范围不再从日志数量或人工猜测生成。原始 Preview CSV 是范围真源，Manager Summary 限定 child run，逐项报告决定 `missing/technical/excluded`；只有 `missing` 和 `technical` 可进入定向恢复清单。
 - 聚水潭恢复从“重跑失败批次”改为 Saga/Outbox 单 operation fenced 恢复。已验证成功和 `already_cleared` 结果保留，状态或 fencing 证据漂移时 CAS 拒绝修改。
 - 该演进只完成开发验收，不改变 `daily_20260804_130814_970163` 的生产状态，也不授权手删锁、批量重排、广泛重跑或绕过 Credential Manager。

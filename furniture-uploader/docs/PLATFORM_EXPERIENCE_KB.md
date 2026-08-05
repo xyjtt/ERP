@@ -3,6 +3,7 @@
 ## 2026-08-05 Interrupted Manager and Jushuitan Recovery Findings
 
 - Manager 进程退出和计划任务变为 Ready 都不是日批收口证据。必须同时核对管理器锁、锁 PID、Manager run id、child run 范围、数据库终态和 child Summary。
+- Manager 生成的每次尝试日志不是 child 身份真源。只有正式 pipeline Summary/report 才参与 child scope；`higher_priority_browser_write` 预审拒绝在确认无 Summary、无数据库行后记录为 orphan，其他未知日志必须阻塞。
 - 释放孤儿 Manager 锁之前必须先持久化可审计 Summary，再重新读取完整锁快照。只校验文件仍存在或 token 字符串不足以防止新 owner 接管；任何快照漂移都应保留锁并失败关闭。
 - 恢复范围必须从原始 Preview CSV 与 child reports 做四字段身份匹配。未执行、技术失败、业务终态、1688 已完成和聚水潭已完成不能混为一个“失败列表”。
 - 聚水潭搜索零行只有在商品 ID、线上 SKU 输入值精确回读且页面明确显示零行时，才能证明目标链接已不存在。存在同店铺/商品/SKU 的 sibling 行但目标平台编码不存在，也可形成 `already_cleared` 证据；普通 `task_not_found` 仍失败关闭。

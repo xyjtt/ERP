@@ -15,6 +15,7 @@ if str(SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_ROOT))
 
 from recover_interrupted_stop_sale_daily_manager import (
+    _discover_child_ids,
     _load_manager_lock,
     _validate_children,
     recover,
@@ -72,6 +73,62 @@ class InterruptedDailyManagerRecoveryTests(unittest.TestCase):
                 ],
             )
 
+    def test_discovery_keeps_pre_audit_rejection_out_of_child_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager_id = "daily_1"
+            manager_dir = Path(temp_dir) / manager_id
+            manager_dir.mkdir()
+            pre_audit_run_id = f"{manager_id}_s02_b002"
+            audited_retry_run_id = f"{manager_id}_s02_b002_a02"
+            (manager_dir / f"{audited_retry_run_id}.summary.json").write_text(
+                json.dumps({"run_id": audited_retry_run_id, "audit_status": "failed"}),
+                encoding="utf-8",
+            )
+            (manager_dir / f"STORE-A_{audited_retry_run_id}.log").write_text(
+                "normal audited pipeline output",
+                encoding="utf-8",
+            )
+            pre_audit_log = manager_dir / f"STORE-A_{pre_audit_run_id}.log"
+            pre_audit_log.write_text(
+                json.dumps(
+                    {
+                        "run_id": pre_audit_run_id,
+                        "reason": "higher_priority_browser_write",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            discovery = _discover_child_ids(
+                manager_id,
+                manager_dir,
+                database_ids={audited_retry_run_id},
+            )
+
+            self.assertEqual(set(discovery.child_ids), {audited_retry_run_id})
+            self.assertEqual(len(discovery.pre_audit_evidence), 1)
+            evidence = discovery.pre_audit_evidence[0]
+            self.assertEqual(evidence["run_id"], pre_audit_run_id)
+            self.assertEqual(evidence["classification"], "orphan")
+            self.assertEqual(evidence["evidence_type"], "pre_audit_rejection")
+            self.assertEqual(evidence["reason"], "higher_priority_browser_write")
+            self.assertFalse(evidence["summary_present"])
+            self.assertFalse(evidence["database_row_present"])
+
+    def test_discovery_rejects_unknown_child_log(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager_id = "daily_1"
+            manager_dir = Path(temp_dir) / manager_id
+            manager_dir.mkdir()
+            child_id = f"{manager_id}_s02_b002"
+            (manager_dir / f"STORE-A_{child_id}.log").write_text(
+                json.dumps({"run_id": child_id, "reason": "unknown_resource_failure"}),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "Unknown child log evidence"):
+                _discover_child_ids(manager_id, manager_dir, database_ids=set())
+
     def test_child_validation_rejects_finished_at_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             summary_path = Path(temp_dir) / "child.summary.json"
@@ -105,7 +162,21 @@ class InterruptedDailyManagerRecoveryTests(unittest.TestCase):
             manager_id = "daily_1"
             manager_dir = root / manager_id
             manager_dir.mkdir()
-            (manager_dir / f"store_{manager_id}_s01_b001.log").write_text("done", encoding="utf-8")
+            child_id = f"{manager_id}_s01_b001"
+            (manager_dir / f"{child_id}.summary.json").write_text(
+                json.dumps({"run_id": child_id, "audit_status": "failed"}),
+                encoding="utf-8",
+            )
+            pre_audit_run_id = f"{manager_id}_s02_b002"
+            (manager_dir / f"STORE-A_{pre_audit_run_id}.log").write_text(
+                json.dumps(
+                    {
+                        "run_id": pre_audit_run_id,
+                        "reason": "higher_priority_browser_write",
+                    }
+                ),
+                encoding="utf-8",
+            )
             runtime = root / "runtime"
             lock = runtime / "artifacts" / "locks" / "ali1688_stop_sale_daily.lock"
             lock.parent.mkdir(parents=True)
@@ -161,6 +232,8 @@ class InterruptedDailyManagerRecoveryTests(unittest.TestCase):
             self.assertEqual(result["recovery_status"], "finalized")
             self.assertTrue((manager_dir.parent / "latest.summary.json").is_file())
             self.assertEqual(result["child_status_counts"], {"failed": 1})
+            self.assertEqual(result["pre_audit_evidence_count"], 1)
+            self.assertEqual(result["pre_audit_evidence"][0]["run_id"], pre_audit_run_id)
             self.assertTrue(result["lock_snapshot_sha256"])
 
     def test_token_change_after_summary_preserves_lock(self) -> None:

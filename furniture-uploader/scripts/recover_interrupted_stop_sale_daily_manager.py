@@ -8,6 +8,7 @@ import json
 import os
 import re
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,14 @@ from stop_sale_audit import connect_app_database, resolve_stop_sale_app_config
 
 TERMINAL_CHILD_STATUSES = {"success", "partial", "failed"}
 MANAGER_ID_PATTERN = re.compile(r"[A-Za-z0-9_.-]{1,64}")
+PRE_AUDIT_REJECTION_REASONS = {"higher_priority_browser_write"}
+KNOWN_MANAGER_LOG_NAMES = {"preflight.log", "preview.log"}
+
+
+@dataclass(frozen=True)
+class ChildDiscovery:
+    child_ids: frozenset[str]
+    pre_audit_evidence: tuple[dict[str, Any], ...]
 
 
 def build_argument_parser() -> argparse.ArgumentParser:
@@ -193,26 +202,148 @@ def _child_pattern(manager_run_id: str) -> re.Pattern[str]:
     )
 
 
-def _discover_child_ids(manager_run_id: str, manager_dir: Path) -> set[str]:
+def _formal_child_id_from_path(
+    path: Path,
+    pattern: re.Pattern[str],
+) -> str | None:
+    name = path.name
+    suffixes = (".summary.json", ".jsonl")
+    for suffix in suffixes:
+        if not name.endswith(suffix):
+            continue
+        candidate = name[: -len(suffix)]
+        if pattern.fullmatch(candidate):
+            return candidate
+    parent_name = path.parent.name
+    if parent_name.endswith(".jushuitan-results") and name.endswith(".jsonl"):
+        candidate = parent_name[: -len(".jushuitan-results")]
+        if pattern.fullmatch(candidate) and name == f"{candidate}.jsonl":
+            return candidate
+    return None
+
+
+def _extract_pre_audit_fields(text: str, pattern: re.Pattern[str]) -> tuple[str, str] | None:
+    decoder = json.JSONDecoder()
+    objects: list[dict[str, Any]] = []
+    for match in re.finditer(r"\{", text):
+        try:
+            payload, _ = decoder.raw_decode(text[match.start() :])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            objects.append(payload)
+
+    for payload in objects:
+        run_id = str(payload.get("run_id") or "").strip()
+        reason = str(
+            payload.get("reason")
+            or payload.get("reason_code")
+            or payload.get("error_reason")
+            or ""
+        ).strip()
+        if pattern.fullmatch(run_id) and reason:
+            return run_id, reason
+
+    run_match = re.search(
+        rf"(?:^|[\s,;])run_id\s*[:=]\s*[\"']?({pattern.pattern[1:-1]})[\"']?",
+        text,
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+    reason_match = re.search(
+        r"(?:^|[\s,;])(?:reason|reason_code|error_reason)\s*[:=]\s*[\"']?([A-Za-z0-9_.-]+)[\"']?",
+        text,
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+    if run_match and reason_match:
+        run_id = run_match.group(1)
+        reason = reason_match.group(1)
+        if pattern.fullmatch(run_id):
+            return run_id, reason
+    return None
+
+
+def _discover_child_ids(
+    manager_run_id: str,
+    manager_dir: Path,
+    *,
+    database_ids: set[str] | None = None,
+) -> ChildDiscovery:
     pattern = _child_pattern(manager_run_id)
     child_ids: set[str] = set()
-    for path in manager_dir.rglob("*"):
-        if not path.is_file():
+    database_ids = set(database_ids or set())
+    pre_audit_evidence: list[dict[str, Any]] = []
+    manager_files = sorted(path for path in manager_dir.rglob("*") if path.is_file())
+    for path in manager_files:
+        formal_child_id = _formal_child_id_from_path(path, pattern)
+        if formal_child_id:
+            child_ids.add(formal_child_id)
+    pipeline_dir = PROJECT_ROOT / "logs" / "sku_offline" / "pipelines"
+    if pipeline_dir.is_dir():
+        pipeline_paths = {
+            *pipeline_dir.glob(f"{manager_run_id}_s*.summary.json"),
+            *pipeline_dir.glob(
+                f"{manager_run_id}_s*.jushuitan-results/{manager_run_id}_s*.jsonl"
+            ),
+        }
+        for path in sorted(pipeline_paths):
+            child_id = _formal_child_id_from_path(path, pattern)
+            if child_id:
+                child_ids.add(child_id)
+    offline_report_dir = PROJECT_ROOT / "logs" / "sku_offline" / "run_reports"
+    if offline_report_dir.is_dir():
+        for path in sorted(offline_report_dir.glob(f"{manager_run_id}_s*.jsonl")):
+            child_id = _formal_child_id_from_path(path, pattern)
+            if child_id:
+                child_ids.add(child_id)
+
+    for path in manager_files:
+        if _formal_child_id_from_path(path, pattern):
             continue
-        for candidate in (path.stem, path.name):
+        candidates = {
+            match.group(0)
             for match in re.finditer(
                 rf"{re.escape(manager_run_id)}_s\d{{2}}_b\d{{3}}(?:_a\d{{2}})?",
-                candidate,
-            ):
-                child_id = match.group(0)
-                if pattern.fullmatch(child_id):
-                    child_ids.add(child_id)
-    pipeline_dir = PROJECT_ROOT / "logs" / "sku_offline" / "pipelines"
-    for path in pipeline_dir.glob(f"{manager_run_id}_s*.summary.json"):
-        child_id = path.name.removesuffix(".summary.json")
-        if pattern.fullmatch(child_id):
-            child_ids.add(child_id)
-    return child_ids
+                path.name,
+            )
+        }
+        if path.suffix.lower() != ".log":
+            if candidates:
+                raise RuntimeError(f"Unknown child artifact evidence: {path}")
+            continue
+        if path.name.lower() in KNOWN_MANAGER_LOG_NAMES and not candidates:
+            continue
+        if not candidates:
+            raise RuntimeError(f"Unknown manager log evidence: {path}")
+        if candidates.issubset(child_ids):
+            continue
+        parsed = _extract_pre_audit_fields(path.read_text(encoding="utf-8", errors="replace"), pattern)
+        if (
+            len(candidates) == 1
+            and parsed
+            and parsed[0] in candidates
+            and parsed[1] in PRE_AUDIT_REJECTION_REASONS
+            and parsed[0] not in child_ids
+            and parsed[0] not in database_ids
+        ):
+            pre_audit_evidence.append(
+                {
+                    "run_id": parsed[0],
+                    "classification": "orphan",
+                    "evidence_type": "pre_audit_rejection",
+                    "reason": parsed[1],
+                    "path": str(path.resolve()),
+                    "summary_present": False,
+                    "database_row_present": False,
+                }
+            )
+            continue
+        raise RuntimeError(f"Unknown child log evidence: {path}")
+    return ChildDiscovery(
+        child_ids=frozenset(child_ids),
+        pre_audit_evidence=tuple(
+            sorted(pre_audit_evidence, key=lambda item: (str(item["run_id"]), str(item["path"])))
+        ),
+    )
 
 
 def _query_child_runs(shared_runtime_root: Path, manager_run_id: str) -> list[dict[str, Any]]:
@@ -356,6 +487,7 @@ def _load_existing_recovery_summary(
     reason: str,
     lock_payload: dict[str, Any],
     child_runs: list[dict[str, Any]],
+    pre_audit_evidence: tuple[dict[str, Any], ...],
 ) -> dict[str, Any]:
     payload = json.loads(summary_path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
@@ -368,6 +500,8 @@ def _load_existing_recovery_summary(
         "shared_lock_path": str(lock_path),
         "lock_snapshot_sha256": _lock_fingerprint(lock_payload),
         "child_runs": child_runs,
+        "pre_audit_evidence": list(pre_audit_evidence),
+        "pre_audit_evidence_count": len(pre_audit_evidence),
     }
     changed = [name for name, value in expected.items() if payload.get(name) != value]
     if changed:
@@ -404,9 +538,13 @@ def recover(args: argparse.Namespace) -> dict[str, Any]:
         else runtime_root / "artifacts" / "locks" / "ali1688_stop_sale_daily.lock"
     )
     lock_payload = _load_manager_lock(lock_path, manager_run_id)
-    observed_child_ids = _discover_child_ids(manager_run_id, manager_dir)
     child_rows = _query_child_runs(runtime_root, manager_run_id)
-    child_runs = _validate_children(manager_run_id, observed_child_ids, child_rows)
+    discovery = _discover_child_ids(
+        manager_run_id,
+        manager_dir,
+        database_ids={str(row["run_id"]) for row in child_rows},
+    )
+    child_runs = _validate_children(manager_run_id, set(discovery.child_ids), child_rows)
 
     token = str(lock_payload["token"])
     lock_fingerprint = _lock_fingerprint(lock_payload)
@@ -419,6 +557,7 @@ def recover(args: argparse.Namespace) -> dict[str, Any]:
             reason=reason,
             lock_payload=lock_payload,
             child_runs=child_runs,
+            pre_audit_evidence=discovery.pre_audit_evidence,
         )
     else:
         summary = {
@@ -438,6 +577,8 @@ def recover(args: argparse.Namespace) -> dict[str, Any]:
                 for status in sorted({row["status"] for row in child_runs})
             },
             "child_runs": child_runs,
+            "pre_audit_evidence": list(discovery.pre_audit_evidence),
+            "pre_audit_evidence_count": len(discovery.pre_audit_evidence),
             "notification_sent": False,
             "lock_removed": False,
             "recovery_resumed": False,
