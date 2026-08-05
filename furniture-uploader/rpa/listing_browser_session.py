@@ -58,6 +58,7 @@ def build_account_bound_browser_config(
     if int(binding.cdp_port) <= 0:
         raise ValueError("account binding requires a positive cdp_port")
     browser_config = dict(operator_config.get("browser") or {})
+    browser_config["browser_type"] = "edge"
     browser_config["debugger_address"] = f"127.0.0.1:{int(binding.cdp_port)}"
     return browser_config
 

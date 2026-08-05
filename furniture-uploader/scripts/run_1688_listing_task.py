@@ -383,6 +383,10 @@ def _build_listing_browser_config(operator_config: dict, *, cdp_port: int) -> di
     browser_config = dict(operator_config.get("browser") or {})
     if int(cdp_port) <= 0:
         raise ValueError("cdp_port must be positive")
+    # Account runtimes are launched by the shared crawler as Microsoft Edge.
+    # Force the matching Selenium driver instead of inheriting the legacy
+    # operator_config "type" key, which BrowserRPA does not consume.
+    browser_config["browser_type"] = "edge"
     browser_config["debugger_address"] = f"127.0.0.1:{int(cdp_port)}"
     return browser_config
 

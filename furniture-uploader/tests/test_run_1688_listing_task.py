@@ -312,11 +312,21 @@ class BuildListingBrowserConfigTests(unittest.TestCase):
         result = _build_listing_browser_config(operator_config, cdp_port=9317)
 
         self.assertEqual(result["debugger_address"], "127.0.0.1:9317")
+        self.assertEqual(result["browser_type"], "edge")
         self.assertFalse(result["headless"])
         self.assertEqual(
             operator_config["browser"]["debugger_address"],
             "127.0.0.1:9222",
         )
+
+    def test_forces_edge_for_the_account_runtime(self) -> None:
+        result = _build_listing_browser_config(
+            {"browser": {"type": "chrome", "browser_type": "chrome"}},
+            cdp_port=9306,
+        )
+
+        self.assertEqual(result["browser_type"], "edge")
+        self.assertEqual(result["debugger_address"], "127.0.0.1:9306")
 
     def test_rejects_invalid_cdp_port(self) -> None:
         with self.assertRaisesRegex(ValueError, "cdp_port must be positive"):

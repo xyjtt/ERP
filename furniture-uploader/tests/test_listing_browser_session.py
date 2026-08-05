@@ -98,10 +98,18 @@ class ListingBrowserSessionTests(unittest.TestCase):
 
     def test_browser_config_overrides_generic_debug_port(self) -> None:
         result = build_account_bound_browser_config(
-            {"browser": {"debugger_address": "127.0.0.1:9222", "headless": False}},
+            {
+                "browser": {
+                    "type": "chrome",
+                    "browser_type": "chrome",
+                    "debugger_address": "127.0.0.1:9222",
+                    "headless": False,
+                }
+            },
             self.binding(),
         )
         self.assertEqual(result["debugger_address"], "127.0.0.1:9306")
+        self.assertEqual(result["browser_type"], "edge")
         self.assertFalse(result["headless"])
 
     def test_session_logs_in_then_attaches_and_releases_owned_runtime(self) -> None:
