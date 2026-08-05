@@ -1,5 +1,12 @@
 # Project Evolution
 
+## 2026-08-05 - Draft Patching Became Native-Contract Aware
+
+- 草稿修复从“按配置强制覆盖字段”演进为“先读取当前页面组件契约，再只写页面允许的数据”。配送服务只采用 `serviceTemplates` 中的 ID，运行态选择优先，过期默认 ID 不再进入请求。
+- 买家保障结构由 `processOffer` 决定。普通类目不再写 `serviceName/spsCode`，不再自动勾选材质保障等可选组，并过滤空步骤组；加工类目才保留完整服务编码集合。
+- 发货地址改为同时收敛 `cbuSendAddress` 与 `freight.sendAddressId`；草稿身份只修正唯一 `draftId`，不再把平台原生 `edit=false/isItemEdit absent` 改成编辑模式。
+- 请求观测从截断字符串扩展为脱敏结构化前后对比，真实保存后可直接判断是页面状态丢失、补丁错误还是服务端丢弃字段。
+
 ## 2026-08-05 - Listing Scheduling Became Draft-Only and Auditable
 
 - 上架从单次手工脚本演进为安全日度编排：候选内容由受控 inbox 提供，正式源只决定当前是否仍可上架，避免根据不完整源表猜测业务字段。

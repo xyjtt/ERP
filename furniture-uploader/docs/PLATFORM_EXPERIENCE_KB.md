@@ -1,5 +1,13 @@
 # Platform Experience Knowledge Base
 
+## 2026-08-05 CTG0286 Native Component Contract Findings
+
+- 配送服务 ID 不能跨类目硬编码。当前真实页面只允许 `365841=送到楼下` 和 `4511641=市区物流点自提`；应从 `customExtraService.props.serviceTemplates` 读取允许值，并优先保留当前已选值。
+- 当前类目 `buyerProtection.props.processOffer=false` 时，`24小时发货` 的原生步骤为 `{from: 1, value: "essxsfh"}`。不要添加 `serviceName`、`spsCode`，不要自动勾选未选择的 `sstbt/czbz/jgdz` 服务，也不要保留空步骤组。
+- React 地址组件的可见选择不足以保证请求完整。保存请求必须同时包含 `cbuSendAddress.value=<id>` 和 `freight.sendAddressId=<id>`。
+- `draft2offer` 的真实保存请求可以合法使用 `edit=false` 且没有 `isItemEdit`。既有草稿安全门禁应校验请求和响应中的唯一 `draftId`，不应推断或强制另一组编辑标志。
+- 对复杂表单请求只保存截断 body 不足以诊断。应同时保留限定字段的结构化原始/补丁后摘要，且不得包含凭据或无关完整业务请求。
+
 ## 2026-08-05 Listing Tool Identity and Scheduling Findings
 
 - 独立检查器和容量探针不能只把 `debugger_address` 改为 9306；它们同样会占用账号 Profile，图片探针还会上传素材，因此必须先取得 `ali1688_account_<account_key>.lock` 和跨项目数据库租约，再执行正式 RPA 登录和浏览器动作。

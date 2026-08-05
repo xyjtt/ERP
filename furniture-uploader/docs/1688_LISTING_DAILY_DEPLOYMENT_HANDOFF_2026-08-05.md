@@ -52,6 +52,8 @@ Preview 会读取正式源和审计契约，但不会启动浏览器：
 
 ## 5. 真实单草稿 Canary
 
+部署版本必须包含 CTG0286 原生请求契约修复：删除过期配送服务 ID `3385307`，从页面允许值中采用真实配送选择；地址同时写入 `cbuSendAddress` 和 `freight.sendAddressId`；`processOffer=false` 时保障步骤不得包含 `serviceName/spsCode` 或未选择的可选服务；只修正唯一 `draftId`，保留平台原生 `edit/isItemEdit`。保存后必须在结构化 request trace 中核对上述字段。
+
 1. 只保留一个已批准候选，确认 CTG0286 现有草稿 ID，不创建第二草稿。
 2. 执行一次 `-Action run -MaxItems 1`。该命令只调用 draft，不含 submit。
 3. 必须取得 `draft_saved_pending_review`、单商品 result、正式审计和 Saga 记录。

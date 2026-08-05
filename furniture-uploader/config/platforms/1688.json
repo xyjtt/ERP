@@ -220,12 +220,6 @@
       "quotation_type_text": "按产品规格报价",
       "unit_text": "件",
       "min_begin_amount": "1",
-      "delivery_service_default_ids": [
-        3385307
-      ],
-      "delivery_service_label_id_map": {
-        "市区物流点自提": 3385307
-      },
       "response_failure_keywords": [
         "系统错误",
         "发布失败",
@@ -244,12 +238,6 @@
           "service_code": "essxsfh"
         }
       ],
-      "delivery_service_default_ids": [
-        3385307
-      ],
-      "delivery_service_label_id_map": {
-        "市区物流点自提": 3385307
-      },
       "cat_props": [
         {
           "label": "材质",

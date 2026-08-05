@@ -5706,22 +5706,53 @@ class BrowserRPA:
             }
 
             const requestedDeliveryServiceIds = normalizeServiceIds(payload.deliveryServiceIds);
-            if (requestedDeliveryServiceIds.length > 0) {
-              const customExtraComponent = components.customExtraService || {};
-              const customExtraProps = customExtraComponent.props || {};
-              const customExtraValue = cloneValue(customExtraProps.value || {});
-              const nextViewModelMap =
-                customExtraValue.viewModelMap && typeof customExtraValue.viewModelMap === 'object'
-                  ? { ...customExtraValue.viewModelMap }
-                  : {};
-              const deliveryMapKey =
-                Object.keys(nextViewModelMap).find((key) => normalizeText(key).includes('配送')) ||
-                '配送服务';
-              nextViewModelMap[deliveryMapKey] = requestedDeliveryServiceIds[0];
+            const customExtraComponent = components.customExtraService || {};
+            const customExtraProps = customExtraComponent.props || {};
+            const customExtraValue = cloneValue(customExtraProps.value || {});
+            const deliveryTemplates = (Array.isArray(customExtraProps.serviceTemplates)
+              ? customExtraProps.serviceTemplates
+              : []
+            ).filter((item) => normalizeText((item && (item.name || item.serviceName)) || '').includes('配送'));
+            const allowedDeliveryServiceIds = normalizeServiceIds(
+              deliveryTemplates.flatMap((template) =>
+                (Array.isArray(template && template.data) ? template.data : []).map((item) => item && item.id)
+              )
+            );
+            const nextViewModelMap =
+              customExtraValue.viewModelMap && typeof customExtraValue.viewModelMap === 'object'
+                ? { ...customExtraValue.viewModelMap }
+                : {};
+            const deliveryMapKey =
+              Object.keys(nextViewModelMap).find((key) => normalizeText(key).includes('配送')) ||
+              '配送服务';
+            const currentDeliveryServiceIds = normalizeServiceIds(
+              (Array.isArray(customExtraValue.customServices) ? customExtraValue.customServices : []).concat(
+                nextViewModelMap[deliveryMapKey]
+              )
+            ).filter(
+              (item) => allowedDeliveryServiceIds.length === 0 || allowedDeliveryServiceIds.includes(item)
+            );
+            const validRequestedDeliveryServiceIds = requestedDeliveryServiceIds.filter(
+              (item) => allowedDeliveryServiceIds.length === 0 || allowedDeliveryServiceIds.includes(item)
+            );
+            const selectedDeliveryServiceId =
+              currentDeliveryServiceIds[0] ||
+              validRequestedDeliveryServiceIds[0] ||
+              allowedDeliveryServiceIds[0] ||
+              null;
+            if (selectedDeliveryServiceId != null) {
+              const currentCustomServices = normalizeServiceIds(customExtraValue.customServices || []);
+              const preservedCustomServices = allowedDeliveryServiceIds.length > 0
+                ? currentCustomServices.filter((item) => !allowedDeliveryServiceIds.includes(item))
+                : [];
+              nextViewModelMap[deliveryMapKey] = selectedDeliveryServiceId;
               customExtraValue.viewModelMap = nextViewModelMap;
-              customExtraValue.customServices = requestedDeliveryServiceIds.slice();
+              customExtraValue.customServices = normalizeServiceIds(
+                preservedCustomServices.concat([selectedDeliveryServiceId])
+              );
               core.changeElementValue('customExtraService', customExtraValue, { isDepth: false });
-              result.deliveryServiceApplied = requestedDeliveryServiceIds;
+              result.deliveryServiceApplied = [selectedDeliveryServiceId];
+              result.deliveryServiceAllowed = allowedDeliveryServiceIds;
             }
 
             const buyerProtectionServiceName = normalizeText(payload.buyerProtectionServiceName);
@@ -5924,8 +5955,12 @@ class BrowserRPA:
                       ...(existingStep || {}),
                       from: Number(stepItem.from),
                       value: String(stepItem.value || ''),
-                      serviceName: String(stepItem.serviceName || ''),
                     };
+                    if (buyerProtectionProps.processOffer) {
+                      nextStep.serviceName = String(stepItem.serviceName || '');
+                    } else if (Object.prototype.hasOwnProperty.call(nextStep, 'serviceName')) {
+                      delete nextStep.serviceName;
+                    }
                     if (stepItem.end != null && Number(stepItem.end) >= Number(stepItem.from)) {
                       nextStep.end = Number(stepItem.end);
                     } else {
@@ -5945,15 +5980,7 @@ class BrowserRPA:
                 const selectedModels = Array.isArray(groupItem && groupItem.ptsOfferTagModels)
                   ? groupItem.ptsOfferTagModels.filter((item) => item && item.selected)
                   : [];
-                const shouldForceDefaultService = ['4', '6'].includes(logicGroupId);
-                const fallbackModels = Array.isArray(groupItem && groupItem.ptsOfferTagModels)
-                  ? groupItem.ptsOfferTagModels
-                  : [];
-                const effectiveModels =
-                  selectedModels.length > 0
-                    ? selectedModels
-                    : (shouldForceDefaultService ? fallbackModels.slice(0, 1) : []);
-                nextGroup.steps = effectiveModels
+                nextGroup.steps = selectedModels
                   .map((item) => {
                     const value = String((item && item.serviceCode) || '').trim();
                     return value ? { value } : null;
@@ -5961,10 +5988,15 @@ class BrowserRPA:
                   .filter(Boolean);
                 return nextGroup;
               });
-              if (nextGroups.length > 0) {
-                return nextGroups;
+              const meaningfulNextGroups = nextGroups.filter(
+                (groupItem) => Array.isArray(groupItem && groupItem.steps) && groupItem.steps.length > 0
+              );
+              if (meaningfulNextGroups.length > 0) {
+                return meaningfulNextGroups;
               }
-              return currentDscGroups;
+              return currentDscGroups.filter(
+                (groupItem) => Array.isArray(groupItem && groupItem.steps) && groupItem.steps.length > 0
+              );
             };
             const buildBuyerProtectionJgdzGroups = (sourceSelectedServices) => {
               const buyerJgdzGroups = (((buyerProtectionProps.channelRenderMap || {}).jgdz) || []);
@@ -5992,15 +6024,7 @@ class BrowserRPA:
                 const selectedModels = Array.isArray(groupItem && groupItem.ptsOfferTagModels)
                   ? groupItem.ptsOfferTagModels.filter((item) => item && item.selected)
                   : [];
-                const shouldForceDefaultService = ['4', '6'].includes(logicGroupId);
-                const fallbackModels = Array.isArray(groupItem && groupItem.ptsOfferTagModels)
-                  ? groupItem.ptsOfferTagModels
-                  : [];
-                const effectiveModels =
-                  selectedModels.length > 0
-                    ? selectedModels
-                    : (shouldForceDefaultService ? fallbackModels.slice(0, 1) : []);
-                nextGroup.steps = effectiveModels
+                nextGroup.steps = selectedModels
                   .map((item) => {
                     const value = String((item && item.serviceCode) || '').trim();
                     return value ? { value } : null;
@@ -6018,27 +6042,32 @@ class BrowserRPA:
                 (groupItem) => Array.isArray(groupItem && groupItem.steps) && groupItem.steps.length > 0
               );
             };
-            const buildBuyerProtectionSpsCode = (dscGroups) => {
-              const groups = Array.isArray(dscGroups) ? dscGroups : [];
-              const shipmentGroup =
-                groups.find(
-                  (groupItem) =>
-                    String((groupItem && groupItem.logicGroupId) || (groupItem && groupItem.groupId) || '').trim() === '1'
-                ) ||
-                groups[0] ||
-                {};
-              const steps = Array.isArray(shipmentGroup.steps) ? shipmentGroup.steps : [];
-              const firstServiceCode = String(((steps[0] || {}).value) || '').trim();
-              return firstServiceCode ? [firstServiceCode] : [];
+            const effectiveIncludeBuyerProtectionSpsCode =
+              includeBuyerProtectionSpsCode && Boolean(buyerProtectionProps.processOffer);
+            const buildBuyerProtectionSpsCode = (dscGroups, jgdzGroups) => {
+              const values = [];
+              const append = (rawValue) => {
+                const value = String(rawValue || '').trim();
+                if (value && !values.includes(value)) values.push(value);
+              };
+              [dscGroups, jgdzGroups].forEach((groups) => {
+                (Array.isArray(groups) ? groups : []).forEach((groupItem) => {
+                  (Array.isArray(groupItem && groupItem.steps) ? groupItem.steps : [])
+                    .forEach((stepItem) => append(stepItem && stepItem.value));
+                });
+              });
+              return values;
             };
-            const buyerProtectionSpsCodeMatches = (buyerValue, dscGroups) => {
-              if (!includeBuyerProtectionSpsCode) {
+            const buyerProtectionSpsCodeMatches = (buyerValue, dscGroups, jgdzGroups) => {
+              if (!effectiveIncludeBuyerProtectionSpsCode) {
                 return true;
               }
               const currentSpsCode = Array.isArray((buyerValue || {}).spsCode)
                 ? (buyerValue || {}).spsCode.map((item) => String(item || '').trim()).filter(Boolean)
                 : [];
-              return JSON.stringify(currentSpsCode) === JSON.stringify(buildBuyerProtectionSpsCode(dscGroups));
+              return JSON.stringify(currentSpsCode) === JSON.stringify(
+                buildBuyerProtectionSpsCode(dscGroups, jgdzGroups)
+              );
             };
             if (requiresProcessSupplyType && expectedSupplyTypes.length > 0) {
               if (JSON.stringify(currentSupplyTypes) !== JSON.stringify(expectedSupplyTypes)) {
@@ -6059,7 +6088,11 @@ class BrowserRPA:
               if (
                 JSON.stringify(currentSimplifiedSteps) === JSON.stringify(expectedSimplifiedSteps) &&
                 !currentItemMessage &&
-                buyerProtectionSpsCodeMatches(buyerProtectionValue, currentSelectedGroups)
+                buyerProtectionSpsCodeMatches(
+                  buyerProtectionValue,
+                  currentSelectedGroups,
+                  (((buyerProtectionProps.value || {}).selectedServices || {}).jgdz) || []
+                )
               ) {
                 result.buyerProtectionApplied =
                   expectedBuyerSteps.map((item) => String(item.serviceName || '').trim()).filter(Boolean).join(' | ') ||
@@ -6196,7 +6229,11 @@ class BrowserRPA:
                 if (
                   JSON.stringify(refreshedSimplifiedSteps) === JSON.stringify(expectedSimplifiedSteps) &&
                   !refreshedItemMessage &&
-                  buyerProtectionSpsCodeMatches(refreshedBuyerProps.value || {}, refreshedSelectedGroups)
+                  buyerProtectionSpsCodeMatches(
+                    refreshedBuyerProps.value || {},
+                    refreshedSelectedGroups,
+                    (((refreshedBuyerProps.value || {}).selectedServices || {}).jgdz) || []
+                  )
                 ) {
                   result.buyerProtectionApplied =
                     expectedBuyerSteps.map((item) => String(item.serviceName || '').trim()).filter(Boolean).join(' | ') ||
@@ -6208,7 +6245,7 @@ class BrowserRPA:
                   const nextDscGroups = buildBuyerProtectionGroups(selectedServices);
                   const nextJgdzGroups = buildBuyerProtectionJgdzGroups(selectedServices);
                   buyerProtectionValue.suggestBuyerProtectionDeliveryTime =
-                    expectedBuyerSteps.length === 1
+                    buyerProtectionProps.processOffer && expectedBuyerSteps.length === 1
                       ? String((expectedBuyerSteps[0] || {}).serviceName || '')
                       : '';
                   const nextSelectedServices = {
@@ -6221,8 +6258,11 @@ class BrowserRPA:
                     delete nextSelectedServices.jgdz;
                   }
                   buyerProtectionValue.selectedServices = nextSelectedServices;
-                  if (includeBuyerProtectionSpsCode) {
-                    buyerProtectionValue.spsCode = buildBuyerProtectionSpsCode(nextDscGroups);
+                  if (effectiveIncludeBuyerProtectionSpsCode) {
+                    buyerProtectionValue.spsCode = buildBuyerProtectionSpsCode(
+                      nextDscGroups,
+                      nextSelectedServices.jgdz || []
+                    );
                   } else if (Object.prototype.hasOwnProperty.call(buyerProtectionValue, 'spsCode')) {
                     delete buyerProtectionValue.spsCode;
                   }
@@ -6450,6 +6490,99 @@ class BrowserRPA:
               }
             };
 
+            const summarizeDraftRequestBody = (body) => {
+              const clone = (value) => {
+                try {
+                  return JSON.parse(JSON.stringify(value));
+                } catch (error) {
+                  return null;
+                }
+              };
+              const summarizeModel = (model) => {
+                if (!model || typeof model !== 'object' || Array.isArray(model)) return null;
+                const formValues = model.formValues;
+                if (!formValues || typeof formValues !== 'object' || Array.isArray(formValues)) return null;
+                const globalModel = model.global && typeof model.global === 'object' ? model.global : {};
+                const systemParam = globalModel.systemParam && typeof globalModel.systemParam === 'object'
+                  ? globalModel.systemParam
+                  : {};
+                const renderData = globalModel.renderData && typeof globalModel.renderData === 'object'
+                  ? globalModel.renderData
+                  : {};
+                return {
+                  identity: {
+                    systemParam: {
+                      draftId: systemParam.draftId == null ? '' : String(systemParam.draftId),
+                      edit: systemParam.edit == null ? '' : systemParam.edit,
+                      isItemEdit: systemParam.isItemEdit == null ? '' : systemParam.isItemEdit,
+                    },
+                    renderData: {
+                      draftId: renderData.draftId == null ? '' : String(renderData.draftId),
+                      operator: renderData.operator == null ? '' : String(renderData.operator),
+                    },
+                  },
+                  formValues: clone({
+                    supplyType: formValues.supplyType,
+                    buyerProtection: formValues.buyerProtection,
+                    customExtraService: formValues.customExtraService,
+                    cbuSendAddress: formValues.cbuSendAddress,
+                    freight: formValues.freight,
+                    officialLogistics: formValues.officialLogistics,
+                  }),
+                };
+              };
+              const visited = new WeakSet();
+              const inspect = (value, depth = 0) => {
+                if (value == null || depth > 8) return null;
+                if (typeof value === 'string') {
+                  const text = value.trim();
+                  if (!text) return null;
+                  if (text.startsWith('{') || text.startsWith('[')) {
+                    try {
+                      return inspect(JSON.parse(text), depth + 1);
+                    } catch (error) {
+                      return null;
+                    }
+                  }
+                  try {
+                    const params = new URLSearchParams(text);
+                    for (const [, entryValue] of params.entries()) {
+                      const found = inspect(entryValue, depth + 1);
+                      if (found) return found;
+                    }
+                  } catch (error) {
+                    return null;
+                  }
+                  return null;
+                }
+                if (typeof URLSearchParams !== 'undefined' && value instanceof URLSearchParams) {
+                  for (const [, entryValue] of value.entries()) {
+                    const found = inspect(entryValue, depth + 1);
+                    if (found) return found;
+                  }
+                  return null;
+                }
+                if (typeof FormData !== 'undefined' && value instanceof FormData) {
+                  for (const [, entryValue] of value.entries()) {
+                    if (typeof entryValue !== 'string') continue;
+                    const found = inspect(entryValue, depth + 1);
+                    if (found) return found;
+                  }
+                  return null;
+                }
+                if (typeof value !== 'object' || visited.has(value)) return null;
+                visited.add(value);
+                const direct = summarizeModel(value);
+                if (direct) return direct;
+                for (const entryValue of Object.values(value)) {
+                  const found = inspect(entryValue, depth + 1);
+                  if (found) return found;
+                }
+                return null;
+              };
+              return inspect(body) || {};
+            };
+
             const requestCarriesExpectedDraftId = (rawUrl, body) => {
               const expected = String(window.__codexDraftPatchConfig.expectedDraftId || '').trim();
               if (!expected) {
@@ -6532,8 +6665,6 @@ class BrowserRPA:
               try {
                 const parsed = new URL(text, window.location.href);
                 parsed.searchParams.set('draftId', expected);
-                parsed.searchParams.set('edit', 'true');
-                parsed.searchParams.set('isItemEdit', 'true');
                 return parsed.toString();
               } catch (error) {
                 return text;
@@ -6554,8 +6685,6 @@ class BrowserRPA:
                 return false;
               }
               systemParam.draftId = expected;
-              systemParam.edit = true;
-              systemParam.isItemEdit = true;
               return true;
             };
 
@@ -6766,6 +6895,15 @@ class BrowserRPA:
                 const configuredIds = normalizeServiceIds(window.__codexDraftPatchConfig.deliveryServiceIds || []);
                 const customExtraProps = ((components.customExtraService || {}).props) || {};
                 const customExtraValue = (customExtraProps.value || {});
+                const deliveryTemplates = (Array.isArray(customExtraProps.serviceTemplates)
+                  ? customExtraProps.serviceTemplates
+                  : []
+                ).filter((item) => normalizeDeliveryLabel((item && (item.name || item.serviceName)) || '').includes('配送'));
+                const allowedDeliveryIds = normalizeServiceIds(
+                  deliveryTemplates.flatMap((template) =>
+                    (Array.isArray(template && template.data) ? template.data : []).map((item) => item && item.id)
+                  )
+                );
                 const stateCustomServices = normalizeServiceIds(
                   Array.isArray(customExtraValue.customServices) ? customExtraValue.customServices : []
                 );
@@ -6791,11 +6929,18 @@ class BrowserRPA:
                     .map((label) => normalizeDeliveryServiceId(label))
                     .filter((item) => item != null)
                 );
-                const merged = normalizeServiceIds(
-                  configuredIds.concat(stateCustomServices, mapDeliveryIds, labelMappedIds)
+                const validIds = (values) => normalizeServiceIds(values).filter(
+                  (item) => allowedDeliveryIds.length === 0 || allowedDeliveryIds.includes(item)
                 );
+                const selectedId =
+                  validIds(stateCustomServices.concat(mapDeliveryIds))[0] ||
+                  validIds(labelMappedIds)[0] ||
+                  validIds(configuredIds)[0] ||
+                  allowedDeliveryIds[0] ||
+                  null;
                 return {
-                  deliveryServiceIds: merged,
+                  deliveryServiceIds: selectedId == null ? [] : [selectedId],
+                  allowedDeliveryServiceIds: allowedDeliveryIds,
                   deliveryServiceLabels: checkedLabels,
                 };
               };
@@ -6880,7 +7025,10 @@ class BrowserRPA:
                   return (
                     parsePositiveInteger(obj.value) ||
                     parsePositiveInteger(obj.id) ||
-                    parsePositiveInteger(obj.key)
+                    parsePositiveInteger(obj.key) ||
+                    parsePositiveInteger(obj.addressId) ||
+                    parsePositiveInteger(obj.sendAddressId) ||
+                    parseSendAddressId(obj.value)
                   );
                 }
                 return parsePositiveInteger(value);
@@ -7115,9 +7263,8 @@ class BrowserRPA:
                   {
                     from: 1,
                     value: String(firstStep.value || '').trim(),
-                    serviceName: String(firstStep.serviceName || '').trim(),
                   },
-                ].filter((item) => item.value && item.serviceName);
+                ].filter((item) => item.value);
               }
               const currentSupplyTypes = Array.isArray(supplyTypeProps.value)
                 ? supplyTypeProps.value
@@ -7156,8 +7303,12 @@ class BrowserRPA:
                         ...(existingStep || {}),
                         from: Number(stepItem.from),
                         value: String(stepItem.value || ''),
-                        serviceName: String(stepItem.serviceName || ''),
                       };
+                      if (buyerProps.processOffer) {
+                        nextStep.serviceName = String(stepItem.serviceName || '');
+                      } else if (Object.prototype.hasOwnProperty.call(nextStep, 'serviceName')) {
+                        delete nextStep.serviceName;
+                      }
                       if (stepItem.end != null && Number(stepItem.end) >= Number(stepItem.from)) {
                         nextStep.end = Number(stepItem.end);
                       } else {
@@ -7177,15 +7328,7 @@ class BrowserRPA:
                   const selectedModels = Array.isArray(groupItem && groupItem.ptsOfferTagModels)
                     ? groupItem.ptsOfferTagModels.filter((item) => item && item.selected)
                     : [];
-                  const shouldForceDefaultService = ['4', '6'].includes(logicGroupId);
-                  const fallbackModels = Array.isArray(groupItem && groupItem.ptsOfferTagModels)
-                    ? groupItem.ptsOfferTagModels
-                    : [];
-                  const effectiveModels =
-                    selectedModels.length > 0
-                      ? selectedModels
-                      : (shouldForceDefaultService ? fallbackModels.slice(0, 1) : []);
-                  nextGroup.steps = effectiveModels
+                  nextGroup.steps = selectedModels
                     .map((item) => {
                       const value = String((item && item.serviceCode) || '').trim();
                       return value ? { value } : null;
@@ -7193,10 +7336,15 @@ class BrowserRPA:
                     .filter(Boolean);
                   return nextGroup;
                 });
-                if (nextGroups.length > 0) {
-                  return nextGroups;
+                const meaningfulNextGroups = nextGroups.filter(
+                  (groupItem) => Array.isArray(groupItem && groupItem.steps) && groupItem.steps.length > 0
+                );
+                if (meaningfulNextGroups.length > 0) {
+                  return meaningfulNextGroups;
                 }
-                return currentDscGroups;
+                return currentDscGroups.filter(
+                  (groupItem) => Array.isArray(groupItem && groupItem.steps) && groupItem.steps.length > 0
+                );
               };
               const buildBuyerProtectionJgdzGroups = () => {
                 const selectedServices = (buyerProps.value || {}).selectedServices || {};
@@ -7240,15 +7388,7 @@ class BrowserRPA:
                   const selectedModels = Array.isArray(groupItem && groupItem.ptsOfferTagModels)
                     ? groupItem.ptsOfferTagModels.filter((item) => item && item.selected)
                     : [];
-                  const shouldForceDefaultService = ['4', '6'].includes(logicGroupId);
-                  const fallbackModels = Array.isArray(groupItem && groupItem.ptsOfferTagModels)
-                    ? groupItem.ptsOfferTagModels
-                    : [];
-                  const effectiveModels =
-                    selectedModels.length > 0
-                      ? selectedModels
-                      : (shouldForceDefaultService ? fallbackModels.slice(0, 1) : []);
-                  nextGroup.steps = effectiveModels
+                  nextGroup.steps = selectedModels
                     .map((item) => {
                       const value = String((item && item.serviceCode) || '').trim();
                       return value ? { value } : null;
@@ -7267,18 +7407,21 @@ class BrowserRPA:
                   (groupItem) => Array.isArray(groupItem && groupItem.steps) && groupItem.steps.length > 0
                 );
               };
-              const buildBuyerProtectionSpsCode = (dscGroups) => {
-                const groups = Array.isArray(dscGroups) ? dscGroups : [];
-                const shipmentGroup =
-                  groups.find(
-                    (groupItem) =>
-                      String((groupItem && groupItem.logicGroupId) || (groupItem && groupItem.groupId) || '').trim() === '1'
-                  ) ||
-                  groups[0] ||
-                  {};
-                const steps = Array.isArray(shipmentGroup.steps) ? shipmentGroup.steps : [];
-                const firstServiceCode = String(((steps[0] || {}).value) || '').trim();
-                return firstServiceCode ? [firstServiceCode] : [];
+              const effectiveIncludeBuyerProtectionSpsCode =
+                includeBuyerProtectionSpsCode && Boolean(buyerProps.processOffer);
+              const buildBuyerProtectionSpsCode = (dscGroups, jgdzGroups) => {
+                const values = [];
+                const append = (rawValue) => {
+                  const value = String(rawValue || '').trim();
+                  if (value && !values.includes(value)) values.push(value);
+                };
+                [dscGroups, jgdzGroups].forEach((groups) => {
+                  (Array.isArray(groups) ? groups : []).forEach((groupItem) => {
+                    (Array.isArray(groupItem && groupItem.steps) ? groupItem.steps : [])
+                      .forEach((stepItem) => append(stepItem && stepItem.value));
+                  });
+                });
+                return values;
               };
               const buyerProtectionGroups = buildBuyerProtectionGroups();
               const buyerProtectionJgdzGroups = buildBuyerProtectionJgdzGroups();
@@ -7291,10 +7434,10 @@ class BrowserRPA:
                 buyerProtectionSteps,
                 buyerProtectionGroups,
                 buyerProtectionJgdzGroups,
-                buyerProtectionSpsCode: includeBuyerProtectionSpsCode
-                  ? buildBuyerProtectionSpsCode(buyerProtectionGroups)
+                buyerProtectionSpsCode: effectiveIncludeBuyerProtectionSpsCode
+                  ? buildBuyerProtectionSpsCode(buyerProtectionGroups, buyerProtectionJgdzGroups)
                   : [],
-                includeBuyerProtectionSpsCode,
+                includeBuyerProtectionSpsCode: effectiveIncludeBuyerProtectionSpsCode,
                 detailHtml: String(window.__codexDraftPatchConfig.detailHtml || '').trim(),
                 supplyTypeValues,
                 draftTitle,
@@ -7307,6 +7450,7 @@ class BrowserRPA:
                 sendAddressId,
                 logisticsDimensions,
                 deliveryServiceIds: deliveryServiceState.deliveryServiceIds,
+                allowedDeliveryServiceIds: deliveryServiceState.allowedDeliveryServiceIds,
                 deliveryServiceLabels: deliveryServiceState.deliveryServiceLabels,
                 availableBuyerServices: availableBuyerServices.map((item) => ({
                   serviceName: String(item.serviceName || ''),
@@ -7486,15 +7630,16 @@ class BrowserRPA:
                 const sendAddressId = parsePositiveInteger(patchSnapshot.sendAddressId);
                 if (sendAddressId != null) {
                   const currentSendAddress = formValues.cbuSendAddress;
-                  let currentSendAddressId = null;
-                  if (currentSendAddress && typeof currentSendAddress === 'object') {
-                    currentSendAddressId = parsePositiveInteger(currentSendAddress.value);
-                  } else {
-                    currentSendAddressId = parsePositiveInteger(currentSendAddress);
-                  }
-                  if (currentSendAddressId == null) {
-                    formValues.cbuSendAddress = { value: sendAddressId };
-                  }
+                  formValues.cbuSendAddress = currentSendAddress && typeof currentSendAddress === 'object'
+                    ? { ...(currentSendAddress || {}), value: sendAddressId }
+                    : { value: sendAddressId };
+                  const currentFreight = formValues.freight && typeof formValues.freight === 'object'
+                    ? formValues.freight
+                    : {};
+                  formValues.freight = {
+                    ...(currentFreight || {}),
+                    sendAddressId,
+                  };
                 }
                 const draftQuantity = parsePositiveInteger(patchSnapshot.draftQuantity);
                 if (draftQuantity != null) {
@@ -7619,24 +7764,41 @@ class BrowserRPA:
                   const sendAddressId = parsePositiveInteger(patchSnapshot.sendAddressId);
                   if (sendAddressId != null) {
                     if (node.fields && node.fields.value && typeof node.fields.value === 'object') {
-                      if (parsePositiveInteger(node.fields.value.value) == null) {
-                        node.fields.value = {
-                          ...(node.fields.value || {}),
-                          value: sendAddressId,
-                        };
-                      }
-                    } else if (node.fields && parsePositiveInteger(node.fields.value) == null) {
+                      node.fields.value = {
+                        ...(node.fields.value || {}),
+                        value: sendAddressId,
+                      };
+                    } else if (node.fields) {
                       node.fields.value = { value: sendAddressId };
                     }
                     if (node.value && typeof node.value === 'object') {
-                      if (parsePositiveInteger(node.value.value) == null) {
-                        node.value = {
-                          ...(node.value || {}),
-                          value: sendAddressId,
-                        };
-                      }
-                    } else if (parsePositiveInteger(node.value) == null) {
+                      node.value = {
+                        ...(node.value || {}),
+                        value: sendAddressId,
+                      };
+                    } else {
                       node.value = { value: sendAddressId };
+                    }
+                  }
+                } else if (nodeId === 'freight') {
+                  const sendAddressId = parsePositiveInteger(patchSnapshot.sendAddressId);
+                  if (sendAddressId != null) {
+                    node.sendAddressId = sendAddressId;
+                    if (node.fields && node.fields.value && typeof node.fields.value === 'object') {
+                      node.fields.value = {
+                        ...(node.fields.value || {}),
+                        sendAddressId,
+                      };
+                    } else if (node.fields) {
+                      node.fields.value = { sendAddressId };
+                    }
+                    if (node.value && typeof node.value === 'object') {
+                      node.value = {
+                        ...(node.value || {}),
+                        sendAddressId,
+                      };
+                    } else {
+                      node.value = { sendAddressId };
                     }
                   }
                 }
@@ -7705,11 +7867,20 @@ class BrowserRPA:
                   };
                   if (looksLikeCustomExtraNode()) {
                     const deliveryServiceIds = normalizeServiceIds(patchSnapshot.deliveryServiceIds);
+                    const allowedDeliveryServiceIds = normalizeServiceIds(
+                      patchSnapshot.allowedDeliveryServiceIds || []
+                    );
                     const patchCustomExtraValue = (target) => {
                       if (!target || typeof target !== 'object') {
                         return;
                       }
-                      target.customServices = deliveryServiceIds.slice();
+                      const currentCustomServices = normalizeServiceIds(target.customServices || []);
+                      const preservedCustomServices = allowedDeliveryServiceIds.length > 0
+                        ? currentCustomServices.filter((item) => !allowedDeliveryServiceIds.includes(item))
+                        : [];
+                      target.customServices = normalizeServiceIds(
+                        preservedCustomServices.concat(deliveryServiceIds)
+                      );
                       const nextMap = target.viewModelMap && typeof target.viewModelMap === 'object'
                         ? { ...target.viewModelMap }
                         : {};
@@ -7945,10 +8116,12 @@ class BrowserRPA:
                   originalUrl: String(meta.originalUrl || url),
                   identityUrlPatched: Boolean(meta.identityUrlPatched),
                   originalBodyPreview: previewValue(body),
+                  originalBodyStructure: summarizeDraftRequestBody(body),
                 };
                 const rewritten = rewriteRequestBody(body);
                 record.patch = rewritten.meta;
                 record.patchedBodyPreview = previewValue(rewritten.body);
+                record.patchedBodyStructure = summarizeDraftRequestBody(rewritten.body);
                 record.expectedDraftId = String(window.__codexDraftPatchConfig.expectedDraftId || '').trim();
                 record.draftIdentityEvidence = collectDraftIdentityEvidence(url, rewritten.body);
                 record.requestDraftIdentityPresent = requestCarriesExpectedDraftId(url, rewritten.body);
@@ -8000,10 +8173,12 @@ class BrowserRPA:
                   originalUrl,
                   identityUrlPatched: url !== originalUrl,
                   originalBodyPreview: previewValue(requestInit.body),
+                  originalBodyStructure: summarizeDraftRequestBody(requestInit.body),
                 };
                 const rewritten = rewriteRequestBody(requestInit.body);
                 record.patch = rewritten.meta;
                 record.patchedBodyPreview = previewValue(rewritten.body);
+                record.patchedBodyStructure = summarizeDraftRequestBody(rewritten.body);
                 record.expectedDraftId = String(window.__codexDraftPatchConfig.expectedDraftId || '').trim();
                 record.draftIdentityEvidence = collectDraftIdentityEvidence(url, rewritten.body);
                 record.requestDraftIdentityPresent = requestCarriesExpectedDraftId(url, rewritten.body);
@@ -8142,10 +8317,6 @@ class BrowserRPA:
             if str(effective_identity.get("draftId") or "").strip() != expected_draft_id:
                 raise PublishSubmitError(
                     "draft_submit existing-draft request does not carry the expected draft identity"
-                )
-            if effective_identity.get("edit") is not True or effective_identity.get("isItemEdit") is not True:
-                raise PublishSubmitError(
-                    "draft_submit existing-draft request is missing edit=true/isItemEdit=true"
                 )
         if expected_draft_id and isinstance(response_json, dict):
             def find_draft_id(value: Any) -> str:
@@ -8505,8 +8676,10 @@ class BrowserRPA:
         context: dict[str, Any],
     ) -> list[int]:
         values: list[Any] = []
+        runtime_selection_present = False
         delivery_state = context.get("draft_delivery_service_state")
         if isinstance(delivery_state, dict):
+            runtime_selection_present = bool(delivery_state.get("selected"))
             values.extend(list(delivery_state.get("selectedServiceIds", []) or []))
 
             label_map = patch_config.get("delivery_service_label_id_map", {})
@@ -8518,7 +8691,8 @@ class BrowserRPA:
 
         values.extend(list(context.get("delivery_service_ids", []) or []))
         values.extend(list(patch_config.get("delivery_service_ids", []) or []))
-        values.extend(list(patch_config.get("delivery_service_default_ids", []) or []))
+        if not runtime_selection_present:
+            values.extend(list(patch_config.get("delivery_service_default_ids", []) or []))
 
         normalized: list[int] = []
         seen: set[str] = set()

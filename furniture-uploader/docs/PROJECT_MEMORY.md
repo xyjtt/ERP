@@ -1,5 +1,14 @@
 # Project Memory
 
+## 2026-08-05 Managed Update (CTG0286 Native Draft Contract Repair)
+
+- 对唯一草稿 `6a69bee6e4b01cad1b297a52` 完成了真实页面只读组件采集；采集过程没有保存草稿、没有提交 Offer，也没有创建第二草稿。
+- 真实配送服务 ID 为 `365841=送到楼下`、`4511641=市区物流点自提`；旧配置中的 `3385307` 已失效。运行态真实选择现在优先于配置默认值，请求补丁只接受页面 `serviceTemplates` 中存在的 ID。
+- 当前类目 `buyerProtection.props.processOffer=false`。`24小时发货/essxsfh` 的原生持久化结构只包含 `logicGroupId/offerMode/offerRapidProcess/steps.from/steps.value`，不包含 `serviceName` 或 `spsCode`，未选择的保障组不得自动注入。
+- 地址必须同时写入 `formValues.cbuSendAddress.value` 和 `formValues.freight.sendAddressId`；请求 trace 已增加原始和补丁后结构化摘要，用于真实保存后直接核对字段。
+- 平台原生草稿请求使用正确 `draftId`，同时为 `edit=false` 且没有 `isItemEdit`；现有草稿门禁继续严格校验唯一 `draftId`，但不再篡改平台原生编辑参数。
+- 开发回归为 `657/657`，doctor、compileall、JSON 和 `git diff --check` 通过。当前仍未部署该修复，真实草稿保存、独立刷新复核、一次 submit、Offer/Saga/审计回写和日度任务安装仍未验收。
+
 ## 2026-08-05 Managed Update (Guarded Listing Daily Orchestration)
 
 - 上架日度开发已收口为“受控 inbox -> 实时源生命周期复核 -> 审计防重 -> 单商品 draft 子任务 -> 待独立复核汇总”，固定账号 `muke_lixiang`，不从原始 SKU 表猜测标题、图片、店铺、价格或物流。

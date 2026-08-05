@@ -1,5 +1,11 @@
 # DIRECT 1688 Progress
 
+## 2026-08-05 Managed Update (Native Draft Payload Fix Ready for Deployment)
+
+- 已从执行机唯一草稿的真实 `SellPublishSdk` 组件状态确认此前保存失败不是 selector 缺失，而是请求补丁覆盖了平台原生契约：过期配送 ID、错误的保障服务字段/可选组、未同步的 freight 地址，以及被强制改写的 edit 参数。
+- 生产代码已按真实契约修复，并新增结构化 `originalBodyStructure/patchedBodyStructure` trace；本地 `657/657` 全量测试、doctor、compileall、JSON 和差异检查通过。
+- 本次真实诊断只做未保存控件操作，没有保存、submit 或新建草稿。下一节点是提交并部署不可变 release，受控恢复 draft Saga 后只保存现有草稿；独立刷新全字段通过前仍禁止 approve/submit。
+
 ## 2026-08-05 Managed Update (Listing Daily Code Complete)
 
 - 已完成账号绑定草稿检查器、图片容量探针、安全上架日度编排器和 `YYDD-1688-Listing-Daily` 管理脚本的开发。

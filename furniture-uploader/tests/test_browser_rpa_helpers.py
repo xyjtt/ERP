@@ -2930,7 +2930,7 @@ class BrowserRPAHelperTests(unittest.TestCase):
         self.assertEqual(payload.get("unitText"), "件")
         self.assertEqual(payload.get("minBeginAmount"), "1")
 
-    def test_install_draft_request_patch_identity_only_changes_identity_fields(self) -> None:
+    def test_install_draft_request_patch_identity_only_preserves_native_edit_semantics(self) -> None:
         class PatchDriver(FakeDriver):
             def __init__(self) -> None:
                 super().__init__()
@@ -2960,13 +2960,15 @@ class BrowserRPAHelperTests(unittest.TestCase):
         self.assertEqual(payload.get("applyPatch"), False)
         self.assertEqual(payload.get("applyIdentityPatch"), True)
         self.assertIn("systemParam.draftId = expected", driver.last_script)
-        self.assertIn("systemParam.edit = true", driver.last_script)
-        self.assertIn("systemParam.isItemEdit = true", driver.last_script)
         self.assertIn("searchParams.set('draftId', expected)", driver.last_script)
-        self.assertIn("searchParams.set('edit', 'true')", driver.last_script)
-        self.assertIn("searchParams.set('isItemEdit', 'true')", driver.last_script)
+        self.assertNotIn("systemParam.edit = true", driver.last_script)
+        self.assertNotIn("systemParam.isItemEdit = true", driver.last_script)
+        self.assertNotIn("searchParams.set('edit', 'true')", driver.last_script)
+        self.assertNotIn("searchParams.set('isItemEdit', 'true')", driver.last_script)
         self.assertIn("collectDraftIdentityEvidence", driver.last_script)
         self.assertIn("__codexDraftIdentityPatchProbe", driver.last_script)
+        self.assertIn("originalBodyStructure", driver.last_script)
+        self.assertIn("patchedBodyStructure", driver.last_script)
 
     def test_install_draft_request_patch_includes_expected_draft_identity(self) -> None:
         class PatchDriver(FakeDriver):
@@ -3253,7 +3255,7 @@ class BrowserRPAHelperTests(unittest.TestCase):
             },
         )
 
-    def test_draft_request_patch_single_buyer_step_uses_process_supply_type_and_sps_code(self) -> None:
+    def test_draft_request_patch_single_buyer_step_respects_native_process_offer_shape(self) -> None:
         class PatchDriver(FakeDriver):
             def __init__(self) -> None:
                 super().__init__()
@@ -3303,16 +3305,26 @@ class BrowserRPAHelperTests(unittest.TestCase):
             "const requiresProcessSupplyType = buyerProtectionSteps.length > 0;",
             script,
         )
-        self.assertIn("const buildBuyerProtectionSpsCode = (dscGroups) =>", script)
-        self.assertIn("return firstServiceCode ? [firstServiceCode] : [];", script)
+        self.assertIn(
+            "includeBuyerProtectionSpsCode && Boolean(buyerProps.processOffer)",
+            script,
+        )
+        self.assertIn("const buildBuyerProtectionSpsCode = (dscGroups, jgdzGroups) =>", script)
+        self.assertIn("delete nextStep.serviceName", script)
+        self.assertIn("const meaningfulNextGroups = nextGroups.filter(", script)
         self.assertIn(
             "nodeId === 'supplyType' && node.fields && Array.isArray(node.fields.value)",
             script,
         )
         self.assertIn("nodeId === 'supplyType' && Array.isArray(node.value)", script)
         self.assertIn("node.renderData.cbuSupplyType = patchSnapshot.supplyTypeValues.slice();", script)
+        self.assertIn("nodeId === 'cbuSendAddress'", script)
+        self.assertIn("nodeId === 'freight'", script)
+        self.assertIn("node.sendAddressId = sendAddressId", script)
+        self.assertIn("originalBodyStructure", script)
+        self.assertIn("patchedBodyStructure", script)
 
-    def test_draft_page_state_patch_single_buyer_step_uses_process_supply_type_and_sps_code(self) -> None:
+    def test_draft_page_state_patch_single_buyer_step_respects_native_process_offer_shape(self) -> None:
         class PatchDriver(FakeDriver):
             def __init__(self) -> None:
                 super().__init__()
@@ -3370,9 +3382,11 @@ class BrowserRPAHelperTests(unittest.TestCase):
             driver.script,
         )
         self.assertIn(
-            "buyerProtectionSpsCodeMatches(buyerProtectionValue, currentSelectedGroups)",
+            "includeBuyerProtectionSpsCode && Boolean(buyerProtectionProps.processOffer)",
             driver.script,
         )
+        self.assertIn("delete nextStep.serviceName", driver.script)
+        self.assertIn("const meaningfulNextGroups = nextGroups.filter(", driver.script)
 
     def test_build_draft_page_state_patch_payload_includes_delivery_service_ids(self) -> None:
         payload = self.browser._build_draft_page_state_patch_payload(
@@ -3414,6 +3428,19 @@ class BrowserRPAHelperTests(unittest.TestCase):
             },
         )
         self.assertEqual(resolved, [3385307])
+
+    def test_resolve_delivery_service_ids_prefers_runtime_selection_over_stale_default(self) -> None:
+        resolved = self.browser._resolve_delivery_service_ids(
+            patch_config={"delivery_service_default_ids": [3385307]},
+            context={
+                "draft_delivery_service_state": {
+                    "selected": True,
+                    "selectedServiceIds": [365841],
+                }
+            },
+        )
+
+        self.assertEqual(resolved, [365841])
 
     def test_build_draft_page_state_patch_payload_returns_empty_when_disabled(self) -> None:
         self.assertEqual(
@@ -3856,7 +3883,7 @@ class BrowserRPAHelperTests(unittest.TestCase):
         self.assertTrue(detected)
         self.assertEqual(context["draft_submit_response_draft_id"], "existing")
 
-    def test_assert_draft_request_trace_requires_existing_draft_edit_semantics(self) -> None:
+    def test_assert_draft_request_trace_accepts_native_existing_draft_edit_semantics(self) -> None:
         class TraceDriver(FakeDriver):
             def execute_script(self, script: str, *args: object) -> object:
                 if "window.__codexDraftSubmitRecords" in script:
@@ -3876,14 +3903,21 @@ class BrowserRPAHelperTests(unittest.TestCase):
                 return None
 
         self.browser.driver = TraceDriver()
-        with self.assertRaisesRegex(PublishSubmitError, "edit=true/isItemEdit=true"):
-            self.browser._assert_draft_request_trace(
-                {
-                    "expected_draft_id": "existing",
-                    "draft_request_patch": {"enabled": True, "timeout_seconds": 0},
-                },
-                {"draft_request_patch_mode": "identity_only"},
-            )
+        context: dict[str, object] = {"draft_request_patch_mode": "identity_only"}
+
+        detected = self.browser._assert_draft_request_trace(
+            {
+                "expected_draft_id": "existing",
+                "draft_request_patch": {"enabled": True, "timeout_seconds": 0},
+            },
+            context,
+        )
+
+        self.assertTrue(detected)
+        self.assertEqual(
+            context["draft_submit_identity_evidence"]["effective"],
+            {"draftId": "existing", "edit": False, "isItemEdit": False},
+        )
 
     def test_assert_draft_request_trace_records_existing_draft_identity_evidence(self) -> None:
         identity_evidence = {
