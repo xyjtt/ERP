@@ -52,6 +52,36 @@ class ListingSagaReconcileEvidenceTests(unittest.TestCase):
         )
         self.assertEqual(evidence["cdp_port"], 9222)
 
+    def test_accepts_chromedriver_edge_version_mismatch_before_attach(self) -> None:
+        payload = self.valid_payload()
+        payload["error"] = (
+            "session not created: cannot connect to chrome at 127.0.0.1:9306\n"
+            "from unknown error: unrecognized Chrome version: Edg/151.0.4129.59"
+        )
+        path = self.write_context(payload)
+
+        evidence = MODULE._validate_failure_context(
+            path,
+            task_id="1688-listing-CTG028601N1416V01",
+        )
+
+        self.assertEqual(evidence["cdp_port"], 9306)
+        self.assertEqual(
+            evidence["pre_attach_signature"],
+            "chromedriver_edge_version_mismatch_127.0.0.1_9306_unreachable",
+        )
+
+    def test_rejects_generic_chrome_attach_failure_without_edge_mismatch(self) -> None:
+        payload = self.valid_payload()
+        payload["error"] = "cannot connect to chrome at 127.0.0.1:9306"
+        path = self.write_context(payload)
+
+        with self.assertRaisesRegex(RuntimeError, "missing_pre_attach_signature"):
+            MODULE._validate_failure_context(
+                path,
+                task_id="1688-listing-CTG028601N1416V01",
+            )
+
     def test_rejects_non_loopback_pre_attach_endpoint(self) -> None:
         payload = self.valid_payload()
         payload["error"] = "cannot connect to microsoft edge at 192.168.1.5:9306"

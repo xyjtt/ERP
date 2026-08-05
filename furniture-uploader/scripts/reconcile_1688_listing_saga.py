@@ -23,8 +23,15 @@ from stop_sale_audit import connect_app_database, resolve_stop_sale_app_config
 
 
 SAFE_PRE_ACTION_ERROR = "SessionNotCreatedException"
-PRE_ATTACH_ENDPOINT_PATTERN = re.compile(
+EDGE_PRE_ATTACH_ENDPOINT_PATTERN = re.compile(
     r"cannot connect to microsoft edge at 127\.0\.0\.1:(?P<port>\d{1,5})"
+)
+CHROMEDRIVER_PRE_ATTACH_ENDPOINT_PATTERN = re.compile(
+    r"cannot connect to chrome at 127\.0\.0\.1:(?P<port>\d{1,5})"
+)
+CHROMEDRIVER_EDGE_VERSION_PATTERN = re.compile(
+    r"unrecognized Chrome version:\s*Edg/[0-9.]+",
+    re.IGNORECASE,
 )
 
 
@@ -54,14 +61,22 @@ def _json_value(value: Any) -> Any:
     return value
 
 
-def _extract_pre_attach_cdp_port(error: str) -> int:
-    match = PRE_ATTACH_ENDPOINT_PATTERN.search(error)
+def _extract_pre_attach_evidence(error: str) -> tuple[int, str]:
+    match = EDGE_PRE_ATTACH_ENDPOINT_PATTERN.search(error)
+    signature_prefix = "edge"
     if match is None:
-        raise RuntimeError("missing_pre_attach_signature")
+        match = CHROMEDRIVER_PRE_ATTACH_ENDPOINT_PATTERN.search(error)
+        if match is None or CHROMEDRIVER_EDGE_VERSION_PATTERN.search(error) is None:
+            raise RuntimeError("missing_pre_attach_signature")
+        signature_prefix = "chromedriver_edge_version_mismatch"
     port = int(match.group("port"))
     if not 1 <= port <= 65535:
         raise RuntimeError("invalid_pre_attach_cdp_port")
-    return port
+    return port, f"{signature_prefix}_127.0.0.1_{port}_unreachable"
+
+
+def _extract_pre_attach_cdp_port(error: str) -> int:
+    return _extract_pre_attach_evidence(error)[0]
 
 
 def _validate_failure_context(path: Path, *, task_id: str) -> dict[str, Any]:
@@ -75,7 +90,7 @@ def _validate_failure_context(path: Path, *, task_id: str) -> dict[str, Any]:
         raise RuntimeError("failure_context_contains_browser_action_evidence")
     error = str(payload.get("error") or "")
     try:
-        cdp_port = _extract_pre_attach_cdp_port(error)
+        cdp_port, pre_attach_signature = _extract_pre_attach_evidence(error)
     except RuntimeError as exc:
         raise RuntimeError("failure_context_missing_pre_attach_signature") from exc
     return {
@@ -83,7 +98,7 @@ def _validate_failure_context(path: Path, *, task_id: str) -> dict[str, Any]:
         "sha256": hashlib.sha256(raw).hexdigest(),
         "error_type": SAFE_PRE_ACTION_ERROR,
         "result_context_empty": True,
-        "pre_attach_signature": f"edge_127.0.0.1_{cdp_port}_unreachable",
+        "pre_attach_signature": pre_attach_signature,
         "cdp_port": cdp_port,
     }
 
