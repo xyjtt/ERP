@@ -1,5 +1,15 @@
 # Project Memory
 
+## 2026-08-06 Managed Update (Production Listing Closeout Accepted)
+
+- 上架修复提交 `a640e62a13e727226770f0540785a0536c7c2503` 已推送并部署到 `PC-20210622ARIU` 的 `E:\1688\ERP-auto-listing`。开发机 `668 tests OK`；执行机 unittest 退出码 0，compileall、JSON 配置和 tracked 工作树检查通过。
+- 正式任务 `1688-listing-CTG028601N1416V01` 只复用草稿 `6a69bee6e4b01cad1b297a52`。首次 submit 实际已成功发布，但成功页延迟跳转后旧代码继续等待 `#submitFormButton`，因此把真实成功误记为 `TimeoutException`。修复后成功跳转禁止第二次点击，并可从严格失败上下文恢复绑定的字段重放证据。
+- 真实商品页已独立打开核验：Offer `1072868453052`，URL `https://detail.1688.com/offer/1072868453052.html`，标题“床头柜胡桃色橡胶木48x40x50”，库存 999，页面显示 24 小时发货。不得再次审批、submit 或创建第二草稿。
+- 一次性 reconciliation 使用正式 Repository API 把任务从 `submit_pending` 推进为 `submitted`：Execution `209a0789-05fd-4324-ab0d-01bbe7274d8e` 为 `reconcile-submit/success`，最新审计为 `submit_succeeded`，submit Saga 从 `prepared` 变为 `completed`。随后正式 `--mode writeback` 将任务推进为 `offer_written_back`，最新审计同名，Offer ID/URL 保持一致。
+- `YYDD-1688-Listing-Daily` 已按 08:00、Interactive/Highest、IgnoreNew 安装并手动触发，`LastTaskResult=0`，下次触发为 2026-08-06 08:00。preview 和 execute 都将 inbox 中唯一已完成候选归类为 `duplicate_existing`；未启动浏览器、未启用 submit、未改变已发布任务状态。
+- Crawler 的 queue pause artifact 在本轮前已是 `resumed`，无需再次改写队列。`YYDD-1688-Crawler-Worker` 通过交互会话 `RunEx` 恢复为 `Running`；两个同命令 Python 进程是 venv 启动器与解释器父子链，不是重复 Worker。正式 preview 为 `due_queued_count=0/active_count=0`。
+- 生产证据位于 `E:\1688\ERP-auto-listing\furniture-uploader\artifacts\production-acceptance-20260806`。当前限制：日度 inbox 暂无新的可执行候选；自动链路仍只保存草稿，不自动审批或提交；首次自然 08:00 触发尚未发生，必须单独复核其日志和审计。
+
 ## 2026-08-06 Managed Update (Bound Submit Reapply Contract)
 
 - CTG0286 仍只允许草稿 `6a69bee6e4b01cad1b297a52`，账号 `muke_lixiang`，店铺 `木刻理想`。截至部署前最后一次生产只读快照，workflow 为 `draft_pending`、approval 为 `pending`、最新 Saga 为 `failed_terminal`，没有 submit、Offer 或业务回写。

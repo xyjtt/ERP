@@ -1,5 +1,14 @@
 # Platform Experience Knowledge Base
 
+## 2026-08-06 Delayed Submit Success and Scheduler Findings
+
+- 1688 submit 成功后可能先进入结果页，再延迟完成页面组件切换。只要已从受信成功 URL、响应或页面状态提取并验证 Offer ID，就必须停止后续点击和旧按钮等待；不得因 `#submitFormButton` 已不存在而再次 submit。
+- 浏览器 Execution 误报超时不等于发布失败。只有失败上下文能重建同一任务、草稿、账号、字段重放契约和成功 Offer，且数据库仍是唯一 `submit_pending/prepared` 状态时，才允许一次 Repository reconciliation；已有成功 Execution、审计或 Offer 时必须停止。
+- writeback 不是第二次发布。真实详情页独立核验后，`--mode writeback` 只把 `submitted` 推进为 `offer_written_back` 并记录审计，不启动浏览器。CTG0286 已用 Offer `1072868453052` 验证此边界。
+- Windows PowerShell 5.1 会把无 BOM UTF-8 脚本中的中文常量按本地代码页解析，可能造成身份比较假失败。生产 wrapper 应保持 ASCII，或从已做 SHA-256 固定并显式按 UTF-8 读取的 payload 取得 `shop_name`。
+- `Start-ScheduledTask` 对 Interactive 长驻 Worker 可能只产生排队事件而不绑定当前登录会话，表现为 `Ready/0x800710E0`。执行机受控启动应使用 `Schedule.Service.RunEx(..., session 2)`，随后要求 `Running/0x41301`、唯一父子 Python 链和正式数据库 preview；不能通过重复点击或全局启动第二个 Worker 解决。
+- 日度计划任务安装成功不等于产生新业务数据。当前已完成候选应稳定归类为 `duplicate_existing`，不启动浏览器；只有新的完整审核 payload 且实时源生命周期仍合格时，自动链路才可保存既有草稿，并仍停在人工复核前。
+
 ## 2026-08-06 Nonpersistent Draft Field Replay Findings
 
 - HTTP 2xx 和 `success=true` 只能证明草稿保存请求被接受，不能证明所有 React 字段在重新打开后仍存在。对配送服务、地址、物流和买家保障必须同时保留请求值、保存前页面状态、响应草稿 ID 和页面允许值。

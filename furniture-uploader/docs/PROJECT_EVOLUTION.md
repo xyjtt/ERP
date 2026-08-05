@@ -1,5 +1,13 @@
 # Project Evolution
 
+## 2026-08-06 - Listing Reached a Guarded Production Offer
+
+- 上架链路首次完成“既有草稿 -> 独立复核 -> 单次批准 -> 单次 submit -> 真实 Offer -> Repository reconciliation -> 正式 writeback”的生产闭环。最终 Offer 为 `1072868453052`，任务状态为 `offer_written_back`。
+- 成功判定从“等待原提交按钮消失”演进为“识别成功 URL/Offer 后立即终止点击路径”。成功页延迟跳转不能触发第二次 submit；跟踪超时只能通过绑定失败上下文、Offer 身份和 Saga fencing 的 reconciliation 收口。
+- reconciliation 与 writeback 保持分层：前者证明 1688 submit 已成功并完成 submit Saga，后者只在真实商品页独立核验后推进业务 workflow。两者均通过正式 Repository API，禁止手写 SQL 修正状态。
+- 日度能力已从代码完成演进为执行机正式计划任务，固定 08:00 且只运行 draft 编排。首次手动触发用已完成候选验证防重，结果为 `duplicate_existing`，证明计划任务可运行且不会自动提交；新的业务产出仍依赖新的完整审核候选。
+- 跨项目恢复不再以“排队任务必须清零”为前置。Crawler pause artifact 已恢复时只启用正式 Worker；Interactive 长驻任务使用绑定登录会话的 `Schedule.Service.RunEx` 启动，并以任务状态、进程父子链和数据库 preview 共同验收。
+
 ## 2026-08-06 - Draft Acceptance Separated Persistence From Submit Replay
 
 - 草稿验收从“所有字段必须刷新后持久化”演进为“逐字段区分持久化与受控 submit 重放”。只有平台已证明会丢失的四个字段可进入重放，其余字段继续要求真实持久化。

@@ -1,5 +1,14 @@
 # DIRECT 1688 Progress
 
+## 2026-08-06 Production Closeout (Accepted)
+
+- `a640e62` 已部署到正式执行目录；开发机 668 个测试通过，执行机 unittest、compileall、JSON 与 tracked 工作树门禁通过。
+- CTG0286 的唯一草稿完成真实保存、独立复核、一次批准和一次 submit。平台实际生成 Offer `1072868453052`；详情页标题、规格、库存 999 和 24 小时发货均已从真实页面核验。
+- 原 submit Execution 因成功跳转后继续等待旧按钮而误报 `TimeoutException`，不是平台发布失败。一次性 reconciliation 已生成 `reconcile-submit/success` Execution，审计为 `submit_succeeded`，Saga 为 `completed`；正式 writeback 后最终 workflow 为 `offer_written_back`。
+- `YYDD-1688-Listing-Daily` 已安装为每日 08:00，手动触发结果 0。当前 inbox 只有这一个已完成候选，两次调度检查均为 `duplicate_existing=1`，因此没有启动 9306、没有新草稿、没有自动 submit。
+- Crawler Worker 已恢复为 `Running`，队列当前 `due=0/active=0`；本轮所有临时计划任务已删除，正式 Listing Daily 与 Crawler Worker 保留。
+- 尚未完成的生产项只有：首次 08:00 自然触发复核，以及为日度 inbox 提供新的完整审核候选。单商品生产验收已完成，但不能据此宣称多商品或无人审批 submit 已验收。
+
 ## 2026-08-06 Managed Update (Submit Reapply Gate Ready)
 
 - 已完成非持久字段的证据化收口：配送服务、发货地址、物流尺寸重量和买家保障在草稿刷新后缺失时，不再要求重复保存，也不直接判“已持久化”；它们只能在完整 `listing_submit_reapply_v1` 证据下进入 `submit_reapply_required`。
