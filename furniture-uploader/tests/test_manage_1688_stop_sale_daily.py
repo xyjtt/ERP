@@ -428,6 +428,10 @@ class Manage1688StopSaleDailyTests(unittest.TestCase):
                     "manage_1688_stop_sale_daily._run_capture",
                     side_effect=[(0, json.dumps({"status": "ok"})), (0, json.dumps(preview))],
                 ),
+                patch(
+                    "manage_1688_stop_sale_daily._protocol_enforcement_active",
+                    return_value=False,
+                ),
                 patch("manage_1688_stop_sale_daily.build_manager_lock", return_value=nullcontext()),
                 patch("manage_1688_stop_sale_daily.paused_worker", fake_paused_worker),
                 patch(
@@ -693,6 +697,10 @@ class Manage1688StopSaleDailyTests(unittest.TestCase):
                     patch(
                         "manage_1688_stop_sale_daily._run_capture",
                         side_effect=[(0, json.dumps({"status": "ok"})), (0, json.dumps(preview))],
+                    ),
+                    patch(
+                        "manage_1688_stop_sale_daily._protocol_enforcement_active",
+                        return_value=False,
                     ),
                     patch("manage_1688_stop_sale_daily.build_manager_lock", return_value=nullcontext()),
                     patch(
