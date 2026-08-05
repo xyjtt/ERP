@@ -198,6 +198,30 @@ class SkuOfflineBrowserTests(unittest.TestCase):
         self.assertEqual(management_query["q"], [""])
         self.assertEqual(management_query["filterOfferId"], [""])
 
+    def test_stop_sale_config_uses_external_executor_profiles(self) -> None:
+        config = json.loads(
+            (PROJECT_ROOT / "config" / "systems" / "1688_sku_offline.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        bindings = config["execution"]["store_accounts"]
+
+        self.assertEqual(
+            {
+                binding["account_key"]: binding["browser_profile_dir"]
+                for binding in bindings
+            },
+            {
+                account_key: f"C:/ProgramData/YYDD/1688-crawler/profiles/{account_key}"
+                for account_key in (
+                    "muke_lixiang",
+                    "guangzhou_wolai",
+                    "gonglai",
+                    "lechang",
+                )
+            },
+        )
+
     def test_management_url_normalizes_to_unfiltered_all_tab(self) -> None:
         normalized = SkuOfflineBrowser._normalize_management_all_tab_url(
             "https://work.1688.com/?_path_=sellerPro/offer&tab=onsale&q=123&filterOfferId=123"
