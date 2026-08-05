@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 from pathlib import Path
 import sys
@@ -57,6 +58,20 @@ class FakeBrowser:
     def _wait_for_publish_runtime_ready(self, *, timeout_seconds: float) -> None:
         self.timeout_seconds = timeout_seconds
         raise TimeoutException("runtime unavailable")
+
+
+@contextmanager
+def fake_account_browser_session(**kwargs):
+    browser = kwargs["browser_class"]({}, Path.cwd())
+    browser.open()
+    try:
+        yield (
+            browser,
+            SimpleNamespace(cdp_port=9306),
+            SimpleNamespace(account_key="muke_lixiang", shop_name="木刻理想"),
+        )
+    finally:
+        browser.close()
 
 
 class InspectSavedDraftTests(unittest.TestCase):
@@ -187,6 +202,10 @@ class InspectSavedDraftTests(unittest.TestCase):
                 json.dumps(
                     {
                         "task_id": "task-1",
+                        "shop": {
+                            "account_key": "muke_lixiang",
+                            "shop_name": "木刻理想",
+                        },
                         "workflow": {"draft": {"draft_id": "draft-1"}},
                         "images": {"detail_urls": []},
                         "product": {"selected_title": "title"},
@@ -201,6 +220,11 @@ class InspectSavedDraftTests(unittest.TestCase):
 
             with (
                 patch.object(inspector, "BrowserRPA", FakeBrowser),
+                patch.object(
+                    inspector,
+                    "open_account_bound_listing_browser",
+                    side_effect=fake_account_browser_session,
+                ),
                 patch.object(inspector, "load_json_with_local_override", return_value={"browser": {}}),
                 patch.object(
                     inspector,
@@ -238,6 +262,10 @@ class InspectSavedDraftTests(unittest.TestCase):
                 json.dumps(
                     {
                         "task_id": "task-1",
+                        "shop": {
+                            "account_key": "muke_lixiang",
+                            "shop_name": "木刻理想",
+                        },
                         "workflow": {"draft": {"draft_id": "draft-1"}},
                         "images": {"detail_urls": []},
                         "product": {
@@ -260,6 +288,11 @@ class InspectSavedDraftTests(unittest.TestCase):
 
             with (
                 patch.object(inspector, "SkuOfflineBrowser", FakeBrowser),
+                patch.object(
+                    inspector,
+                    "open_account_bound_listing_browser",
+                    side_effect=fake_account_browser_session,
+                ),
                 patch.object(inspector, "load_json_with_local_override", return_value={"browser": {}}),
                 patch.object(inspector, "_open_draft_from_management", return_value=management_entry),
                 patch.object(

@@ -1,5 +1,13 @@
 # Project Memory
 
+## 2026-08-05 Managed Update (Guarded Listing Daily Orchestration)
+
+- 上架日度开发已收口为“受控 inbox -> 实时源生命周期复核 -> 审计防重 -> 单商品 draft 子任务 -> 待独立复核汇总”，固定账号 `muke_lixiang`，不从原始 SKU 表猜测标题、图片、店铺、价格或物流。
+- `inspect_1688_saved_draft.py` 和 `probe_1688_image_picker.py` 统一从外置 `accounts.json` 解析账号绑定，要求 CDP `9306`，并在账号文件锁和跨项目数据库租约内执行正式 RPA 登录及浏览器动作；任务传入的 `account_key/shop_name` 保持原样。
+- 自动日度链路只调用 `run_1688_listing_task.py --mode draft`，显式移除 `ENABLE_1688_LISTING_SUBMIT`；每商品独立 input/result/log，失败隔离，不审批、不提交、不 writeback。
+- 正式任务管理脚本为 `scripts/manage_1688_listing_daily_task.ps1`，任务名固定 `YYDD-1688-Listing-Daily`，默认 08:00、Interactive/Highest、IgnoreNew。开发机未安装或启动该任务。
+- 当前仅完成开发和本地验证；未连接执行机、正式数据库、真实账号或浏览器，未创建、保存或提交真实草稿。部署和真实 Canary 必须按 `docs/1688_LISTING_DAILY_DEPLOYMENT_HANDOFF_2026-08-05.md` 执行。
+
 ## 2026-07-28 Managed Update (Bounded Slider Login Recovery)
 
 - 下架和替换仍先复用账号独立真实 Edge/Profile；登录失效时调用共享 1688 `src.cli login`，仅该调用显式启用既有滑块 RPA，最多 4 次，不处理短信、扫码、处罚页或未知风控。

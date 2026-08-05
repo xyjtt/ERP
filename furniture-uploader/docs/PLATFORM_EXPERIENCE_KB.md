@@ -1,5 +1,12 @@
 # Platform Experience Knowledge Base
 
+## 2026-08-05 Listing Tool Identity and Scheduling Findings
+
+- 独立检查器和容量探针不能只把 `debugger_address` 改为 9306；它们同样会占用账号 Profile，图片探针还会上传素材，因此必须先取得 `ali1688_account_<account_key>.lock` 和跨项目数据库租约，再执行正式 RPA 登录和浏览器动作。
+- 业务身份只能来自候选 payload 的 `shop.account_key/shop_name`。外置 `accounts.json` 只提供 Profile/CDP 绑定，平台显示名称不得反向覆盖业务店铺字段。
+- 日度上架不能从 `dbo.jst_sku` 猜发布 payload。该表只做最后时刻生命周期门禁：`enabled=1`、`stock_disabled=0`、`other_5=销售`、`item_type=成品`；完整标题、图片、价格、库存、物流和店铺必须来自已审核候选。
+- 自动计划只能保存草稿并停在待独立复核。即使草稿保存成功，也必须用独立会话重新打开正式草稿入口并核对完整字段，之后才能由独立人工门禁授权一次 submit。
+
 ## 2026-07-28 Bounded Slider and Identity Findings
 
 - 账号独立 Profile 登录恢复必须由业务调用方显式开启，不能改变普通爬虫登录的默认行为。现行命令同时携带 `--auto-solve-slider`、`--slider-max-attempts 4` 和 `--verify-account-identity`。

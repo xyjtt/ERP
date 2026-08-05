@@ -1,5 +1,12 @@
 # DIRECT 1688 Progress
 
+## 2026-08-05 Managed Update (Listing Daily Code Complete)
+
+- 已完成账号绑定草稿检查器、图片容量探针、安全上架日度编排器和 `YYDD-1688-Listing-Daily` 管理脚本的开发。
+- 编排器只消费完整、人工审核的 `listing_task_payload_v1` inbox；源数据不再被用来推断发布字段，只用于执行前确认 SKU 仍为启用、非停用库存、销售中成品。
+- 已实现批内与正式审计表防重、单商品失败隔离、基础设施失败 summary、草稿待复核终态和严格无自动 submit 边界。
+- 本阶段没有生产操作。下一节点是执行机按精确 commit 部署后先 preview，再对现有 CTG0286 草稿做一次受控 draft 保存和独立复核；复核通过后另行人工授权一次 submit，最后才安装/启用正式日度任务。
+
 ## 2026-07-28 Managed Update (Automatic Login Identity Gate)
 
 - 下架/替换账号恢复改为显式 `--auto-solve-slider --slider-max-attempts 4 --verify-account-identity`，普通爬虫登录默认行为不变。

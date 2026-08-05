@@ -1,5 +1,12 @@
 # Project Evolution
 
+## 2026-08-05 - Listing Scheduling Became Draft-Only and Auditable
+
+- 上架从单次手工脚本演进为安全日度编排：候选内容由受控 inbox 提供，正式源只决定当前是否仍可上架，避免根据不完整源表猜测业务字段。
+- 日度并发边界下沉到已有单商品执行器：每个商品独立取得账号锁、数据库租约和 Saga，失败不会吞掉后续候选；计划任务本身采用 IgnoreNew 防止重入。
+- 自动化完成边界固定为 `draft_pending_review`。审批、独立复核、submit 和 Offer writeback 继续作为分离门禁，不能由日度计划任务隐式执行。
+- 只读检查器和图片探针也纳入账号锁与跨项目租约，避免诊断工具绕过爬虫、上架和下架共用的三槽位协议。
+
 ## 2026-07-28 Login Recovery Evolution
 
 - 账号恢复从“遇到滑块直接停店”演进为“仅下架/替换显式启用既有滑块 RPA，最多 4 次”；普通爬虫和普通登录仍默认不自动处理。

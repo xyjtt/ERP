@@ -89,31 +89,67 @@ def source_gate_passed(rows: list[dict[str, Any]], columns: dict[str, str]) -> b
     )
 
 
-def main() -> int:
-    args = build_parser().parse_args()
-    runtime_root = Path(args.shared_runtime_root).resolve()
+def build_source_config(
+    *,
+    shared_runtime_root: str | Path,
+    server: str = DEFAULT_SERVER,
+    port: int = DEFAULT_PORT,
+    database: str = DEFAULT_DATABASE,
+    credential_ref: str = DEFAULT_CREDENTIAL_REF,
+    driver: str = "ODBC Driver 17 for SQL Server",
+) -> StopSaleAppConfig:
+    runtime_root = Path(shared_runtime_root).resolve()
     provider_module = _load_secret_provider_module(runtime_root)
-    record = provider_module.get_secret_provider().get(str(args.credential_ref).strip())
-    driver = resolve_sqlserver_driver(args.driver)
-    config = StopSaleAppConfig(
-        server=str(args.server).strip(),
-        port=int(args.port),
-        database=str(args.database).strip(),
+    record = provider_module.get_secret_provider().get(str(credential_ref).strip())
+    resolved_driver = resolve_sqlserver_driver(driver)
+    return StopSaleAppConfig(
+        server=str(server).strip(),
+        port=int(port),
+        database=str(database).strip(),
         schema="dbo",
         user=str(record.username),
         password=str(record.secret),
-        driver=driver,
+        driver=resolved_driver,
         encrypt=False,
         trust_server_certificate=True,
         timeout_seconds=15,
-        credential_ref=str(args.credential_ref).strip(),
+        credential_ref=str(credential_ref).strip(),
     )
 
-    connection = connect_app_database(config)
-    try:
-        rows, columns = load_source_rows(connection, str(args.sku).strip())
-    finally:
-        connection.close()
+
+class ListingSourceReader:
+    def __init__(self, config: StopSaleAppConfig) -> None:
+        self.config = config
+        self.connection: Any = None
+
+    def __enter__(self) -> "ListingSourceReader":
+        self.connection = connect_app_database(self.config)
+        return self
+
+    def __exit__(self, _exc_type, _exc, _traceback) -> None:
+        if self.connection is not None:
+            self.connection.close()
+            self.connection = None
+
+    def read(self, sku: str) -> tuple[list[dict[str, Any]], dict[str, str]]:
+        if self.connection is None:
+            raise RuntimeError("listing source reader is not open")
+        return load_source_rows(self.connection, sku)
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    config = build_source_config(
+        shared_runtime_root=args.shared_runtime_root,
+        server=args.server,
+        port=args.port,
+        database=args.database,
+        credential_ref=args.credential_ref,
+        driver=args.driver,
+    )
+
+    with ListingSourceReader(config) as reader:
+        rows, columns = reader.read(str(args.sku).strip())
 
     passed = source_gate_passed(rows, columns)
     result = {
@@ -131,7 +167,7 @@ def main() -> int:
             "item_type": "成品",
         },
         "connection": {
-            "driver": driver,
+            "driver": config.driver,
             "credential_ref": config.credential_ref,
         },
     }

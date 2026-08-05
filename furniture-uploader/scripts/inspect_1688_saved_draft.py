@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import time
@@ -24,6 +25,7 @@ if str(RPA_ROOT) not in sys.path:
 from auto_listing_executor import resolve_1688_publish_url
 from browser_rpa import BrowserRPA
 from config_loader import load_json_with_local_override
+from listing_browser_session import open_account_bound_listing_browser
 from listing_duplicate_probe import ListingCandidate, LiveListingDuplicateProbe
 from sku_offline_browser import SkuOfflineBrowser
 
@@ -43,7 +45,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="open the draft by clicking its real product-management draft-box link",
     )
-    parser.add_argument("--expected-shop", default="木刻理想")
+    parser.add_argument("--expected-shop", default="")
+    parser.add_argument("--account-key", default="muke_lixiang")
+    parser.add_argument("--expected-cdp-port", type=int, default=9306)
+    parser.add_argument("--lock-wait-seconds", type=int, default=0)
+    parser.add_argument("--runtime-lease-wait-seconds", type=float, default=0)
+    parser.add_argument(
+        "--shared-runtime-root",
+        default=os.getenv("YYDD_1688_RUNTIME_ROOT", "D:/script_1688"),
+    )
     return parser
 
 
@@ -372,17 +382,28 @@ def main() -> int:
                 "publish_url": publish_url,
             }
     browser_class = SkuOfflineBrowser if args.open_from_management else BrowserRPA
-    browser = browser_class(operator_config.get("browser", {}), PROJECT_ROOT)
-    browser.open()
-    boot_network_probe_installed = _install_draft_boot_network_probe(browser)
-    try:
+    with open_account_bound_listing_browser(
+        payload=payload,
+        browser_class=browser_class,
+        operator_config=operator_config,
+        project_root=PROJECT_ROOT,
+        shared_runtime_root=args.shared_runtime_root,
+        expected_account_key=args.account_key,
+        expected_shop_name=args.expected_shop,
+        expected_cdp_port=args.expected_cdp_port,
+        component="erp-listing-draft-inspector",
+        task_type="listing",
+        lock_wait_seconds=args.lock_wait_seconds,
+        runtime_lease_wait_seconds=args.runtime_lease_wait_seconds,
+    ) as (browser, binding, identity):
+        boot_network_probe_installed = _install_draft_boot_network_probe(browser)
         if args.open_from_management:
             entry_evidence = _open_draft_from_management(
                 browser,
                 system_config,
                 payload,
                 expected_draft_id=expected_draft_id,
-                expected_shop=args.expected_shop,
+                expected_shop=identity.shop_name,
             )
             publish_url = str(entry_evidence.get("clicked_href") or publish_url)
         elif expected_draft_id not in str(browser.driver.current_url or ""):
@@ -427,6 +448,9 @@ def main() -> int:
                 "screenshot_path": str(screenshot_path) if screenshot_saved else "",
                 "draft_saved": False,
                 "offer_submitted": False,
+                "account_key": identity.account_key,
+                "shop_name": identity.shop_name,
+                "cdp_port": binding.cdp_port,
             }
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_text(
@@ -480,8 +504,6 @@ def main() -> int:
         buyer_schedule = browser._draft_selected_buyer_protection_schedule()
         assist_messages = browser._collect_assist_messages()
         boot_network_records = _collect_draft_boot_network_records(browser)
-    finally:
-        browser.close()
 
     checks = {
         "draft_id": str(core.get("draft_id") or "") == expected_draft_id,
@@ -540,6 +562,9 @@ def main() -> int:
         "boot_network_records": boot_network_records,
         "draft_saved": False,
         "offer_submitted": False,
+        "account_key": identity.account_key,
+        "shop_name": identity.shop_name,
+        "cdp_port": binding.cdp_port,
     }
     rendered = json.dumps(evidence, ensure_ascii=False, indent=2)
     output_path.parent.mkdir(parents=True, exist_ok=True)

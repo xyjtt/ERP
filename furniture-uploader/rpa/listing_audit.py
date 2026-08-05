@@ -120,6 +120,34 @@ class ListingAuditRepository:
             "ready": not missing,
         }
 
+    def find_existing_task(
+        self,
+        *,
+        task_id: str,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None:
+        table = self._table("ali1688_listing_task")
+        with self._connect(self.config) as connection:
+            cursor = connection.cursor()
+            row = cursor.execute(
+                f"""
+                SELECT TOP 1 task_id, idempotency_key, account_key, shop_name,
+                    company_sku, workflow_state, approval_status, updated_at
+                FROM {table}
+                WHERE task_id = ? OR idempotency_key = ?
+                ORDER BY CASE WHEN task_id = ? THEN 0 ELSE 1 END, updated_at DESC
+                """,
+                (
+                    _text(task_id, 100),
+                    _text(idempotency_key, 200),
+                    _text(task_id, 100),
+                ),
+            ).fetchone()
+            if row is None:
+                return None
+            columns = [str(item[0]) for item in cursor.description]
+        return dict(zip(columns, row))
+
     def upsert_task(self, payload: Mapping[str, Any]) -> None:
         record = build_listing_task_record(payload)
         table = self._table("ali1688_listing_task")
