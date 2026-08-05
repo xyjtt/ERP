@@ -63,6 +63,7 @@ $ManagerDir = Join-Path (Get-Location) "logs\sku_offline\scheduler\$ManagerRunId
 python scripts\recover_interrupted_stop_sale_daily_manager.py `
   --manager-run-id $ManagerRunId `
   --manager-dir $ManagerDir `
+  --evidence-root <产生该中断批次的ERP项目根目录> `
   --shared-runtime-root E:\1688\1688-script-new `
   --reason "manager process interrupted after child execution; evidence reconciled" `
   --yes
@@ -71,6 +72,7 @@ python scripts\recover_interrupted_stop_sale_daily_manager.py `
 验收输出必须满足：
 
 - `manager_run_id` 精确匹配。
+- `evidence_root` 与历史 Manager、pipeline 和 run-report 所在项目根目录一致。
 - `recovery_status=finalized`。
 - `lock_removed=true`。
 - `child_run_count` 与数据库及 artifacts 完全一致。

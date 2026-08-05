@@ -41,6 +41,14 @@ def build_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--manager-run-id", required=True)
     parser.add_argument("--manager-dir", required=True)
+    parser.add_argument(
+        "--evidence-root",
+        default="",
+        help=(
+            "Project root that owns the historical scheduler, pipeline, and run-report "
+            "artifacts. Required when recovery code runs from a different release root."
+        ),
+    )
     parser.add_argument("--shared-runtime-root", required=True)
     parser.add_argument("--shared-lock-path", default="")
     parser.add_argument("--reason", required=True)
@@ -267,6 +275,7 @@ def _discover_child_ids(
     manager_dir: Path,
     *,
     database_ids: set[str] | None = None,
+    evidence_root: Path | None = None,
 ) -> ChildDiscovery:
     pattern = _child_pattern(manager_run_id)
     child_ids: set[str] = set()
@@ -277,7 +286,8 @@ def _discover_child_ids(
         formal_child_id = _formal_child_id_from_path(path, pattern)
         if formal_child_id:
             child_ids.add(formal_child_id)
-    pipeline_dir = PROJECT_ROOT / "logs" / "sku_offline" / "pipelines"
+    artifact_root = (evidence_root or PROJECT_ROOT).resolve()
+    pipeline_dir = artifact_root / "logs" / "sku_offline" / "pipelines"
     if pipeline_dir.is_dir():
         pipeline_paths = {
             *pipeline_dir.glob(f"{manager_run_id}_s*.summary.json"),
@@ -289,7 +299,7 @@ def _discover_child_ids(
             child_id = _formal_child_id_from_path(path, pattern)
             if child_id:
                 child_ids.add(child_id)
-    offline_report_dir = PROJECT_ROOT / "logs" / "sku_offline" / "run_reports"
+    offline_report_dir = artifact_root / "logs" / "sku_offline" / "run_reports"
     if offline_report_dir.is_dir():
         for path in sorted(offline_report_dir.glob(f"{manager_run_id}_s*.jsonl")):
             child_id = _formal_child_id_from_path(path, pattern)
@@ -375,16 +385,22 @@ def _query_child_runs(shared_runtime_root: Path, manager_run_id: str) -> list[di
     ]
 
 
-def _load_child_summary(run_id: str, configured_path: str) -> tuple[Path, dict[str, Any]]:
+def _load_child_summary(
+    run_id: str,
+    configured_path: str,
+    *,
+    evidence_root: Path | None = None,
+) -> tuple[Path, dict[str, Any]]:
+    artifact_root = (evidence_root or PROJECT_ROOT).resolve()
     candidates = []
     if configured_path:
         candidates.append(Path(configured_path))
     candidates.append(
-        PROJECT_ROOT / "logs" / "sku_offline" / "pipelines" / f"{run_id}.summary.json"
+        artifact_root / "logs" / "sku_offline" / "pipelines" / f"{run_id}.summary.json"
     )
     for path in candidates:
         if not path.is_absolute():
-            path = PROJECT_ROOT / path
+            path = artifact_root / path
         if not path.is_file():
             continue
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -414,6 +430,8 @@ def _validate_children(
     manager_run_id: str,
     observed_child_ids: set[str],
     child_rows: list[dict[str, Any]],
+    *,
+    evidence_root: Path | None = None,
 ) -> list[dict[str, Any]]:
     by_id = {str(row["run_id"]): row for row in child_rows}
     database_ids = set(by_id)
@@ -432,7 +450,11 @@ def _validate_children(
                 f"Child run is not terminal: run_id={run_id}, status={status!r}, "
                 f"finished_at={row.get('finished_at')!r}"
             )
-        summary_path, summary = _load_child_summary(run_id, str(row.get("summary_path") or ""))
+        summary_path, summary = _load_child_summary(
+            run_id,
+            str(row.get("summary_path") or ""),
+            evidence_root=evidence_root,
+        )
         if str(summary.get("run_id") or "") != run_id:
             raise RuntimeError(f"Child summary run_id mismatch: {summary_path}")
         if str(summary.get("audit_status") or "") != status:
@@ -483,6 +505,7 @@ def _load_existing_recovery_summary(
     *,
     manager_run_id: str,
     manager_dir: Path,
+    evidence_root: Path,
     lock_path: Path,
     reason: str,
     lock_payload: dict[str, Any],
@@ -497,6 +520,7 @@ def _load_existing_recovery_summary(
         "error_type": "InterruptedDailyManagerProcess",
         "error_message": reason,
         "manager_dir": str(manager_dir),
+        "evidence_root": str(evidence_root),
         "shared_lock_path": str(lock_path),
         "lock_snapshot_sha256": _lock_fingerprint(lock_payload),
         "child_runs": child_runs,
@@ -531,6 +555,19 @@ def recover(args: argparse.Namespace) -> dict[str, Any]:
         raise RuntimeError("Manager directory must exist and its name must match manager_run_id.")
     summary_path = manager_dir / "summary.json"
 
+    evidence_root_raw = str(getattr(args, "evidence_root", "") or "").strip()
+    evidence_root = Path(evidence_root_raw).resolve() if evidence_root_raw else PROJECT_ROOT
+    if not evidence_root.is_dir():
+        raise RuntimeError("Evidence root does not exist or is not a directory.")
+    if evidence_root_raw:
+        expected_manager_dir = (
+            evidence_root / "logs" / "sku_offline" / "scheduler" / manager_run_id
+        ).resolve()
+        if manager_dir != expected_manager_dir:
+            raise RuntimeError(
+                "Manager directory must belong to the explicit evidence root."
+            )
+
     runtime_root = Path(args.shared_runtime_root).resolve()
     lock_path = (
         Path(args.shared_lock_path).resolve()
@@ -543,8 +580,14 @@ def recover(args: argparse.Namespace) -> dict[str, Any]:
         manager_run_id,
         manager_dir,
         database_ids={str(row["run_id"]) for row in child_rows},
+        evidence_root=evidence_root,
     )
-    child_runs = _validate_children(manager_run_id, set(discovery.child_ids), child_rows)
+    child_runs = _validate_children(
+        manager_run_id,
+        set(discovery.child_ids),
+        child_rows,
+        evidence_root=evidence_root,
+    )
 
     token = str(lock_payload["token"])
     lock_fingerprint = _lock_fingerprint(lock_payload)
@@ -553,6 +596,7 @@ def recover(args: argparse.Namespace) -> dict[str, Any]:
             summary_path,
             manager_run_id=manager_run_id,
             manager_dir=manager_dir,
+            evidence_root=evidence_root,
             lock_path=lock_path,
             reason=reason,
             lock_payload=lock_payload,
@@ -567,6 +611,7 @@ def recover(args: argparse.Namespace) -> dict[str, Any]:
             "error_message": reason,
             "recovered_at": datetime.now().isoformat(timespec="seconds"),
             "manager_dir": str(manager_dir),
+            "evidence_root": str(evidence_root),
             "shared_lock_path": str(lock_path),
             "lock_owner_pid": int(lock_payload.get("pid") or 0),
             "lock_token_sha256": hashlib.sha256(token.encode("utf-8")).hexdigest(),

@@ -129,6 +129,54 @@ class InterruptedDailyManagerRecoveryTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "Unknown child log evidence"):
                 _discover_child_ids(manager_id, manager_dir, database_ids=set())
 
+    def test_discovery_uses_explicit_historical_evidence_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            evidence_root = Path(temp_dir) / "legacy-release"
+            manager_id = "daily_1"
+            manager_dir = (
+                evidence_root / "logs" / "sku_offline" / "scheduler" / manager_id
+            )
+            pipeline_dir = evidence_root / "logs" / "sku_offline" / "pipelines"
+            manager_dir.mkdir(parents=True)
+            pipeline_dir.mkdir(parents=True)
+            child_id = f"{manager_id}_s01_b001"
+            (pipeline_dir / f"{child_id}.summary.json").write_text(
+                json.dumps({"run_id": child_id, "audit_status": "failed"}),
+                encoding="utf-8",
+            )
+
+            discovery = _discover_child_ids(
+                manager_id,
+                manager_dir,
+                database_ids={child_id},
+                evidence_root=evidence_root,
+            )
+
+            self.assertEqual(set(discovery.child_ids), {child_id})
+            self.assertEqual(discovery.pre_audit_evidence, ())
+
+    def test_recovery_rejects_manager_dir_outside_explicit_evidence_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            manager_id = "daily_1"
+            manager_dir = root / "unexpected" / manager_id
+            manager_dir.mkdir(parents=True)
+            evidence_root = root / "legacy-release"
+            evidence_root.mkdir()
+            args = SimpleNamespace(
+                manager_run_id=manager_id,
+                manager_dir=str(manager_dir),
+                evidence_root=str(evidence_root),
+                shared_runtime_root=str(root / "runtime"),
+                shared_lock_path="",
+                reason="interrupted",
+                no_notify=True,
+                yes=True,
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "explicit evidence root"):
+                recover(args)
+
     def test_child_validation_rejects_finished_at_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             summary_path = Path(temp_dir) / "child.summary.json"
