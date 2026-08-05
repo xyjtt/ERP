@@ -15,10 +15,12 @@ from run_1688_listing_task import (  # noqa: E402
     _apply_draft_rebind,
     _build_listing_browser_config,
     _known_historical_draft_ids,
+    _listing_operation_key,
     _open_authenticated_listing_browser,
     _record_controlled_saga_failure,
 )
 from auto_listing import ListingContractError  # noqa: E402
+from listing_review import ListingReviewError  # noqa: E402
 from exceptions import (  # noqa: E402
     OfflineLoginRequiredError,
     OfflineRiskControlError,
@@ -70,6 +72,33 @@ class KnownHistoricalDraftIdTests(unittest.TestCase):
         ]
         self.assertEqual(_known_historical_draft_ids(payload), set())
 
+    def test_collects_pending_draft_id_for_explicit_daily_rebind(self) -> None:
+        payload = _payload_with_history(pending_draft_id="draft-pending")
+        self.assertEqual(_known_historical_draft_ids(payload), {"draft-pending"})
+
+    def test_listing_operation_key_separates_submit_from_draft(self) -> None:
+        payload = _payload_with_history(current_draft_id="draft-current")
+        payload["shop"] = {"account_key": "muke_lixiang"}
+        self.assertNotEqual(
+            _listing_operation_key(payload, "draft"),
+            _listing_operation_key(payload, "submit"),
+        )
+
+    def test_listing_operation_key_requires_unique_existing_draft_for_draft(self) -> None:
+        payload = _payload_with_history()
+        payload["shop"] = {"account_key": "muke_lixiang"}
+        with self.assertRaisesRegex(ListingReviewError, "found 0"):
+            _listing_operation_key(payload, "draft")
+
+    def test_listing_operation_key_rejects_ambiguous_existing_drafts(self) -> None:
+        payload = _payload_with_history(
+            current_draft_id="draft-current",
+            pending_draft_id="draft-pending",
+        )
+        payload["shop"] = {"account_key": "muke_lixiang"}
+        with self.assertRaisesRegex(ListingReviewError, "found 2"):
+            _listing_operation_key(payload, "draft")
+
 
 class ApplyDraftRebindTests(unittest.TestCase):
     def test_draft_mode_rebinds_known_current_draft(self) -> None:
@@ -120,19 +149,19 @@ class ApplyDraftRebindTests(unittest.TestCase):
         with self.assertRaises(ListingContractError):
             _apply_draft_rebind(_args(), payload, dict(payload))
 
-    def test_authorized_rebuild_may_create_new_draft(self) -> None:
+    def test_authorized_rebuild_fails_closed_without_existing_draft(self) -> None:
         payload = _payload_with_history(
             current_draft_id="",
             event_draft_ids=["draft-deleted"],
             last_event="authorized_draft_rebuild_resumed",
         )
-        execution = _apply_draft_rebind(_args(), payload, dict(payload))
-        self.assertNotIn("pending_draft_id", execution["workflow"])
+        with self.assertRaisesRegex(ListingContractError, "new 1688 draft creation is disabled"):
+            _apply_draft_rebind(_args(), payload, dict(payload))
 
-    def test_brand_new_task_may_create_new_draft(self) -> None:
+    def test_brand_new_task_fails_closed_without_existing_draft(self) -> None:
         payload = _payload_with_history()
-        execution = _apply_draft_rebind(_args(), payload, dict(payload))
-        self.assertNotIn("pending_draft_id", execution["workflow"])
+        with self.assertRaisesRegex(ListingContractError, "new 1688 draft creation is disabled"):
+            _apply_draft_rebind(_args(), payload, dict(payload))
 
 
 class _RecordingSagaRepository:

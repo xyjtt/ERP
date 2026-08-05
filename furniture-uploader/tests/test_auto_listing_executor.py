@@ -37,7 +37,7 @@ from auto_listing_executor import (
     restore_execution_only_detail_images,
     resolve_1688_publish_url,
 )
-from test_auto_listing import sample_payload
+from test_auto_listing import review_approval_evidence, sample_payload
 from run_1688_listing_task import _resolve_listing_account_lock_path
 
 
@@ -85,7 +85,7 @@ class AutoListingExecutorTests(unittest.TestCase):
         draft = advance_listing_state(
             sample_payload(), "draft_saved", evidence={"draft_id": "draft-1", "draft_url": "draft"}
         )
-        approved = advance_listing_state(draft, "review_approved", evidence={"approved_by": "reviewer"})
+        approved = advance_listing_state(draft, "review_approved", evidence=review_approval_evidence(draft))
         with patch.dict(os.environ, {"ENABLE_1688_LISTING_EXECUTION": "true"}, clear=True):
             with self.assertRaisesRegex(ListingContractError, "ENABLE_1688_LISTING_SUBMIT"):
                 assert_execution_allowed(approved, "submit")
@@ -94,7 +94,7 @@ class AutoListingExecutorTests(unittest.TestCase):
         draft = advance_listing_state(
             sample_payload(), "draft_saved", evidence={"draft_id": "draft-1", "draft_url": "draft"}
         )
-        approved = advance_listing_state(draft, "review_approved", evidence={"approved_by": "reviewer"})
+        approved = advance_listing_state(draft, "review_approved", evidence=review_approval_evidence(draft))
         with patch.dict(
             os.environ,
             {"ENABLE_1688_LISTING_EXECUTION": "true", "ENABLE_1688_LISTING_SUBMIT": "true"},
@@ -437,7 +437,7 @@ class AutoListingExecutorTests(unittest.TestCase):
         draft = advance_listing_state(
             sample_payload(), "draft_saved", evidence={"draft_id": "draft-1", "draft_url": "draft"}
         )
-        approved = advance_listing_state(draft, "review_approved", evidence={"approved_by": "reviewer"})
+        approved = advance_listing_state(draft, "review_approved", evidence=review_approval_evidence(draft))
         failure_payload = {
             "task_id": approved["task_id"],
             "result_context": {

@@ -11,6 +11,8 @@
 - 账号绑定 CDP：`9306`
 - 自动链路终点：保存草稿并进入 `draft_pending_review`
 - 自动链路禁止：审批、submit、Offer writeback、创建第二个 CTG0286 草稿
+- 草稿身份门禁：payload 必须只包含一个既有 `draft_id`，且检查器命令行值必须与其一致；缺失、多值或不一致立即停止
+- 历史 `authorized_draft_rebuild_resumed` 不能授权生产新建草稿；没有现有 draft ID 的执行必须 fail closed
 
 ## 2. 输入契约
 
@@ -60,6 +62,7 @@ Preview 会读取正式源和审计契约，但不会启动浏览器：
 python -X utf8 .\scripts\inspect_1688_saved_draft.py `
   --payload <CANARY_RESULT_JSON> `
   --output <INSPECTION_JSON> `
+  --draft-id <EXISTING_DRAFT_ID> `
   --open-from-management `
   --account-key muke_lixiang `
   --expected-cdp-port 9306 `
@@ -69,6 +72,8 @@ python -X utf8 .\scripts\inspect_1688_saved_draft.py `
 ## 6. 仅一次提交门禁
 
 日度管理器和计划任务永远不提交。只有独立复核 `status=passed`、审计状态一致、业务人工明确批准后，才可在单独受控命令中执行一次 `approve` 和一次 `submit`。提交前重新查询 Saga/Offer，已有 Offer 或 submit 成功证据时禁止再次点击。
+
+approve 和 submit 必须使用同一个独立复核 artifact。artifact 必须绑定 `draft_id/account_key/shop_name/CDP/inspector_build_sha/payload_contract_sha256` 且全部必检字段通过；submit 还要求审计中的 `post_save_verified=true`。任何字段漂移都必须重新只读复核，不能复用旧批准。
 
 ## 7. 安装计划任务
 
@@ -94,3 +99,4 @@ python -X utf8 .\scripts\inspect_1688_saved_draft.py `
 - 正式 Profile 仍可能遇到 `SYS_ERROR`、登录风控或滑块；这些必须 fail closed，不能绕过。
 - 图片探针会向素材库上传图片但不会保存草稿，仍需在租约内受控执行。
 - 日度候选生成前置业务流程不在本次实现范围；缺少完整审核候选时计划任务应安全空跑。
+- 旧版通用 listing Saga operation key 没有区分 draft 与 submit，其 terminal 状态不可信。部署前必须按新的 `listing-draft` / `listing-submit` 阶段键核对或受控 reconcile，禁止把旧 terminal 状态当作已提交证据。

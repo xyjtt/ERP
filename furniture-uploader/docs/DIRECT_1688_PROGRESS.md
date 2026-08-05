@@ -5,6 +5,9 @@
 - 已完成账号绑定草稿检查器、图片容量探针、安全上架日度编排器和 `YYDD-1688-Listing-Daily` 管理脚本的开发。
 - 编排器只消费完整、人工审核的 `listing_task_payload_v1` inbox；源数据不再被用来推断发布字段，只用于执行前确认 SKU 仍为启用、非停用库存、销售中成品。
 - 已实现批内与正式审计表防重、单商品失败隔离、基础设施失败 summary、草稿待复核终态和严格无自动 submit 边界。
+- 集成审查后的安全加固已完成：原子 claim 后在账号租约内重读正式 payload；draft/submit operation key 均强制绑定唯一既有草稿；独立复核 artifact 绑定账号、店铺、CDP、代码版本、payload 哈希和全字段结果；approve/submit 必须复用同一 artifact，且 submit 必须已有 `post_save_verified`。
+- `reconcile_1688_listing_saga.py` 按 `draft_id + operation_mode` 定位新 Saga；检查器的 `--draft-id` 只用于确认 payload 中同一个唯一草稿，不能覆盖成其他草稿。
+- 旧的授权新草稿重建测试已改为验证 fail-closed；生产路径不再支持 `authorized_draft_rebuild_resumed` 无草稿创建。
 - 本阶段没有生产操作。下一节点是执行机按精确 commit 部署后先 preview，再对现有 CTG0286 草稿做一次受控 draft 保存和独立复核；复核通过后另行人工授权一次 submit，最后才安装/启用正式日度任务。
 
 ## 2026-07-28 Managed Update (Automatic Login Identity Gate)

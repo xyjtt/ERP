@@ -75,6 +75,24 @@ def fake_account_browser_session(**kwargs):
 
 
 class InspectSavedDraftTests(unittest.TestCase):
+    def test_inspection_draft_id_must_match_unique_payload_draft(self) -> None:
+        payload = {
+            "workflow": {
+                "pending_draft_id": "draft-1",
+                "draft": {"draft_id": "draft-1"},
+            }
+        }
+        self.assertEqual(
+            inspector._resolve_inspection_draft_id(payload, "draft-1"),
+            "draft-1",
+        )
+        with self.assertRaisesRegex(ValueError, "must match"):
+            inspector._resolve_inspection_draft_id(payload, "draft-2")
+
+    def test_inspection_requires_one_existing_payload_draft(self) -> None:
+        with self.assertRaisesRegex(ValueError, "found 0"):
+            inspector._resolve_inspection_draft_id({"workflow": {}}, "draft-1")
+
     def test_expected_main_image_count_caps_at_four(self) -> None:
         self.assertEqual(
             inspector._expected_main_image_count(

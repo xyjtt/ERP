@@ -17,7 +17,8 @@ RPA_ROOT = PROJECT_ROOT / "rpa"
 if str(RPA_ROOT) not in sys.path:
     sys.path.insert(0, str(RPA_ROOT))
 
-from operation_saga import OperationSagaRepository, build_operation_key
+from listing_review import build_listing_operation_key
+from operation_saga import OperationSagaRepository
 from stop_sale_audit import connect_app_database, resolve_stop_sale_app_config
 
 
@@ -34,6 +35,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--shared-runtime-root", required=True, type=Path)
     parser.add_argument("--task-id", required=True)
     parser.add_argument("--account-key", required=True)
+    parser.add_argument("--draft-id", required=True)
+    parser.add_argument("--operation-mode", choices=["draft", "submit"], required=True)
     parser.add_argument("--execution-id", required=True)
     parser.add_argument("--failure-context", required=True, type=Path)
     parser.add_argument("--expected-owner-token-hash", required=True)
@@ -179,7 +182,12 @@ def main() -> int:
     args = build_parser().parse_args()
     config = resolve_stop_sale_app_config(args.shared_runtime_root)
     repository = OperationSagaRepository(config)
-    operation_key = build_operation_key("listing", args.account_key, args.task_id)
+    operation_key = build_listing_operation_key(
+        account_key=args.account_key,
+        task_id=args.task_id,
+        draft_id=args.draft_id,
+        mode=args.operation_mode,
+    )
     saga = repository.get_saga_state(operation_key)
     expected = {
         "state": "reconcile_required",

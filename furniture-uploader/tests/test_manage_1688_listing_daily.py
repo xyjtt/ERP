@@ -64,6 +64,22 @@ class FakeAuditRepository:
             }
         return None
 
+    def claim_scheduled_task(self, payload, *, claim_owner: str, claim_seconds: int):
+        del claim_seconds
+        task_id = str(payload.get("task_id") or "")
+        if task_id in self.existing_task_ids:
+            return {
+                "status": "duplicate_existing",
+                "task_id": task_id,
+                "workflow_state": "submitted",
+            }
+        self.existing_task_ids.add(task_id)
+        return {
+            "status": "claimed",
+            "task_id": task_id,
+            "claimed_by": claim_owner,
+        }
+
 
 class ListingDailyManagerTests(unittest.TestCase):
     def payload(self, sku: str = "SKU-1") -> dict:
@@ -91,6 +107,7 @@ class ListingDailyManagerTests(unittest.TestCase):
             "height_cm": "49",
             "weight_g": "10000",
         }
+        payload["workflow"]["pending_draft_id"] = f"draft-{sku}"
         return payload
 
     def source_row(self, *, eligible: bool = True) -> dict:
@@ -198,6 +215,38 @@ class ListingDailyManagerTests(unittest.TestCase):
             self.assertEqual(summary["counts"], {"source_ineligible": 1})
             self.assertEqual(summary["status"], "no_eligible_candidates")
 
+    def test_candidate_without_one_existing_draft_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            payload = self.payload()
+            payload["workflow"].pop("pending_draft_id")
+            self.write_candidate(root, payload)
+            return_code, summary = run_daily(
+                self.args(root),
+                source_reader_factory=lambda _args: FakeSourceReader({}),
+                audit_repository_factory=lambda _args: FakeAuditRepository(),
+            )
+        self.assertEqual(return_code, 1)
+        self.assertEqual(summary["counts"], {"invalid": 1})
+        self.assertIn("exactly one existing draft_id", summary["items"][0]["error"])
+
+    def test_execute_claim_is_atomic_before_child_start(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            payload = self.payload()
+            repository = FakeAuditRepository({payload["task_id"]})
+            self.write_candidate(root, payload)
+            return_code, summary = run_daily(
+                self.args(root, mode="execute"),
+                source_reader_factory=lambda _args: FakeSourceReader(
+                    {"SKU-1": [self.source_row()]}
+                ),
+                audit_repository_factory=lambda _args: repository,
+                command_runner=lambda *_args, **_kwargs: self.fail("duplicate claim must not run"),
+            )
+        self.assertEqual(return_code, 0)
+        self.assertEqual(summary["counts"], {"duplicate_existing": 1})
+
     def test_execute_isolates_failure_and_continues_to_next_item(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -269,8 +318,10 @@ class ListingDailyManagerTests(unittest.TestCase):
                 self.args(root, mode="execute"),
                 root / "input.json",
                 root / "output.json",
+                "draft-SKU-1",
             )
         self.assertEqual(command[command.index("--mode") + 1], "draft")
+        self.assertEqual(command[command.index("--draft-id") + 1], "draft-SKU-1")
         self.assertNotIn("submit", command)
         self.assertNotIn("approve", command)
 
@@ -329,6 +380,9 @@ class ListingDailyTaskScriptContractTests(unittest.TestCase):
         self.assertIn("Register-ScheduledTask -TaskName $TaskName", script)
         self.assertIn("-MultipleInstances IgnoreNew", script)
         self.assertIn("Remove-Item Env:ENABLE_1688_LISTING_SUBMIT", script)
+        self.assertIn("logon_type = [string]$principal.LogonType", script)
+        self.assertIn("run_level = [string]$principal.RunLevel", script)
+        self.assertIn("working_directory = [string]$_.WorkingDirectory", script)
         self.assertNotIn('"--mode", "submit"', script)
 
 

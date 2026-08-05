@@ -61,6 +61,7 @@ function Get-ListingTaskStatus {
         }
     }
     $info = Get-ScheduledTaskInfo -TaskName $TaskName
+    $principal = $task.Principal
     return [ordered]@{
         task_name = $TaskName
         exists = $true
@@ -70,6 +71,18 @@ function Get-ListingTaskStatus {
         last_task_result = $info.LastTaskResult
         next_run_time = $info.NextRunTime
         missed_runs = $info.NumberOfMissedRuns
+        principal = [ordered]@{
+            user_id = [string]$principal.UserId
+            logon_type = [string]$principal.LogonType
+            run_level = [string]$principal.RunLevel
+        }
+        actions = @($task.Actions | ForEach-Object {
+            [ordered]@{
+                execute = [string]$_.Execute
+                arguments = [string]$_.Arguments
+                working_directory = [string]$_.WorkingDirectory
+            }
+        })
         triggers = @($task.Triggers | ForEach-Object {
             [ordered]@{
                 start_boundary = [string]$_.StartBoundary

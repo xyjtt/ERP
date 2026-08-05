@@ -77,6 +77,21 @@ class ListingSagaReconcileEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "task_id_mismatch"):
             MODULE._validate_failure_context(path, task_id="different-task")
 
+    def test_reconcile_uses_phase_and_draft_specific_operation_key(self) -> None:
+        draft_key = MODULE.build_listing_operation_key(
+            account_key="muke_lixiang",
+            task_id="task-1",
+            draft_id="draft-1",
+            mode="draft",
+        )
+        submit_key = MODULE.build_listing_operation_key(
+            account_key="muke_lixiang",
+            task_id="task-1",
+            draft_id="draft-1",
+            mode="submit",
+        )
+        self.assertNotEqual(draft_key, submit_key)
+
 
 if __name__ == "__main__":
     unittest.main()

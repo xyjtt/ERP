@@ -6,6 +6,10 @@
 - 业务身份只能来自候选 payload 的 `shop.account_key/shop_name`。外置 `accounts.json` 只提供 Profile/CDP 绑定，平台显示名称不得反向覆盖业务店铺字段。
 - 日度上架不能从 `dbo.jst_sku` 猜发布 payload。该表只做最后时刻生命周期门禁：`enabled=1`、`stock_disabled=0`、`other_5=销售`、`item_type=成品`；完整标题、图片、价格、库存、物流和店铺必须来自已审核候选。
 - 自动计划只能保存草稿并停在待独立复核。即使草稿保存成功，也必须用独立会话重新打开正式草稿入口并核对完整字段，之后才能由独立人工门禁授权一次 submit。
+- `draft_id` 不是可由命令行覆盖的普通参数，而是上架操作的核心身份。日度、检查、复核、Saga 和 submit 必须从同一 payload 得到唯一既有值；缺失、多值或参数不一致时必须停止，不能生成占位 operation key 或创建第二草稿。
+- Saga 幂等键必须区分 draft 与 submit，并包含账号、任务和草稿。旧版通用 listing operation key 可能把保存草稿和提交 Offer 混为同一终态，部署迁移时只能作为历史证据，不能直接短路新阶段动作。
+- 原子 claim 只解决并发领取；真正执行前仍要在账号租约内重读正式任务 payload，并校验 claim owner 与 payload 哈希，防止磁盘 inbox 或旧子进程重放过期业务内容。
+- 即使 event history 标记为 `authorized_draft_rebuild_resumed`，也不能推导出可新建草稿的权限；执行器必须继续要求现有 `draft_id`，否则以业务契约错误终止。
 
 ## 2026-07-28 Bounded Slider and Identity Findings
 

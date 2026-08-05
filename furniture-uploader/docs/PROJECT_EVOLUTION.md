@@ -6,6 +6,9 @@
 - 日度并发边界下沉到已有单商品执行器：每个商品独立取得账号锁、数据库租约和 Saga，失败不会吞掉后续候选；计划任务本身采用 IgnoreNew 防止重入。
 - 自动化完成边界固定为 `draft_pending_review`。审批、独立复核、submit 和 Offer writeback 继续作为分离门禁，不能由日度计划任务隐式执行。
 - 只读检查器和图片探针也纳入账号锁与跨项目租约，避免诊断工具绕过爬虫、上架和下架共用的三槽位协议。
+- 草稿身份从“允许执行器在缺失时生成通用新草稿键”收紧为“所有 draft/submit/reconcile 动作必须绑定唯一既有草稿”。draft 和 submit 使用阶段独立的稳定 Saga key，旧通用 listing Saga 不参与新流程的终态短路。
+- 审批从单一人工字段演进为不可替换的独立复核 artifact 绑定；artifact 必须覆盖完整字段、账号、店铺、CDP、代码 SHA 和 payload 合约，submit 还必须复用批准时的同一 artifact 与 `post_save_verified`。
+- “授权重建即可新建草稿”的历史例外已删除；新建草稿不属于本生产编排器能力，必须先获得并绑定真实既有草稿。
 
 ## 2026-07-28 Login Recovery Evolution
 

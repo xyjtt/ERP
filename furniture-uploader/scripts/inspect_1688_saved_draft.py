@@ -27,6 +27,12 @@ from browser_rpa import BrowserRPA
 from config_loader import load_json_with_local_override
 from listing_browser_session import open_account_bound_listing_browser
 from listing_duplicate_probe import ListingCandidate, LiveListingDuplicateProbe
+from listing_review import (
+    INSPECTION_ARTIFACT_VERSION,
+    build_review_contract_sha256,
+    require_unique_existing_draft_id,
+)
+from cross_project_runtime import resolve_build_sha
 from sku_offline_browser import SkuOfflineBrowser
 
 
@@ -34,7 +40,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Read-only independent refresh check for one 1688 draft.")
     parser.add_argument("--payload", required=True)
     parser.add_argument("--output", required=True)
-    parser.add_argument("--draft-id", default="", help="override the payload draft ID for read-only inspection")
+    parser.add_argument(
+        "--draft-id",
+        default="",
+        help="confirm the payload's unique existing draft ID for read-only inspection",
+    )
     parser.add_argument(
         "--publish-url",
         default="",
@@ -72,6 +82,14 @@ def _spec_equal(actual: object, expected: object) -> bool:
 def _expected_main_image_count(payload: dict[str, object]) -> int:
     main_urls = list(((payload.get("images") or {}).get("main_urls") or []))
     return max(1, min(4, len(main_urls)))
+
+
+def _resolve_inspection_draft_id(payload: dict[str, object], requested_draft_id: str) -> str:
+    expected_draft_id = require_unique_existing_draft_id(payload)
+    requested = str(requested_draft_id or "").strip()
+    if requested and requested != expected_draft_id:
+        raise ValueError("--draft-id must match the payload's unique existing draft ID")
+    return expected_draft_id
 
 
 def _buyer_protection_matches(
@@ -333,13 +351,7 @@ def main() -> int:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     args = build_parser().parse_args()
     payload = json.loads(Path(args.payload).read_text(encoding="utf-8-sig"))
-    expected_draft_id = str(
-        args.draft_id
-        or ((payload.get("workflow") or {}).get("draft") or {}).get("draft_id")
-        or ""
-    ).strip()
-    if not re.fullmatch(r"[A-Za-z0-9_-]+", expected_draft_id):
-        raise ValueError("read-only draft inspection requires a valid draft ID")
+    expected_draft_id = _resolve_inspection_draft_id(payload, args.draft_id)
     expected_detail_count = len(list(((payload.get("images") or {}).get("detail_urls") or [])))
     expected_main_image_count = _expected_main_image_count(payload)
     expected_title = str((payload.get("product") or {}).get("selected_title") or "").strip()
@@ -526,6 +538,9 @@ def main() -> int:
         ),
     }
     evidence = {
+        "artifact_version": INSPECTION_ARTIFACT_VERSION,
+        "inspector_build_sha": resolve_build_sha(PROJECT_ROOT.parent),
+        "payload_contract_sha256": build_review_contract_sha256(payload),
         "status": "passed" if all(checks.values()) else "failed",
         "checked_at": datetime.now(timezone.utc).isoformat(),
         "task_id": str(payload.get("task_id") or ""),

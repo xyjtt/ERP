@@ -33,13 +33,19 @@ from auto_listing_executor import (
 from config_loader import load_json_with_local_override
 from exceptions import ImageAlbumFullError
 from listing_audit import ListingAuditRepository
+from listing_review import (
+    ListingReviewError,
+    build_listing_operation_key,
+    require_unique_existing_draft_id,
+    validate_independent_inspection,
+)
 from cross_project_runtime import (
     RuntimeLeaseGuard,
     RuntimeLeaseRepository,
     resolve_build_sha,
     resolve_executor_binding,
 )
-from operation_saga import OperationSagaRepository, SagaOperation, build_operation_key
+from operation_saga import OperationSagaRepository, SagaOperation
 from sku_offline_auth import (
     OfflineLoginRequiredError,
     ensure_1688_authenticated_session,
@@ -171,6 +177,9 @@ def _known_historical_draft_ids(payload: dict) -> set[str]:
     current = str(((workflow.get("draft") or {}).get("draft_id") or "")).strip()
     if current:
         known.add(current)
+    pending = str(workflow.get("pending_draft_id") or "").strip()
+    if pending:
+        known.add(pending)
     for item in list(workflow.get("event_history") or []):
         if not isinstance(item, dict):
             continue
@@ -180,6 +189,63 @@ def _known_historical_draft_ids(payload: dict) -> set[str]:
         if draft_id:
             known.add(draft_id)
     return known
+
+
+def _listing_operation_key(payload: dict, mode: str) -> str:
+    task_id = str(payload.get("task_id") or "").strip()
+    account_key = str(((payload.get("shop") or {}).get("account_key") or "")).strip()
+    draft_id = require_unique_existing_draft_id(payload)
+    return build_listing_operation_key(
+        account_key=account_key,
+        task_id=task_id,
+        draft_id=draft_id,
+        mode=mode,
+    )
+
+
+def _terminal_saga_payload(payload: dict, saga_state: dict) -> dict:
+    raw_evidence = saga_state.get("evidence_json")
+    try:
+        evidence = json.loads(str(raw_evidence or "{}"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("terminal listing saga evidence is invalid") from exc
+    workflow = evidence.get("workflow")
+    if not isinstance(workflow, dict):
+        raise RuntimeError("terminal listing saga has no workflow evidence")
+    updated = json.loads(json.dumps(payload, ensure_ascii=False, default=str))
+    updated["workflow"] = workflow
+    updated["saga_replay"] = {
+        "status": "terminal_success_short_circuit",
+        "operation_key": str(saga_state.get("operation_key") or ""),
+        "saga_state": str(saga_state.get("state") or ""),
+        "ali1688_status": str(saga_state.get("ali1688_status") or ""),
+    }
+    return updated
+
+
+def _prepare_listing_saga(
+    saga_repository: OperationSagaRepository,
+    operation: SagaOperation,
+    *,
+    payload: dict,
+    owner_token: str,
+    account_fencing_token: int,
+    browser_slot_key: str,
+    browser_slot_fencing_token: int,
+) -> dict | None:
+    status = saga_repository.prepare(
+        operation,
+        owner_token=owner_token,
+        account_fencing_token=account_fencing_token,
+        browser_slot_key=browser_slot_key,
+        browser_slot_fencing_token=browser_slot_fencing_token,
+    )
+    if status not in {"completed", "ali1688_success", "jushuitan_pending"}:
+        return None
+    return _terminal_saga_payload(
+        payload,
+        saga_repository.get_saga_state(operation.operation_key),
+    )
 
 
 def _apply_draft_rebind(
@@ -194,9 +260,9 @@ def _apply_draft_rebind(
     event), and it becomes the execution ``pending_draft_id`` so the publish URL
     and the draft-request patch both carry the existing draft identity.
 
-    Without an explicit rebind, draft mode must never silently create a new
-    draft for a task that already has a historical draft; the only exception is
-    an explicitly authorized rebuild (last_event=authorized_draft_rebuild_resumed).
+    Without an explicit rebind, draft mode must never create a new draft. The
+    caller must provide an existing draft ID through ``--draft-id`` or an
+    already-recorded ``pending_draft_id``.
     """
     requested = str(getattr(args, "draft_id", "") or "").strip()
     if args.mode != "draft":
@@ -216,14 +282,9 @@ def _apply_draft_rebind(
     pending = str(workflow.get("pending_draft_id") or "").strip()
     if pending:
         return execution_payload
-    last_event = str((workflow.get("last_event") or "")).strip()
-    if last_event != "authorized_draft_rebuild_resumed" and _known_historical_draft_ids(payload):
-        raise ListingContractError(
-            "draft mode would create a new 1688 draft, but this task already has "
-            "a historical draft; re-run with --draft-id <known draft_id> to explicitly "
-            "rebind the existing draft"
-        )
-    return execution_payload
+    raise ListingContractError(
+        "draft mode requires an existing draft_id; new 1688 draft creation is disabled"
+    )
 
 
 def _record_controlled_saga_failure(
@@ -472,8 +533,24 @@ def main() -> int:
         if not str(args.operator or "").strip():
             raise ValueError("--operator is required for review decisions")
         if args.mode == "approve":
+            if not args.draft_inspection:
+                raise ValueError("--draft-inspection is required for approve")
+            inspection = json.loads(Path(args.draft_inspection).read_text(encoding="utf-8-sig"))
+            account_key = str(((payload.get("shop") or {}).get("account_key") or "")).strip()
+            binding = resolve_executor_binding(account_key)
+            try:
+                inspection_binding = validate_independent_inspection(
+                    payload,
+                    inspection,
+                    expected_cdp_port=binding.cdp_port,
+                )
+            except ListingReviewError as exc:
+                raise ValueError(str(exc)) from exc
             event = "review_approved"
-            evidence = {"approved_by": args.operator}
+            evidence = {
+                "approved_by": args.operator,
+                "inspection_binding": inspection_binding,
+            }
         else:
             event = "review_rejected"
             evidence = {"rejected_by": args.operator}
@@ -484,6 +561,28 @@ def main() -> int:
         _write_result(updated, args.output)
         return 0
 
+    if args.mode == "submit":
+        if not args.draft_inspection:
+            raise ValueError("--draft-inspection is required for submit")
+        inspection = json.loads(Path(args.draft_inspection).read_text(encoding="utf-8-sig"))
+        account_key = str(((payload.get("shop") or {}).get("account_key") or "")).strip()
+        binding = resolve_executor_binding(account_key)
+        try:
+            submit_inspection_binding = validate_independent_inspection(
+                payload,
+                inspection,
+                expected_cdp_port=binding.cdp_port,
+            )
+        except ListingReviewError as exc:
+            raise ValueError(str(exc)) from exc
+        approved_binding = dict(
+            ((payload.get("workflow") or {}).get("last_event_evidence") or {}).get(
+                "inspection_binding"
+            )
+            or {}
+        )
+        if submit_inspection_binding != approved_binding:
+            raise ValueError("submit inspection artifact does not match recorded approval")
     assert_execution_allowed(payload, args.mode)
     execution_payload = build_execution_payload(
         payload,
@@ -508,7 +607,11 @@ def main() -> int:
             "excluded_album_values"
         ]
     repository = _load_listing_audit_repository(args.shared_runtime_root)
-    repository.upsert_task(payload)
+    is_scheduled_claim = bool(
+        str(((payload.get("schedule") or {}).get("claim_owner") or "")).strip()
+    )
+    if not is_scheduled_claim:
+        repository.register_execution_payload(payload)
 
     from browser_rpa import BrowserRPA, PublishValidationError
 
@@ -527,7 +630,7 @@ def main() -> int:
         )
     task_id = str(payload.get("task_id") or "").strip()
     account_key = str(((payload.get("shop") or {}).get("account_key") or "")).strip()
-    operation_key = build_operation_key("listing", account_key, task_id)
+    operation_key = _listing_operation_key(payload, args.mode)
     build_sha = resolve_build_sha(PROJECT_ROOT.parent)
     binding = resolve_executor_binding(account_key)
     browser = BrowserRPA(
@@ -551,25 +654,34 @@ def main() -> int:
         )
         browser.set_runtime_action_guard(runtime_guard.assert_active)
         runtime_guard.register_owned_browser_closer(browser.close)
-        saga_repository.prepare(
-            SagaOperation(
-                operation_key=operation_key,
-                run_id=task_id,
-                task_type="listing",
-                account_key=account_key,
-                business_key=task_id,
-                payload={
-                    "task_id": task_id,
-                    "mode": args.mode,
-                    "shop_name": str(((payload.get("shop") or {}).get("shop_name") or "")),
-                    "company_sku": str(((payload.get("source") or {}).get("company_sku") or "")),
-                },
-            ),
+        repository.assert_execution_payload_current(payload)
+        saga_operation = SagaOperation(
+            operation_key=operation_key,
+            run_id=task_id,
+            task_type="listing_submit" if args.mode == "submit" else "listing_draft",
+            account_key=account_key,
+            business_key=task_id,
+            payload={
+                "task_id": task_id,
+                "mode": args.mode,
+                "shop_name": str(((payload.get("shop") or {}).get("shop_name") or "")),
+                "company_sku": str(((payload.get("source") or {}).get("company_sku") or "")),
+            },
+        )
+        terminal_payload = _prepare_listing_saga(
+            saga_repository,
+            saga_operation,
+            payload=payload,
             owner_token=runtime_guard.owner_token,
             account_fencing_token=runtime_guard.account_fencing_token,
             browser_slot_key=runtime_guard.browser_slot_key,
             browser_slot_fencing_token=runtime_guard.browser_slot_fencing_token,
         )
+        if terminal_payload is not None:
+            updated = terminal_payload
+            repository.upsert_task(updated)
+            _write_result(updated, args.output)
+            return 0
         execution_id = repository.start_execution(task_id=task_id, mode=args.mode)
         try:
             owns_account_runtime = _open_authenticated_listing_browser(

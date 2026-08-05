@@ -38,6 +38,7 @@ from query_1688_listing_source import (
     source_gate_passed,
 )
 from stop_sale_audit import resolve_stop_sale_app_config
+from listing_review import require_unique_existing_draft_id
 
 
 DAILY_TASK_NAME = "YYDD-1688-Listing-Daily"
@@ -149,6 +150,7 @@ def build_task_command(
     args: argparse.Namespace,
     input_path: Path,
     output_path: Path,
+    draft_id: str,
 ) -> list[str]:
     return [
         sys.executable,
@@ -161,6 +163,8 @@ def build_task_command(
         str(output_path),
         "--operator",
         str(args.operator),
+        "--draft-id",
+        draft_id,
         "--shared-runtime-root",
         str(Path(args.shared_runtime_root).resolve()),
     ]
@@ -314,6 +318,8 @@ def run_daily(
                     workflow_state = str((payload.get("workflow") or {}).get("state") or "").strip()
                     if workflow_state != STATE_DRAFT_PENDING:
                         raise ValueError("daily candidate must be in draft_pending state")
+                    draft_id = require_unique_existing_draft_id(payload)
+                    item["draft_id"] = draft_id
                     validation = validate_listing_payload(payload, require_duplicate_clear=True)
                     if validation.get("status") != "passed":
                         raise ValueError("candidate preflight is blocked: " + "; ".join(validation["errors"]))
@@ -326,19 +332,20 @@ def run_daily(
                     seen_task_ids.add(task_id)
                     seen_idempotency_keys.add(idempotency_key)
 
-                    existing = repository.find_existing_task(
-                        task_id=task_id,
-                        idempotency_key=idempotency_key,
-                    )
-                    if existing:
-                        item.update(
-                            {
-                                "status": "duplicate_existing",
-                                "workflow_state": str(existing.get("workflow_state") or ""),
-                                "existing_task_id": str(existing.get("task_id") or ""),
-                            }
+                    if args.mode == "preview":
+                        existing = repository.find_existing_task(
+                            task_id=task_id,
+                            idempotency_key=idempotency_key,
                         )
-                        continue
+                        if existing:
+                            item.update(
+                                {
+                                    "status": "duplicate_existing",
+                                    "workflow_state": str(existing.get("workflow_state") or ""),
+                                    "existing_task_id": str(existing.get("task_id") or ""),
+                                }
+                            )
+                            continue
 
                     source_rows, source_columns = source_reader.read(item["company_sku"])
                     if not source_gate_passed(source_rows, source_columns):
@@ -357,6 +364,24 @@ def run_daily(
                             "refreshed candidate preflight is blocked: "
                             + "; ".join(prepared["preflight"].get("errors") or [])
                         )
+                    claim_owner = f"{manager_run_id}:{task_id}"[:150]
+                    prepared.setdefault("schedule", {})["claim_owner"] = claim_owner
+                    if args.mode == "execute":
+                        claim = repository.claim_scheduled_task(
+                            prepared,
+                            claim_owner=claim_owner,
+                            claim_seconds=args.task_timeout_seconds + 300,
+                        )
+                        item["claim"] = claim
+                        if claim.get("status") != "claimed":
+                            item.update(
+                                {
+                                    "status": "duplicate_existing",
+                                    "workflow_state": str(claim.get("workflow_state") or ""),
+                                    "existing_task_id": str(claim.get("task_id") or ""),
+                                }
+                            )
+                            continue
                     input_path = task_dir / f"{index:03d}_{_safe_name(task_id)}.input.json"
                     output_path = task_dir / f"{index:03d}_{_safe_name(task_id)}.result.json"
                     _write_json(input_path, prepared)
@@ -367,7 +392,7 @@ def run_daily(
                         item["workflow_state"] = STATE_DRAFT_PENDING
                         continue
 
-                    command = build_task_command(args, input_path, output_path)
+                    command = build_task_command(args, input_path, output_path, draft_id)
                     completed = _run_task(
                         command,
                         timeout_seconds=args.task_timeout_seconds,

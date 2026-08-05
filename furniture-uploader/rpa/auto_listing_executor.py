@@ -74,9 +74,12 @@ def assert_execution_allowed(payload: dict[str, Any], mode: str) -> None:
             raise ListingContractError(f"submit execution requires state {STATE_SUBMIT_PENDING}")
         if not _enabled("ENABLE_1688_LISTING_SUBMIT"):
             raise ListingContractError("ENABLE_1688_LISTING_SUBMIT is required for submit")
-        evidence = (payload.get("workflow") or {}).get("last_event_evidence") or {}
-        if not evidence.get("approved_by"):
-            raise ListingContractError("submit requires recorded approval evidence")
+        from listing_review import ListingReviewError, assert_submit_binding
+
+        try:
+            assert_submit_binding(payload)
+        except ListingReviewError as exc:
+            raise ListingContractError(str(exc)) from exc
         draft = (payload.get("workflow") or {}).get("draft") or {}
         if not str(draft.get("draft_id") or "").strip():
             raise ListingContractError("submit requires the reviewed draft_id")
@@ -617,7 +620,8 @@ def execute_browser_task(
             "draft_identity_evidence": context.get("draft_submit_identity_evidence"),
             "detail_image_delivery_mode": context.get("detail_images_delivery_mode"),
             "detail_image_count": context.get("draft_description_image_count"),
-            "post_save_verified": True,
+            "browser_post_save_verified": True,
+            "post_save_verified": False,
             "submit_reapply_required_fields": list(
                 context.get("draft_submit_reapply_required_fields", []) or []
             ),

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -15,7 +16,7 @@ if str(TESTS_ROOT) not in sys.path:
 
 from auto_listing import advance_listing_state
 from listing_audit import ListingAuditRepository, build_listing_task_record
-from test_auto_listing import sample_payload
+from test_auto_listing import review_approval_evidence, sample_payload
 
 
 class ListingAuditTests(unittest.TestCase):
@@ -38,7 +39,7 @@ class ListingAuditTests(unittest.TestCase):
         approved = advance_listing_state(
             draft,
             "review_approved",
-            evidence={"approved_by": "reviewer"},
+            evidence=review_approval_evidence(draft),
         )
 
         record = build_listing_task_record(approved)
@@ -106,6 +107,126 @@ class ListingAuditTests(unittest.TestCase):
         self.assertEqual(result["account_key"], "muke_lixiang")
         self.assertIn("WHERE task_id = ? OR idempotency_key = ?", cursor.sql)
         self.assertEqual(cursor.params, ("task-1", "idem-1", "task-1"))
+
+    def test_atomic_claim_inserts_under_update_and_hold_locks(self) -> None:
+        class Cursor:
+            rowcount = 1
+
+            def __init__(self) -> None:
+                self.calls = []
+
+            def execute(self, sql, params):
+                self.calls.append((sql, params))
+                return self
+
+            def fetchone(self):
+                return None
+
+        class Connection:
+            def __init__(self, cursor) -> None:
+                self.cursor_obj = cursor
+                self.committed = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def cursor(self):
+                return self.cursor_obj
+
+            def commit(self):
+                self.committed = True
+
+        cursor = Cursor()
+        connection = Connection(cursor)
+        config = type("Config", (), {"schema": "app"})()
+        repository = ListingAuditRepository(config, connect=lambda _config: connection)
+
+        result = repository.claim_scheduled_task(
+            sample_payload(),
+            claim_owner="daily-1:task-1",
+            claim_seconds=300,
+        )
+
+        self.assertEqual(result["status"], "claimed")
+        self.assertIn("WITH (UPDLOCK, HOLDLOCK)", cursor.calls[0][0])
+        self.assertIn("INSERT INTO [app].[ali1688_listing_task]", cursor.calls[1][0])
+        self.assertTrue(connection.committed)
+
+    def test_current_payload_guard_rejects_stale_payload(self) -> None:
+        payload = sample_payload()
+        payload["schedule"] = {"claim_owner": "owner-1"}
+        stale = json.loads(json.dumps(payload))
+        stale["product"]["selected_title"] = "older title"
+
+        class Cursor:
+            def execute(self, _sql, _params):
+                return self
+
+            def fetchone(self):
+                return (
+                    payload["task_id"],
+                    build_listing_task_record(payload)["idempotency_key"],
+                    "draft_pending",
+                    "owner-1",
+                    "2026-08-05T00:00:00",
+                    json.dumps(stale),
+                    1,
+                )
+
+        class Connection:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def cursor(self):
+                return Cursor()
+
+            def commit(self):
+                return None
+
+        config = type("Config", (), {"schema": "app"})()
+        repository = ListingAuditRepository(config, connect=lambda _config: Connection())
+        with self.assertRaisesRegex(RuntimeError, "payload is stale"):
+            repository.assert_execution_payload_current(payload)
+
+    def test_manual_execution_registration_rejects_stale_existing_payload(self) -> None:
+        payload = sample_payload()
+        stale = json.loads(json.dumps(payload))
+        stale["workflow"]["state"] = "submitted"
+
+        class Cursor:
+            def execute(self, _sql, _params):
+                return self
+
+            def fetchone(self):
+                return (
+                    payload["task_id"],
+                    build_listing_task_record(payload)["idempotency_key"],
+                    json.dumps(stale),
+                )
+
+        class Connection:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def cursor(self):
+                return Cursor()
+
+            def commit(self):
+                return None
+
+        config = type("Config", (), {"schema": "app"})()
+        repository = ListingAuditRepository(config, connect=lambda _config: Connection())
+        with self.assertRaisesRegex(RuntimeError, "payload is stale"):
+            repository.register_execution_payload(payload)
 
 
 if __name__ == "__main__":

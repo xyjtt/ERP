@@ -13,6 +13,7 @@ from stop_sale_audit import (
     _validate_identifier,
     connect_app_database,
 )
+from listing_review import canonical_sha256
 
 
 def _text(value: Any, limit: int) -> str:
@@ -147,6 +148,232 @@ class ListingAuditRepository:
                 return None
             columns = [str(item[0]) for item in cursor.description]
         return dict(zip(columns, row))
+
+    def claim_scheduled_task(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        claim_owner: str,
+        claim_seconds: int,
+    ) -> dict[str, Any]:
+        record = build_listing_task_record(payload)
+        owner = _text(claim_owner, 150)
+        if not owner or int(claim_seconds) <= 0:
+            raise ValueError("scheduled listing claim requires an owner and positive TTL")
+        table = self._table("ali1688_listing_task")
+        with self._connect(self.config) as connection:
+            cursor = connection.cursor()
+            row = cursor.execute(
+                f"""
+                SELECT TOP 1 task_id, idempotency_key, workflow_state, claimed_by,
+                    claim_until, payload_json,
+                    CASE WHEN claim_until > SYSUTCDATETIME() THEN 1 ELSE 0 END AS claim_active
+                FROM {table} WITH (UPDLOCK, HOLDLOCK)
+                WHERE task_id = ? OR idempotency_key = ?
+                ORDER BY CASE WHEN task_id = ? THEN 0 ELSE 1 END, updated_at DESC
+                """,
+                (record["task_id"], record["idempotency_key"], record["task_id"]),
+            ).fetchone()
+            if row is not None:
+                same_task = str(row[0] or "") == record["task_id"]
+                same_idempotency = str(row[1] or "") == record["idempotency_key"]
+                reclaimable = (
+                    same_task
+                    and same_idempotency
+                    and str(row[2] or "") == "draft_pending"
+                    and not bool(row[6])
+                )
+                if reclaimable:
+                    cursor.execute(
+                        f"""
+                        UPDATE {table}
+                        SET payload_json = ?, preflight_json = ?, claimed_by = ?,
+                            claim_until = DATEADD(SECOND, ?, SYSUTCDATETIME()),
+                            updated_at = SYSUTCDATETIME()
+                        WHERE task_id = ? AND idempotency_key = ?
+                          AND workflow_state = 'draft_pending'
+                          AND (claim_until IS NULL OR claim_until <= SYSUTCDATETIME())
+                        """,
+                        (
+                            record["payload_json"],
+                            record["preflight_json"],
+                            owner,
+                            int(claim_seconds),
+                            record["task_id"],
+                            record["idempotency_key"],
+                        ),
+                    )
+                    if cursor.rowcount == 1:
+                        connection.commit()
+                        return {
+                            "status": "claimed",
+                            "task_id": record["task_id"],
+                            "idempotency_key": record["idempotency_key"],
+                            "claimed_by": owner,
+                            "payload_sha256": canonical_sha256(payload),
+                            "reclaimed": True,
+                        }
+                connection.commit()
+                return {
+                    "status": "duplicate_existing",
+                    "task_id": str(row[0] or ""),
+                    "idempotency_key": str(row[1] or ""),
+                    "workflow_state": str(row[2] or ""),
+                    "claimed_by": str(row[3] or ""),
+                    "claim_until": row[4],
+                }
+            cursor.execute(
+                f"""
+                INSERT INTO {table} (
+                    task_id, schema_version, platform, shop_name, account_key,
+                    company_sku, company_spu, novelty_type, selected_title,
+                    workflow_state, approval_status, approved_by, approved_at,
+                    idempotency_key, payload_json, preflight_json, claimed_by, claim_until
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    DATEADD(SECOND, ?, SYSUTCDATETIME()))
+                """,
+                tuple(
+                    record[name]
+                    for name in (
+                        "task_id",
+                        "schema_version",
+                        "platform",
+                        "shop_name",
+                        "account_key",
+                        "company_sku",
+                        "company_spu",
+                        "novelty_type",
+                        "selected_title",
+                        "workflow_state",
+                        "approval_status",
+                        "approved_by",
+                        "approved_at",
+                        "idempotency_key",
+                        "payload_json",
+                        "preflight_json",
+                    )
+                )
+                + (owner, int(claim_seconds)),
+            )
+            connection.commit()
+        return {
+            "status": "claimed",
+            "task_id": record["task_id"],
+            "idempotency_key": record["idempotency_key"],
+            "claimed_by": owner,
+            "payload_sha256": canonical_sha256(payload),
+        }
+
+    def assert_execution_payload_current(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        task_id = _text(payload.get("task_id"), 100)
+        if not task_id:
+            raise ValueError("listing execution payload requires task_id")
+        schedule = dict(payload.get("schedule") or {})
+        expected_claim_owner = _text(schedule.get("claim_owner"), 150)
+        table = self._table("ali1688_listing_task")
+        with self._connect(self.config) as connection:
+            cursor = connection.cursor()
+            row = cursor.execute(
+                f"""
+                SELECT task_id, idempotency_key, workflow_state, claimed_by,
+                    claim_until, payload_json,
+                    CASE WHEN claim_until > SYSUTCDATETIME() THEN 1 ELSE 0 END AS claim_active
+                FROM {table} WITH (UPDLOCK, HOLDLOCK)
+                WHERE task_id = ?
+                """,
+                (task_id,),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("listing execution task is missing from the formal audit table")
+            try:
+                current_payload = json.loads(str(row[5] or ""))
+            except json.JSONDecodeError as exc:
+                raise RuntimeError("formal listing task payload_json is invalid") from exc
+            if canonical_sha256(current_payload) != canonical_sha256(payload):
+                raise RuntimeError("listing execution payload is stale; reload the formal task before retry")
+            actual_claim_owner = str(row[3] or "").strip()
+            if expected_claim_owner and actual_claim_owner != expected_claim_owner:
+                raise RuntimeError("listing execution claim owner does not match the formal task")
+            if expected_claim_owner and not bool(row[6]):
+                raise RuntimeError("listing execution claim has expired")
+            connection.commit()
+        return {
+            "task_id": str(row[0] or ""),
+            "idempotency_key": str(row[1] or ""),
+            "workflow_state": str(row[2] or ""),
+            "claimed_by": actual_claim_owner,
+            "claim_until": row[4],
+            "payload_sha256": canonical_sha256(current_payload),
+        }
+
+    def register_execution_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        record = build_listing_task_record(payload)
+        table = self._table("ali1688_listing_task")
+        with self._connect(self.config) as connection:
+            cursor = connection.cursor()
+            row = cursor.execute(
+                f"""
+                SELECT task_id, idempotency_key, payload_json
+                FROM {table} WITH (UPDLOCK, HOLDLOCK)
+                WHERE task_id = ? OR idempotency_key = ?
+                ORDER BY CASE WHEN task_id = ? THEN 0 ELSE 1 END, updated_at DESC
+                """,
+                (record["task_id"], record["idempotency_key"], record["task_id"]),
+            ).fetchone()
+            if row is not None:
+                try:
+                    current_payload = json.loads(str(row[2] or ""))
+                except json.JSONDecodeError as exc:
+                    raise RuntimeError("formal listing task payload_json is invalid") from exc
+                if str(row[0] or "") != record["task_id"]:
+                    raise RuntimeError("listing idempotency key belongs to a different task_id")
+                if canonical_sha256(current_payload) != canonical_sha256(payload):
+                    raise RuntimeError(
+                        "listing execution payload is stale; reload the formal task before retry"
+                    )
+                connection.commit()
+                return {
+                    "status": "current",
+                    "task_id": record["task_id"],
+                    "payload_sha256": canonical_sha256(current_payload),
+                }
+            cursor.execute(
+                f"""
+                INSERT INTO {table} (
+                    task_id, schema_version, platform, shop_name, account_key,
+                    company_sku, company_spu, novelty_type, selected_title,
+                    workflow_state, approval_status, approved_by, approved_at,
+                    idempotency_key, payload_json, preflight_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                tuple(
+                    record[name]
+                    for name in (
+                        "task_id",
+                        "schema_version",
+                        "platform",
+                        "shop_name",
+                        "account_key",
+                        "company_sku",
+                        "company_spu",
+                        "novelty_type",
+                        "selected_title",
+                        "workflow_state",
+                        "approval_status",
+                        "approved_by",
+                        "approved_at",
+                        "idempotency_key",
+                        "payload_json",
+                        "preflight_json",
+                    )
+                ),
+            )
+            connection.commit()
+        return {
+            "status": "registered",
+            "task_id": record["task_id"],
+            "payload_sha256": canonical_sha256(payload),
+        }
 
     def upsert_task(self, payload: Mapping[str, Any]) -> None:
         record = build_listing_task_record(payload)
