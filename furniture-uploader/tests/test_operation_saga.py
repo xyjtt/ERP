@@ -198,6 +198,145 @@ class OperationSagaOutboxRequeueTests(unittest.TestCase):
         self.assertIn("run_id = ?", updates[1])
 
 
+class _TerminalizeCursor:
+    def __init__(self, *, row=None, update_rowcounts=(1, 1)) -> None:
+        self._row = row or (
+            7,
+            "failed_retryable",
+            3,
+            "task_not_found",
+            "No exact row matched store/product/SKU/platform code",
+            "jushuitan_pending",
+            "run-1",
+        )
+        self._update_rowcounts = list(update_rowcounts)
+        self.executed: list[tuple] = []
+        self._update_index = 0
+        self.rowcount = -1
+
+    def execute(self, sql, params=None):
+        self.executed.append((sql, params))
+        if "UPDATE" in sql:
+            self.rowcount = self._update_rowcounts[self._update_index]
+            self._update_index += 1
+        return self
+
+    def fetchone(self):
+        return self._row
+
+
+class OperationSagaTaskNotFoundTerminalizeTests(unittest.TestCase):
+    def _repository(self, cursor: _TerminalizeCursor):
+        return OperationSagaRepository(
+            _FakeConfig(),
+            connect=lambda _config: _FakeConnection(cursor),
+        )
+
+    def test_terminalize_preserves_task_not_found_and_updates_both_rows(self) -> None:
+        cursor = _TerminalizeCursor()
+        connection = _FakeConnection(cursor)
+        repository = OperationSagaRepository(
+            _FakeConfig(), connect=lambda _config: connection
+        )
+
+        result = repository.terminalize_outbox(
+            "a" * 64,
+            expected_status="failed_retryable",
+            expected_error_code="task_not_found",
+            expected_run_id="run-1",
+            expected_attempt_count=3,
+            expected_saga_state="jushuitan_pending",
+            reason="历史精确查询确认无匹配任务",
+        )
+
+        self.assertEqual(result["status"], "failed_terminal")
+        self.assertEqual(result["error_code"], "task_not_found")
+        self.assertIn("No exact row matched", result["error_summary"])
+        self.assertIn("terminalized:", result["error_summary"])
+        self.assertEqual(connection.commits, 1)
+        self.assertEqual(connection.rollbacks, 0)
+        updates = [sql for sql, _ in cursor.executed if "UPDATE" in sql]
+        self.assertEqual(len(updates), 2)
+        self.assertIn("status = 'failed_terminal'", updates[0])
+        self.assertIn("claim_owner = NULL", updates[0])
+        self.assertIn("completed_at = SYSUTCDATETIME()", updates[0])
+        self.assertIn("attempt_count = ?", updates[0])
+        self.assertIn("ISNULL(last_error_code, '') = ?", updates[0])
+        self.assertIn("jushuitan_status = 'failed_terminal'", updates[1])
+        self.assertIn("finished_at = SYSUTCDATETIME()", updates[1])
+        self.assertIn("state = ?", updates[1])
+        self.assertIn("run_id = ?", updates[1])
+
+    def test_terminalize_rejects_state_drift_and_rolls_back(self) -> None:
+        cursor = _TerminalizeCursor(
+            row=(
+                7,
+                "failed_retryable",
+                4,
+                "task_not_found",
+                "No exact row matched store/product/SKU/platform code",
+                "failed_terminal",
+                "run-1",
+            )
+        )
+        connection = _FakeConnection(cursor)
+        repository = OperationSagaRepository(
+            _FakeConfig(), connect=lambda _config: connection
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "attempt_count_changed:4"):
+            repository.terminalize_outbox(
+                "a" * 64,
+                expected_status="failed_retryable",
+                expected_error_code="task_not_found",
+                expected_run_id="run-1",
+                expected_attempt_count=3,
+                expected_saga_state="jushuitan_pending",
+                reason="approved historical terminalization",
+            )
+
+        self.assertEqual(connection.commits, 0)
+        self.assertEqual(connection.rollbacks, 1)
+
+    def test_terminalize_rejects_already_terminal_input(self) -> None:
+        cursor = _TerminalizeCursor()
+        repository = self._repository(cursor)
+
+        with self.assertRaisesRegex(ValueError, "Only failed_retryable"):
+            repository.terminalize_outbox(
+                "a" * 64,
+                expected_status="failed_terminal",
+                expected_error_code="task_not_found",
+                expected_run_id="run-1",
+                expected_attempt_count=3,
+                expected_saga_state="jushuitan_pending",
+                reason="approved historical terminalization",
+            )
+        self.assertFalse(any("UPDATE" in sql for sql, _ in cursor.executed))
+
+    def test_terminalize_rolls_back_when_saga_cas_is_not_exactly_one(self) -> None:
+        cursor = _TerminalizeCursor(update_rowcounts=(1, 0))
+        connection = _FakeConnection(cursor)
+        repository = OperationSagaRepository(
+            _FakeConfig(), connect=lambda _config: connection
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "saga_terminalize"):
+            repository.terminalize_outbox(
+                "a" * 64,
+                expected_status="failed_retryable",
+                expected_error_code="task_not_found",
+                expected_run_id="run-1",
+                expected_attempt_count=3,
+                expected_saga_state="jushuitan_pending",
+                reason="approved historical terminalization",
+            )
+
+        self.assertEqual(connection.commits, 0)
+        self.assertEqual(connection.rollbacks, 1)
+
+
+
 class _ExactClaimCursor:
     def __init__(self, keys: list[str], *, invalid_key: str = "") -> None:
         self.keys = keys
