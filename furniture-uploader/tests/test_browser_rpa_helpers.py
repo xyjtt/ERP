@@ -2440,6 +2440,10 @@ class BrowserRPAHelperTests(unittest.TestCase):
                 ]
             },
             "draft_submit_response_status": 200,
+            "draft_submit_response_draft_id": "draft-1",
+            "draft_submit_identity_evidence": {
+                "effective": {"draftId": "draft-1"},
+            },
             "draft_submit_trace": {
                 "status": 200,
                 "responseJson": {"success": True, "data": {"draftId": "draft-1"}},
@@ -2449,11 +2453,15 @@ class BrowserRPAHelperTests(unittest.TestCase):
                         "buyerProtectionSteps": [
                             {"from": 1, "serviceName": "15天发货", "value": "swtfh"},
                         ],
+                        "availableBuyerServices": [
+                            {"serviceName": "15天发货", "serviceCode": "swtfh"},
+                        ],
                     }
                 },
             },
         }
         publish_config = {
+            "expected_draft_id": "draft-1",
             "submit_reapply_nonpersistent_fields": ["send_address", "buyer_protection"],
             "draft_verification": {
                 "enabled": True,
@@ -2523,6 +2531,105 @@ class BrowserRPAHelperTests(unittest.TestCase):
                 context,
             )
 
+    def test_collect_submit_reapply_evidence_covers_four_nonpersistent_fields(self) -> None:
+        context: dict[str, object] = {
+            "send_address_id": "35281125",
+            "length_cm": "55",
+            "width_cm": "47",
+            "height_cm": "62.5",
+            "weight_g": "15250",
+            "draft_send_address_value": "",
+            "draft_send_address_state": {
+                "selected": True,
+                "selectedText": "江苏省 常州市 武进区",
+            },
+            "draft_delivery_service_state_persisted": {
+                "selectedServiceIds": [],
+            },
+            "draft_delivery_service_state_pre_save": {
+                "selected": True,
+                "selectedServiceIds": [365841],
+                "selectedLabels": ["送到楼下"],
+            },
+            "draft_logistics_dimensions": {
+                "length": "",
+                "width": "",
+                "height": "",
+                "weight": "",
+            },
+            "draft_logistics_pre_save_values": {
+                "length": "55",
+                "width": "47",
+                "height": "62.5",
+                "weight": "15250",
+            },
+            "draft_buyer_protection_value": "",
+            "draft_buyer_protection_schedule": [],
+            "buyer_protection_ship_time": "24小时发货",
+            "buyer_protection_ship_time_code": "essxsfh",
+            "draft_buyer_protection_pre_save_selected": True,
+            "draft_buyer_protection_pre_save_selected_text": "24小时发货",
+            "draft_submit_response_status": 200,
+            "draft_submit_response_draft_id": "draft-1",
+            "draft_submit_identity_evidence": {
+                "effective": {"draftId": "draft-1"},
+            },
+            "draft_submit_trace": {
+                "status": 200,
+                "responseJson": {"success": True, "data": {"draftId": "draft-1"}},
+                "patch": {
+                    "patchSnapshot": {
+                        "sendAddressId": 35281125,
+                        "deliveryServiceIds": [365841],
+                        "allowedDeliveryServices": [
+                            {"id": 365841, "label": "送到楼下"},
+                            {"id": 4511641, "label": "市区物流点自提"},
+                        ],
+                        "logisticsDimensions": {
+                            "length": "55",
+                            "width": "47",
+                            "height": "62.5",
+                            "weight": "15250",
+                        },
+                        "buyerProtectionServiceName": "24小时发货",
+                        "buyerProtectionServiceCode": "essxsfh",
+                        "buyerProtectionSteps": [{"from": 1, "value": "essxsfh"}],
+                        "availableBuyerServices": [
+                            {"serviceName": "24小时发货", "serviceCode": "essxsfh"}
+                        ],
+                    }
+                },
+            },
+        }
+        publish_config = {
+            "expected_draft_id": "draft-1",
+            "submit_reapply_nonpersistent_fields": [
+                "delivery_service",
+                "send_address",
+                "logistics",
+                "buyer_protection",
+            ],
+            "draft_verification": {
+                "buyer_protection_default_value": "24小时发货",
+                "buyer_protection_expected_code": "essxsfh",
+            },
+        }
+
+        required = self.browser._collect_draft_submit_reapply_evidence(
+            publish_config,
+            context,
+            context["draft_submit_trace"]["patch"]["patchSnapshot"],
+        )
+
+        self.assertEqual(
+            required,
+            ["delivery_service", "send_address", "logistics", "buyer_protection"],
+        )
+        contract = context["draft_submit_reapply_evidence"]
+        self.assertEqual(contract["draft_id"], "draft-1")
+        self.assertEqual(contract["fields"]["delivery_service"]["requested_ids"], [365841])
+        self.assertEqual(contract["fields"]["logistics"]["expected_values"]["weight"], "15250")
+
     def test_submit_required_fields_block_empty_address_and_wrong_buyer_protection(self) -> None:
         self.browser.driver = FakeDriver(current_url="https://offer-new.1688.com/popular/publish.htm")
         self.browser._ensure_draft_send_address_selected = lambda _context: None  # type: ignore[assignment]
@@ -2581,6 +2688,91 @@ class BrowserRPAHelperTests(unittest.TestCase):
         )
 
         self.assertTrue(context.get("submit_required_fields_verified"))
+
+    def test_submit_replay_requires_exact_four_field_react_readback(self) -> None:
+        self.browser.driver = FakeDriver(current_url="https://offer-new.1688.com/popular/publish.htm")
+        self.browser._ensure_draft_send_address_selected = lambda _context: None  # type: ignore[assignment]
+        self.browser._ensure_draft_required_delivery_service = lambda _context: None  # type: ignore[assignment]
+        self.browser._apply_draft_page_state_patch = lambda _config, _context: None  # type: ignore[assignment]
+        self.browser._ensure_draft_logistics_dimensions_before_save = lambda _config, _context: None  # type: ignore[assignment]
+        self.browser._ensure_required_cat_props_before_draft_save = lambda _config, _context: None  # type: ignore[assignment]
+        self.browser._ensure_buyer_protection_ship_time_before_draft_save = lambda _config, _context: None  # type: ignore[assignment]
+        self.browser._draft_selected_send_address = lambda: "35281125"  # type: ignore[assignment]
+        self.browser._draft_delivery_service_state = lambda: {  # type: ignore[assignment]
+            "selectedServiceIds": [365841],
+            "allowedServiceIds": [365841, 4511641],
+        }
+        self.browser._draft_logistics_dimension_values = lambda: {  # type: ignore[assignment]
+            "length": "55",
+            "width": "47",
+            "height": "62.5",
+            "weight": "15250",
+        }
+        self.browser._draft_selected_buyer_protection = lambda: "24小时发货"  # type: ignore[assignment]
+        self.browser._draft_selected_buyer_protection_schedule = lambda: [  # type: ignore[assignment]
+            {"from": 1, "serviceName": "24小时发货", "serviceCode": "essxsfh"}
+        ]
+        self.browser._collect_assist_messages = lambda: []  # type: ignore[assignment]
+        fields = {
+            "delivery_service": {
+                "status": "submit_reapply_required",
+                "requested_ids": [365841],
+            },
+            "send_address": {
+                "status": "submit_reapply_required",
+                "expected_value": "35281125",
+            },
+            "logistics": {
+                "status": "submit_reapply_required",
+                "expected_values": {
+                    "length": "55",
+                    "width": "47",
+                    "height": "62.5",
+                    "weight": "15250",
+                },
+            },
+            "buyer_protection": {
+                "status": "submit_reapply_required",
+                "service_name": "24小时发货",
+                "service_code": "essxsfh",
+            },
+        }
+        contract = {"fields": fields}
+        contract_hash = __import__("hashlib").sha256(
+            json.dumps(
+                contract,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        context: dict[str, object] = {
+            "send_address_id": "35281125",
+            "length_cm": "55",
+            "width_cm": "47",
+            "height_cm": "62.5",
+            "weight_g": "15250",
+            "submit_reapply_required_fields": list(fields),
+            "submit_reapply_evidence": contract,
+            "submit_reapply_contract_sha256": contract_hash,
+        }
+
+        self.browser._prepare_and_verify_submit_required_fields(
+            {
+                "draft_verification": {
+                    "require_delivery_service": True,
+                    "require_send_address": True,
+                    "require_logistics_dimensions": True,
+                    "require_buyer_protection": True,
+                    "buyer_protection_default_value": "24小时发货",
+                    "buyer_protection_expected_code": "essxsfh",
+                }
+            },
+            context,
+        )
+
+        self.assertEqual(set(context["submit_reapply_results"]), set(fields))
+        self.assertTrue(context["submit_required_fields_verified"])
 
     def test_submit_success_navigation_extracts_offer_before_retry_click(self) -> None:
         self.browser.driver = FakeDriver(
@@ -3735,7 +3927,10 @@ class BrowserRPAHelperTests(unittest.TestCase):
         self.assertTrue(verification["strict_logistics_persist"])
         self.assertTrue(verification["strict_buyer_protection_persist"])
         self.assertEqual(config["publish"]["draft_request_patch_retry_modes"], ["full", "identity_only"])
-        self.assertEqual(config["publish"]["submit_reapply_nonpersistent_fields"], [])
+        self.assertEqual(
+            config["publish"]["submit_reapply_nonpersistent_fields"],
+            ["delivery_service", "send_address", "logistics", "buyer_protection"],
+        )
         main_image_step = next(
             step
             for step in config["publish"]["steps"]

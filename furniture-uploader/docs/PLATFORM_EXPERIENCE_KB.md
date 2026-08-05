@@ -1,5 +1,13 @@
 # Platform Experience Knowledge Base
 
+## 2026-08-06 Nonpersistent Draft Field Replay Findings
+
+- HTTP 2xx 和 `success=true` 只能证明草稿保存请求被接受，不能证明所有 React 字段在重新打开后仍存在。对配送服务、地址、物流和买家保障必须同时保留请求值、保存前页面状态、响应草稿 ID 和页面允许值。
+- 不能把“刷新后为空”直接视为正常，也不能无限重复保存同一草稿。仅当上述证据完整且绑定同一 `draft_id` 时，字段才能进入 `submit_reapply_required`；否则保持 `failed`。
+- 配送服务重放必须再次读取当前 `serviceTemplates`，请求 ID 必须属于当前允许集合；不能复用历史 ID。买家保障必须精确读回 `24小时发货/essxsfh` 的 `from=1` 步骤。
+- submit 前的重放结果必须覆盖契约中的全部字段，且每项状态为 `reapplied_and_read_back`。页面仍出现“必填/请填写/请完善”时必须停止，成功页 reconciliation 也必须携带相同契约哈希。
+- 独立检查只允许上述四个字段使用重放状态。主图、详情图、标题、规格、价格和库存等字段必须真实持久化，缺失时不能借用重放契约通过检查。
+
 ## 2026-08-05 CTG0286 Native Component Contract Findings
 
 - 配送服务 ID 不能跨类目硬编码。当前真实页面只允许 `365841=送到楼下` 和 `4511641=市区物流点自提`；应从 `customExtraService.props.serviceTemplates` 读取允许值，并优先保留当前已选值。

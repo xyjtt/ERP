@@ -18,6 +18,11 @@ from auto_listing import (
     validate_image_capacity_probe,
 )
 from variant_pipeline import ReleaseVariant, build_products_from_variants
+from listing_review import (
+    ListingReviewError,
+    build_submit_reapply_contract,
+    canonical_sha256,
+)
 
 
 ALI1688_CATEGORY_IDS = {
@@ -100,7 +105,8 @@ def build_release_variant_payload(payload: dict[str, Any]) -> dict[str, Any]:
     attributes.setdefault("sku_name", specs.get("sku_name", ""))
     attributes.setdefault("properties_value", specs.get("raw_properties_value", ""))
     logistics = payload.get("logistics") or {}
-    return {
+    draft = dict(dict(payload.get("workflow") or {}).get("draft") or {})
+    result = {
         "variant_id": payload.get("task_id"),
         "source_product_id": product.get("spu_code"),
         "platform": "1688",
@@ -130,7 +136,17 @@ def build_release_variant_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "weight_g": logistics.get("weight_g", ""),
         "store_label": shop.get("shop_name"),
         "description": product.get("product_name"),
+        "submit_reapply_required_fields": list(
+            draft.get("submit_reapply_required_fields") or []
+        ),
+        "submit_reapply_evidence": dict(
+            draft.get("submit_reapply_evidence") or {}
+        ),
+        "submit_reapply_contract_sha256": str(
+            draft.get("submit_reapply_contract_sha256") or ""
+        ).strip(),
     }
+    return result
 
 
 def build_product_record(payload: dict[str, Any], *, project_root: str | Path):
@@ -417,13 +433,73 @@ def extract_submit_reconciliation_evidence(
         raise ListingContractError("submit reconciliation evidence has the wrong buyer protection schedule")
     if list(context.get("submit_blocking_assist_messages") or []):
         raise ListingContractError("submit reconciliation evidence contains blocking assist messages")
+    reapply_contract = build_submit_reapply_contract(payload)
+    required_reapply_fields = set(reapply_contract["required_fields"])
+    reapply_results = context.get("submit_reapply_results") or {}
+    if not isinstance(reapply_results, dict) or set(reapply_results) != required_reapply_fields:
+        raise ListingContractError(
+            "submit reconciliation evidence does not cover the reviewed replay contract"
+        )
+    if any(
+        not isinstance(reapply_results.get(name), dict)
+        or reapply_results[name].get("status") != "reapplied_and_read_back"
+        for name in required_reapply_fields
+    ):
+        raise ListingContractError(
+            "submit reconciliation evidence has an unverified replay result"
+        )
     return {
         "offer_id": offer_id,
         "offer_url": f"https://detail.1688.com/offer/{offer_id}.html",
         "result_url": result_url,
         "post_submit_verified": "reconciled_success_page",
         "required_fields_verified": True,
+        "submit_reapply_contract_sha256": canonical_sha256(reapply_contract),
     }
+
+
+def _validated_submit_reapply_evidence(
+    payload: dict[str, Any],
+    *,
+    draft_id: str,
+    required_fields: Any,
+    raw_evidence: Any,
+) -> tuple[list[str], dict[str, Any], str]:
+    fields = [
+        str(item or "").strip()
+        for item in list(required_fields or [])
+        if str(item or "").strip()
+    ]
+    if raw_evidence and not isinstance(raw_evidence, dict):
+        raise ListingContractError("submit reapply evidence must be an object")
+    evidence = dict(raw_evidence or {})
+    if not fields:
+        if evidence:
+            raise ListingContractError(
+                "submit reapply evidence is present without required fields"
+            )
+        return [], {}, ""
+
+    contract_hash = canonical_sha256(evidence)
+    candidate = copy.deepcopy(payload)
+    workflow = candidate.setdefault("workflow", {})
+    workflow["pending_draft_id"] = draft_id
+    draft = dict(workflow.get("draft") or {})
+    draft.update(
+        {
+            "draft_id": draft_id,
+            "submit_reapply_required_fields": fields,
+            "submit_reapply_evidence": evidence,
+            "submit_reapply_contract_sha256": contract_hash,
+        }
+    )
+    workflow["draft"] = draft
+    try:
+        normalized = build_submit_reapply_contract(candidate)
+    except ListingReviewError as exc:
+        raise ListingContractError(str(exc)) from exc
+    normalized_hash = canonical_sha256(normalized)
+    return fields, normalized, normalized_hash
 
 
 def extract_draft_reconciliation_evidence(
@@ -496,7 +572,17 @@ def extract_draft_reconciliation_evidence(
         "logistics",
     }
     repair_scope = "full" if full_rebuild_checks.intersection(missing_checks) else "required_fields"
-    return {
+    (
+        submit_reapply_required_fields,
+        submit_reapply_evidence,
+        submit_reapply_contract_sha256,
+    ) = _validated_submit_reapply_evidence(
+        payload,
+        draft_id=response_draft_id,
+        required_fields=context.get("draft_submit_reapply_required_fields"),
+        raw_evidence=context.get("draft_submit_reapply_evidence"),
+    )
+    result = {
         "draft_id": response_draft_id,
         "draft_url": (
             "https://offer.1688.com/offer/post/fillProductInfo.htm?"
@@ -510,10 +596,12 @@ def extract_draft_reconciliation_evidence(
         "missing_checks": missing_checks,
         "inspection_checked_at": str(inspection_payload.get("checked_at") or "").strip(),
         "validation_error": str(failure_payload.get("error") or "").strip(),
-        "submit_reapply_required_fields": list(
-            context.get("draft_submit_reapply_required_fields", []) or []
-        ),
+        "submit_reapply_required_fields": submit_reapply_required_fields,
+        "submit_reapply_evidence": submit_reapply_evidence,
     }
+    if submit_reapply_required_fields:
+        result["submit_reapply_contract_sha256"] = submit_reapply_contract_sha256
+    return result
 
 
 def _has_image_album_capacity_block(payload: dict[str, Any]) -> bool:
@@ -608,6 +696,16 @@ def execute_browser_task(
         if not draft_id:
             raise ListingContractError("draft save completed without an extractable draft_id")
         assert_repaired_draft_id(payload, draft_id)
+        (
+            submit_reapply_required_fields,
+            submit_reapply_evidence,
+            submit_reapply_contract_sha256,
+        ) = _validated_submit_reapply_evidence(
+            payload,
+            draft_id=draft_id,
+            required_fields=context.get("draft_submit_reapply_required_fields"),
+            raw_evidence=context.get("draft_submit_reapply_evidence"),
+        )
         evidence = {
             "draft_id": draft_id,
             "draft_url": (
@@ -622,13 +720,14 @@ def execute_browser_task(
             "detail_image_count": context.get("draft_description_image_count"),
             "browser_post_save_verified": True,
             "post_save_verified": False,
-            "submit_reapply_required_fields": list(
-                context.get("draft_submit_reapply_required_fields", []) or []
-            ),
+            "submit_reapply_required_fields": submit_reapply_required_fields,
+            "submit_reapply_evidence": submit_reapply_evidence,
             "nonpersistent_assist_messages_ignored": list(
                 context.get("draft_nonpersistent_assist_messages_ignored", []) or []
             ),
         }
+        if submit_reapply_required_fields:
+            evidence["submit_reapply_contract_sha256"] = submit_reapply_contract_sha256
         return advance_listing_state(payload, "draft_saved", evidence=evidence), context
 
     offer_id = extract_offer_id(context)

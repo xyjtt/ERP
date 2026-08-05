@@ -11,7 +11,16 @@ from typing import Any, Mapping
 from operation_saga import build_operation_key
 
 
-INSPECTION_ARTIFACT_VERSION = "listing_draft_inspection_v1"
+INSPECTION_ARTIFACT_VERSION = "listing_draft_inspection_v2"
+SUBMIT_REAPPLY_CONTRACT_VERSION = "listing_submit_reapply_v1"
+SUBMIT_REAPPLY_FIELDS = frozenset(
+    {
+        "delivery_service",
+        "send_address",
+        "logistics",
+        "buyer_protection",
+    }
+)
 REQUIRED_INSPECTION_CHECKS = frozenset(
     {
         "draft_id",
@@ -24,6 +33,7 @@ REQUIRED_INSPECTION_CHECKS = frozenset(
         "detail_image_count",
         "spec_color",
         "spec_size",
+        "delivery_service",
         "logistics",
         "send_address",
         "buyer_protection",
@@ -83,6 +93,177 @@ def require_unique_existing_draft_id(payload: Mapping[str, Any]) -> str:
     return next(iter(draft_ids))
 
 
+def _positive_integer_values(values: Any) -> list[int]:
+    normalized: list[int] = []
+    seen: set[int] = set()
+    for raw in list(values or []):
+        try:
+            value = int(str(raw).strip())
+        except (TypeError, ValueError):
+            continue
+        if value <= 0 or value in seen:
+            continue
+        seen.add(value)
+        normalized.append(value)
+    return normalized
+
+
+def _required_reapply_fields(draft: Mapping[str, Any]) -> list[str]:
+    values = [
+        str(item or "").strip()
+        for item in list(draft.get("submit_reapply_required_fields") or [])
+        if str(item or "").strip()
+    ]
+    if len(values) != len(set(values)):
+        raise ListingReviewError("submit reapply fields contain duplicates")
+    unsupported = sorted(set(values) - SUBMIT_REAPPLY_FIELDS)
+    if unsupported:
+        raise ListingReviewError(
+            "submit reapply fields are unsupported: " + ", ".join(unsupported)
+        )
+    return values
+
+
+def build_submit_reapply_contract(payload: Mapping[str, Any]) -> dict[str, Any]:
+    draft_id = require_unique_existing_draft_id(payload)
+    draft = dict(dict(payload.get("workflow") or {}).get("draft") or {})
+    required_fields = _required_reapply_fields(draft)
+    raw_contract = draft.get("submit_reapply_evidence") or {}
+    if not required_fields:
+        if raw_contract:
+            raise ListingReviewError(
+                "submit reapply evidence is present without required fields"
+            )
+        return {
+            "contract_version": SUBMIT_REAPPLY_CONTRACT_VERSION,
+            "draft_id": draft_id,
+            "required_fields": [],
+            "save": {},
+            "fields": {},
+        }
+    if not isinstance(raw_contract, Mapping):
+        raise ListingReviewError("submit reapply evidence must be an object")
+    contract = dict(raw_contract)
+    if str(contract.get("contract_version") or "").strip() != SUBMIT_REAPPLY_CONTRACT_VERSION:
+        raise ListingReviewError("submit reapply contract_version is unsupported")
+    if str(contract.get("draft_id") or "").strip() != draft_id:
+        raise ListingReviewError("submit reapply draft_id does not match the reviewed draft")
+    contract_fields = [
+        str(item or "").strip()
+        for item in list(contract.get("required_fields") or [])
+        if str(item or "").strip()
+    ]
+    if contract_fields != required_fields:
+        raise ListingReviewError("submit reapply contract fields do not match the draft")
+
+    save = contract.get("save") or {}
+    if not isinstance(save, Mapping):
+        raise ListingReviewError("submit reapply save evidence is missing")
+    try:
+        http_status = int(save.get("http_status") or 0)
+    except (TypeError, ValueError):
+        http_status = 0
+    if not 200 <= http_status < 300 or save.get("success") is not True:
+        raise ListingReviewError("submit reapply requires a successful draft save response")
+    if str(save.get("request_draft_id") or "").strip() != draft_id:
+        raise ListingReviewError("submit reapply save request draft_id is mismatched")
+    if str(save.get("response_draft_id") or "").strip() != draft_id:
+        raise ListingReviewError("submit reapply save response draft_id is mismatched")
+
+    fields = contract.get("fields") or {}
+    if not isinstance(fields, Mapping) or set(fields) != set(required_fields):
+        raise ListingReviewError("submit reapply field evidence is incomplete")
+    for name in required_fields:
+        field = fields.get(name) or {}
+        if not isinstance(field, Mapping) or field.get("status") != "submit_reapply_required":
+            raise ListingReviewError(f"submit reapply evidence is invalid for {name}")
+
+        if name == "send_address":
+            expected = str(field.get("expected_value") or "").strip()
+            requested = str(field.get("requested_value") or "").strip()
+            if not expected or requested != expected or field.get("pre_save_selected") is not True:
+                raise ListingReviewError("submit reapply send_address evidence is incomplete")
+        elif name == "delivery_service":
+            requested_ids = _positive_integer_values(field.get("requested_ids"))
+            allowed_services = [
+                dict(item)
+                for item in list(field.get("allowed_services") or [])
+                if isinstance(item, Mapping)
+            ]
+            allowed_ids = _positive_integer_values(
+                [item.get("id") for item in allowed_services]
+            )
+            selected_ids = _positive_integer_values(field.get("pre_save_selected_ids"))
+            if (
+                not requested_ids
+                or not allowed_ids
+                or not set(requested_ids).issubset(allowed_ids)
+                or not set(requested_ids).issubset(selected_ids)
+            ):
+                raise ListingReviewError("submit reapply delivery_service evidence is incomplete")
+        elif name == "logistics":
+            expected = dict(field.get("expected_values") or {})
+            requested = dict(field.get("requested_values") or {})
+            pre_save = dict(field.get("pre_save_values") or {})
+            required_names = {"length", "width", "height", "weight"}
+            if set(expected) != required_names or any(
+                not str(expected.get(item) or "").strip()
+                or str(requested.get(item) or "").strip() != str(expected.get(item) or "").strip()
+                or str(pre_save.get(item) or "").strip() != str(expected.get(item) or "").strip()
+                for item in required_names
+            ):
+                raise ListingReviewError("submit reapply logistics evidence is incomplete")
+        elif name == "buyer_protection":
+            service_name = str(field.get("service_name") or "").strip()
+            service_code = str(field.get("service_code") or "").strip()
+            steps = [
+                dict(item)
+                for item in list(field.get("requested_steps") or [])
+                if isinstance(item, Mapping)
+            ]
+            available = [
+                dict(item)
+                for item in list(field.get("available_services") or [])
+                if isinstance(item, Mapping)
+            ]
+            matching_step = any(
+                int(item.get("from", 0) or 0) == 1
+                and str(item.get("serviceName") or "").strip() == service_name
+                and str(item.get("serviceCode") or "").strip() == service_code
+                for item in steps
+            )
+            available_match = any(
+                str(item.get("serviceName") or "").strip() == service_name
+                and str(item.get("serviceCode") or "").strip() == service_code
+                for item in available
+            )
+            if (
+                not service_name
+                or not service_code
+                or not matching_step
+                or not available_match
+                or field.get("pre_save_selected") is not True
+            ):
+                raise ListingReviewError("submit reapply buyer_protection evidence is incomplete")
+
+    normalized = {
+        "contract_version": SUBMIT_REAPPLY_CONTRACT_VERSION,
+        "draft_id": draft_id,
+        "required_fields": required_fields,
+        "save": dict(save),
+        "fields": {name: dict(fields[name]) for name in required_fields},
+    }
+    expected_hash = canonical_sha256(normalized)
+    stored_hash = str(draft.get("submit_reapply_contract_sha256") or "").strip().lower()
+    if stored_hash != expected_hash:
+        raise ListingReviewError("submit reapply contract hash is missing or stale")
+    return normalized
+
+
+def build_submit_reapply_contract_sha256(payload: Mapping[str, Any]) -> str:
+    return canonical_sha256(build_submit_reapply_contract(payload))
+
+
 def build_listing_operation_key(
     *,
     account_key: str,
@@ -119,6 +300,7 @@ def build_review_contract(payload: Mapping[str, Any]) -> dict[str, Any]:
         "attributes": payload.get("attributes") or {},
         "logistics": payload.get("logistics") or {},
         "draft_id": require_unique_existing_draft_id(payload),
+        "submit_reapply_contract_sha256": build_submit_reapply_contract_sha256(payload),
     }
 
 
@@ -157,6 +339,9 @@ def validate_independent_inspection(
         raise ListingReviewError("independent inspection CDP port does not match account binding")
     if not isinstance(checks, Mapping):
         raise ListingReviewError("independent inspection checks are missing")
+    field_outcomes = artifact.get("field_outcomes")
+    if not isinstance(field_outcomes, Mapping):
+        raise ListingReviewError("independent inspection field_outcomes are missing")
     missing_checks = sorted(REQUIRED_INSPECTION_CHECKS - set(checks))
     failed_checks = sorted(str(name) for name, passed in checks.items() if passed is not True)
     if missing_checks or failed_checks:
@@ -164,6 +349,22 @@ def validate_independent_inspection(
             "independent inspection fields are not all passed: "
             + ", ".join(missing_checks + failed_checks)
         )
+    reapply_contract = build_submit_reapply_contract(payload)
+    reapply_fields = set(reapply_contract["required_fields"])
+    reapply_hash = canonical_sha256(reapply_contract)
+    if str(artifact.get("submit_reapply_contract_sha256") or "").strip().lower() != reapply_hash:
+        raise ListingReviewError("independent inspection submit reapply contract is stale")
+    for name in REQUIRED_INSPECTION_CHECKS:
+        outcome = field_outcomes.get(name) or {}
+        if not isinstance(outcome, Mapping):
+            raise ListingReviewError(f"independent inspection outcome is missing for {name}")
+        status = str(outcome.get("status") or "").strip()
+        if status == "persisted":
+            continue
+        if status == "submit_reapply_required" and name in reapply_fields:
+            if str(outcome.get("contract_sha256") or "").strip().lower() == reapply_hash:
+                continue
+        raise ListingReviewError(f"independent inspection outcome is invalid for {name}")
     contract_sha = build_review_contract_sha256(payload)
     if str(artifact.get("payload_contract_sha256") or "").strip().lower() != contract_sha:
         raise ListingReviewError("independent inspection payload contract is stale")
@@ -179,6 +380,7 @@ def validate_independent_inspection(
         "artifact_sha256": canonical_sha256(artifact),
         "inspector_build_sha": inspector_build_sha,
         "payload_contract_sha256": contract_sha,
+        "submit_reapply_contract_sha256": reapply_hash,
         "task_id": str(payload.get("task_id") or "").strip(),
         "draft_id": expected_draft_id,
         "account_key": account_key,
@@ -186,6 +388,7 @@ def validate_independent_inspection(
         "cdp_port": int(expected_cdp_port),
         "checked_at": checked_at,
         "required_checks": sorted(REQUIRED_INSPECTION_CHECKS),
+        "field_outcomes_sha256": canonical_sha256(field_outcomes),
     }
 
 
@@ -202,6 +405,7 @@ def assert_approval_binding(payload: Mapping[str, Any], evidence: Mapping[str, A
         "draft_id": draft_id,
         "account_key": account_key,
         "payload_contract_sha256": build_review_contract_sha256(payload),
+        "submit_reapply_contract_sha256": build_submit_reapply_contract_sha256(payload),
     }
     for name, value in expected.items():
         if str(binding.get(name) or "").strip() != str(value):
@@ -214,6 +418,8 @@ def assert_approval_binding(payload: Mapping[str, Any], evidence: Mapping[str, A
         raise ListingReviewError("approval inspection binding requires CDP port")
     if set(binding.get("required_checks") or []) != REQUIRED_INSPECTION_CHECKS:
         raise ListingReviewError("approval inspection binding does not cover every required field")
+    if not re.fullmatch(r"[0-9a-f]{64}", str(binding.get("field_outcomes_sha256") or "").strip().lower()):
+        raise ListingReviewError("approval inspection binding requires field_outcomes_sha256")
     return binding
 
 

@@ -132,7 +132,12 @@
       "identity_only"
     ],
     "draft_buyer_protection_allow_fallback": false,
-    "submit_reapply_nonpersistent_fields": [],
+    "submit_reapply_nonpersistent_fields": [
+      "delivery_service",
+      "send_address",
+      "logistics",
+      "buyer_protection"
+    ],
     "submit_blocking_assist_keywords": [
       "必填",
       "请填写",
@@ -156,6 +161,7 @@
       "minimum_description_image_count": 1,
       "require_send_address": true,
       "strict_send_address_persist": true,
+      "require_delivery_service": true,
       "require_logistics_dimensions": true,
       "strict_logistics_persist": true,
       "required_logistics_fields": [

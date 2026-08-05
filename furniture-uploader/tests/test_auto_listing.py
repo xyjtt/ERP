@@ -31,6 +31,7 @@ from listing_review import (
     INSPECTION_ARTIFACT_VERSION,
     REQUIRED_INSPECTION_CHECKS,
     build_review_contract_sha256,
+    build_submit_reapply_contract_sha256,
 )
 
 
@@ -105,6 +106,7 @@ def review_approval_evidence(payload: dict, *, approved_by: str = "reviewer") ->
             "artifact_sha256": "b" * 64,
             "inspector_build_sha": "a" * 40,
             "payload_contract_sha256": build_review_contract_sha256(payload),
+            "submit_reapply_contract_sha256": build_submit_reapply_contract_sha256(payload),
             "task_id": str(payload.get("task_id") or ""),
             "draft_id": draft_id,
             "account_key": str(((payload.get("shop") or {}).get("account_key") or "")),
@@ -112,6 +114,7 @@ def review_approval_evidence(payload: dict, *, approved_by: str = "reviewer") ->
             "cdp_port": 9306,
             "checked_at": "2026-08-05T00:00:00+08:00",
             "required_checks": sorted(REQUIRED_INSPECTION_CHECKS),
+            "field_outcomes_sha256": "c" * 64,
         },
     }
 

@@ -24,6 +24,9 @@ from listing_review import (  # noqa: E402
     ListingReviewError,
     build_listing_operation_key,
     build_review_contract_sha256,
+    build_submit_reapply_contract,
+    build_submit_reapply_contract_sha256,
+    canonical_sha256,
     require_unique_existing_draft_id,
     validate_independent_inspection,
 )
@@ -40,6 +43,7 @@ def saved_payload() -> dict:
 
 
 def passed_artifact(payload: dict) -> dict:
+    reapply_hash = build_submit_reapply_contract_sha256(payload)
     return {
         "artifact_version": INSPECTION_ARTIFACT_VERSION,
         "inspector_build_sha": "a" * 40,
@@ -52,9 +56,92 @@ def passed_artifact(payload: dict) -> dict:
         "shop_name": payload["shop"]["shop_name"],
         "cdp_port": 9306,
         "checks": {name: True for name in REQUIRED_INSPECTION_CHECKS},
+        "field_outcomes": {
+            name: {"status": "persisted"} for name in REQUIRED_INSPECTION_CHECKS
+        },
+        "submit_reapply_contract_sha256": reapply_hash,
         "draft_saved": False,
         "offer_submitted": False,
     }
+
+
+def reapply_saved_payload() -> dict:
+    payload = saved_payload()
+    draft = payload["workflow"]["draft"]
+    draft["submit_reapply_required_fields"] = [
+        "delivery_service",
+        "send_address",
+        "logistics",
+        "buyer_protection",
+    ]
+    contract = {
+        "contract_version": "listing_submit_reapply_v1",
+        "draft_id": "draft-1",
+        "required_fields": list(draft["submit_reapply_required_fields"]),
+        "save": {
+            "http_status": 200,
+            "success": True,
+            "request_draft_id": "draft-1",
+            "response_draft_id": "draft-1",
+        },
+        "fields": {
+            "delivery_service": {
+                "status": "submit_reapply_required",
+                "requested_ids": [365841],
+                "allowed_services": [
+                    {"id": 365841, "label": "送到楼下"},
+                    {"id": 4511641, "label": "市区物流点自提"},
+                ],
+                "pre_save_selected_ids": [365841],
+            },
+            "send_address": {
+                "status": "submit_reapply_required",
+                "pre_save_selected": True,
+                "expected_value": "35281125",
+                "requested_value": "35281125",
+            },
+            "logistics": {
+                "status": "submit_reapply_required",
+                "expected_values": {
+                    "length": "55",
+                    "width": "47",
+                    "height": "62.5",
+                    "weight": "15250",
+                },
+                "requested_values": {
+                    "length": "55",
+                    "width": "47",
+                    "height": "62.5",
+                    "weight": "15250",
+                },
+                "pre_save_values": {
+                    "length": "55",
+                    "width": "47",
+                    "height": "62.5",
+                    "weight": "15250",
+                },
+            },
+            "buyer_protection": {
+                "status": "submit_reapply_required",
+                "pre_save_selected": True,
+                "service_name": "24小时发货",
+                "service_code": "essxsfh",
+                "requested_steps": [
+                    {
+                        "from": 1,
+                        "serviceName": "24小时发货",
+                        "serviceCode": "essxsfh",
+                    }
+                ],
+                "available_services": [
+                    {"serviceName": "24小时发货", "serviceCode": "essxsfh"}
+                ],
+            },
+        },
+    }
+    draft["submit_reapply_evidence"] = contract
+    draft["submit_reapply_contract_sha256"] = canonical_sha256(contract)
+    return payload
 
 
 class ListingReviewContractTests(unittest.TestCase):
@@ -120,6 +207,39 @@ class ListingReviewContractTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(ListingContractError, "does not match"):
                 assert_execution_allowed(approved, "submit")
+
+    def test_nonpersistent_fields_require_complete_bound_reapply_contract(self) -> None:
+        payload = reapply_saved_payload()
+        contract = build_submit_reapply_contract(payload)
+        contract_hash = canonical_sha256(contract)
+        artifact = passed_artifact(payload)
+        for name in contract["required_fields"]:
+            artifact["field_outcomes"][name] = {
+                "status": "submit_reapply_required",
+                "contract_sha256": contract_hash,
+            }
+
+        binding = validate_independent_inspection(
+            payload,
+            artifact,
+            expected_cdp_port=9306,
+        )
+
+        self.assertEqual(binding["submit_reapply_contract_sha256"], contract_hash)
+        self.assertRegex(binding["field_outcomes_sha256"], r"^[0-9a-f]{64}$")
+
+    def test_delivery_reapply_rejects_service_outside_page_allowlist(self) -> None:
+        payload = reapply_saved_payload()
+        payload["workflow"]["draft"]["submit_reapply_evidence"]["fields"][
+            "delivery_service"
+        ]["requested_ids"] = [999999]
+        contract = payload["workflow"]["draft"]["submit_reapply_evidence"]
+        payload["workflow"]["draft"]["submit_reapply_contract_sha256"] = canonical_sha256(
+            contract
+        )
+
+        with self.assertRaisesRegex(ListingReviewError, "delivery_service evidence"):
+            build_submit_reapply_contract(payload)
 
     def test_draft_and_submit_have_distinct_stable_operation_keys(self) -> None:
         values = {

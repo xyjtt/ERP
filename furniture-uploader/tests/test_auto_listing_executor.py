@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -121,6 +122,26 @@ class AutoListingExecutorTests(unittest.TestCase):
         self.assertEqual(variant["width_cm"], "40")
         self.assertEqual(variant["height_cm"], "49")
         self.assertEqual(variant["weight_g"], "12500")
+
+    def test_release_variant_carries_reviewed_submit_reapply_contract(self) -> None:
+        payload = sample_payload()
+        payload["workflow"]["draft"] = {
+            "submit_reapply_required_fields": ["delivery_service"],
+            "submit_reapply_evidence": {"fields": {"delivery_service": {}}},
+            "submit_reapply_contract_sha256": "a" * 64,
+        }
+
+        variant = build_release_variant_payload(payload)
+
+        self.assertEqual(
+            variant["submit_reapply_required_fields"],
+            ["delivery_service"],
+        )
+        self.assertEqual(
+            variant["submit_reapply_evidence"],
+            {"fields": {"delivery_service": {}}},
+        )
+        self.assertEqual(variant["submit_reapply_contract_sha256"], "a" * 64)
 
     def test_publish_url_uses_bedside_table_category_id(self) -> None:
         payload = sample_payload()
@@ -468,6 +489,44 @@ class AutoListingExecutorTests(unittest.TestCase):
 
     def test_draft_reconciliation_requires_matching_success_and_read_only_inspection(self) -> None:
         payload = sample_payload()
+        reapply_contract = {
+            "contract_version": "listing_submit_reapply_v1",
+            "draft_id": "draft-1",
+            "required_fields": ["send_address", "buyer_protection"],
+            "save": {
+                "http_status": 200,
+                "success": True,
+                "request_draft_id": "draft-1",
+                "response_draft_id": "draft-1",
+            },
+            "fields": {
+                "send_address": {
+                    "status": "submit_reapply_required",
+                    "pre_save_selected": True,
+                    "expected_value": "35281125",
+                    "requested_value": "35281125",
+                },
+                "buyer_protection": {
+                    "status": "submit_reapply_required",
+                    "pre_save_selected": True,
+                    "service_name": "24小时发货",
+                    "service_code": "essxsfh",
+                    "requested_steps": [
+                        {
+                            "from": 1,
+                            "serviceName": "24小时发货",
+                            "serviceCode": "essxsfh",
+                        }
+                    ],
+                    "available_services": [
+                        {
+                            "serviceName": "24小时发货",
+                            "serviceCode": "essxsfh",
+                        }
+                    ],
+                },
+            },
+        }
         failure_payload = {
             "task_id": payload["task_id"],
             "error_type": "PublishValidationError",
@@ -480,6 +539,7 @@ class AutoListingExecutorTests(unittest.TestCase):
                     "responseJson": {"success": True, "data": {"draftId": "draft-1"}},
                 },
                 "draft_submit_reapply_required_fields": ["send_address", "buyer_protection"],
+                "draft_submit_reapply_evidence": reapply_contract,
             },
         }
         inspection_payload = {
@@ -505,6 +565,49 @@ class AutoListingExecutorTests(unittest.TestCase):
         self.assertEqual(evidence["draft_id"], "draft-1")
         self.assertEqual(evidence["repair_scope"], "full")
         self.assertFalse(evidence["post_save_verified"])
+        self.assertEqual(
+            evidence["submit_reapply_contract_sha256"],
+            hashlib.sha256(
+                json.dumps(
+                    reapply_contract,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest(),
+        )
+
+    def test_draft_reconciliation_rejects_reapply_fields_without_bound_evidence(self) -> None:
+        payload = sample_payload()
+        failure_payload = {
+            "task_id": payload["task_id"],
+            "error_type": "PublishValidationError",
+            "result_context": {
+                "current_url": "https://offer-new.1688.com/popular/publish.htm?draftId=draft-1",
+                "draft_submit_trace": {
+                    "status": 200,
+                    "url": "https://offer-new.1688.com/popular/draftSubmit.htm",
+                    "responseJson": {"success": True, "data": {"draftId": "draft-1"}},
+                },
+                "draft_submit_reapply_required_fields": ["send_address"],
+            },
+        }
+        inspection_payload = {
+            "status": "failed",
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+            "task_id": payload["task_id"],
+            "draft_id": "draft-1",
+            "checks": {"draft_id": True, "title": False},
+            "draft_saved": False,
+            "offer_submitted": False,
+        }
+
+        with self.assertRaisesRegex(ListingContractError, "contract_version"):
+            extract_draft_reconciliation_evidence(
+                payload,
+                failure_payload,
+                inspection_payload,
+            )
 
     def test_draft_reconciliation_rejects_mismatched_inspection_draft(self) -> None:
         payload = sample_payload()

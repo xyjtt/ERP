@@ -1,6 +1,6 @@
 # 1688 上架日度部署与 Canary 交接
 
-更新时间：2026-08-05
+更新时间：2026-08-06
 
 ## 1. 交付边界
 
@@ -13,6 +13,8 @@
 - 自动链路禁止：审批、submit、Offer writeback、创建第二个 CTG0286 草稿
 - 草稿身份门禁：payload 必须只包含一个既有 `draft_id`，且检查器命令行值必须与其一致；缺失、多值或不一致立即停止
 - 历史 `authorized_draft_rebuild_resumed` 不能授权生产新建草稿；没有现有 draft ID 的执行必须 fail closed
+- 独立检查版本：`listing_draft_inspection_v2`
+- 非持久字段重放契约：`listing_submit_reapply_v1`
 
 ## 2. 输入契约
 
@@ -57,8 +59,10 @@ Preview 会读取正式源和审计契约，但不会启动浏览器：
 1. 只保留一个已批准候选，确认 CTG0286 现有草稿 ID，不创建第二草稿。
 2. 执行一次 `-Action run -MaxItems 1`。该命令只调用 draft，不含 submit。
 3. 必须取得 `draft_saved_pending_review`、单商品 result、正式审计和 Saga 记录。
-4. 使用 `inspect_1688_saved_draft.py` 从商品管理真实行进入，核对草稿 ID、标题、4 张主图、详情图、规格、价格库存、物流、发货地址和 `24小时发货/essxsfh`。
+4. 使用 `inspect_1688_saved_draft.py` 从商品管理真实行进入，核对草稿 ID、标题、4 张主图、详情图、规格、价格库存、配送服务、物流、发货地址和 `24小时发货/essxsfh`。
 5. 独立复核未全部通过时，不审批、不提交、不重建草稿。
+
+检查器对每个字段输出 `persisted`、`submit_reapply_required` 或 `failed`。只有 `delivery_service/send_address/logistics/buyer_protection` 可在完整保存证据下标记为 `submit_reapply_required`；该状态不表示字段已持久化，而是表示提交前必须按已绑定契约重新应用并精确读回。其他字段必须为 `persisted`。
 
 ```powershell
 python -X utf8 .\scripts\inspect_1688_saved_draft.py `
@@ -75,7 +79,9 @@ python -X utf8 .\scripts\inspect_1688_saved_draft.py `
 
 日度管理器和计划任务永远不提交。只有独立复核 `status=passed`、审计状态一致、业务人工明确批准后，才可在单独受控命令中执行一次 `approve` 和一次 `submit`。提交前重新查询 Saga/Offer，已有 Offer 或 submit 成功证据时禁止再次点击。
 
-approve 和 submit 必须使用同一个独立复核 artifact。artifact 必须绑定 `draft_id/account_key/shop_name/CDP/inspector_build_sha/payload_contract_sha256` 且全部必检字段通过；submit 还要求审计中的 `post_save_verified=true`。任何字段漂移都必须重新只读复核，不能复用旧批准。
+approve 和 submit 必须使用同一个独立复核 artifact。artifact 必须绑定 `draft_id/account_key/shop_name/CDP/inspector_build_sha/payload_contract_sha256/field_outcomes_sha256/submit_reapply_contract_sha256` 且全部必检字段通过；submit 还要求审计中的 `post_save_verified=true`。任何字段漂移都必须重新只读复核，不能复用旧批准。
+
+submit 点击前必须重新应用契约内全部非持久字段，并从当前 React 状态逐项精确读回。配送 ID 必须仍属于当前页面允许集合，买家保障必须为 `24小时发货/essxsfh`，页面不得存在任何必填提示。任一条件失败时禁止点击，不得用旧 artifact 或旧页面状态继续。
 
 ## 7. 安装计划任务
 
@@ -96,7 +102,7 @@ approve 和 submit 必须使用同一个独立复核 artifact。artifact 必须�
 
 ## 8. 风险与未验证项
 
-- 本提交未连接生产、数据库、执行机或真实浏览器。
+- 当前重放契约修改只完成开发机验证；尚未部署到执行机，也未对唯一草稿执行新的真实保存、v2 独立检查或 submit。
 - CTG0286 历史草稿 ID 曾变化，必须以候选 payload、正式审计和商品管理行三方一致为准。
 - 正式 Profile 仍可能遇到 `SYS_ERROR`、登录风控或滑块；这些必须 fail closed，不能绕过。
 - 图片探针会向素材库上传图片但不会保存草稿，仍需在租约内受控执行。

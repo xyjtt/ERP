@@ -1,5 +1,12 @@
 # DIRECT 1688 Progress
 
+## 2026-08-06 Managed Update (Submit Reapply Gate Ready)
+
+- 已完成非持久字段的证据化收口：配送服务、发货地址、物流尺寸重量和买家保障在草稿刷新后缺失时，不再要求重复保存，也不直接判“已持久化”；它们只能在完整 `listing_submit_reapply_v1` 证据下进入 `submit_reapply_required`。
+- 独立检查产物升级为 `listing_draft_inspection_v2`，审批绑定字段结果和重放契约哈希；提交前执行四字段重新应用、页面允许值校验、React 精确读回和必填提示扫描。任一项不一致即 fail closed，不点击 submit。
+- 正常 draft 路径和 reconciliation 路径共用同一契约验证，已增加 workflow -> ReleaseVariant -> browser context 桥接回归，避免审批后浏览器丢失重放证据。
+- 本地验证为 `665 tests OK`，doctor、compileall、JSON 配置和差异检查通过。当前阶段仍是“代码可部署”，不是“真实上架已通过”；下一步是提交推送、不可变部署、只修同一草稿一次、独立 v2 检查，然后才允许 approve 和单次 submit。
+
 ## 2026-08-05 Managed Update (Native Draft Payload Fix Ready for Deployment)
 
 - 已从执行机唯一草稿的真实 `SellPublishSdk` 组件状态确认此前保存失败不是 selector 缺失，而是请求补丁覆盖了平台原生契约：过期配送 ID、错误的保障服务字段/可选组、未同步的 freight 地址，以及被强制改写的 edit 参数。

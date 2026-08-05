@@ -1,5 +1,12 @@
 # Project Evolution
 
+## 2026-08-06 - Draft Acceptance Separated Persistence From Submit Replay
+
+- 草稿验收从“所有字段必须刷新后持久化”演进为“逐字段区分持久化与受控 submit 重放”。只有平台已证明会丢失的四个字段可进入重放，其余字段继续要求真实持久化。
+- 重放不依赖配置猜测：契约绑定同一草稿的成功保存响应、保存请求值、保存前 React 状态和当前页面允许值，并以 SHA-256 同时绑定 workflow、独立检查、审批和 submit。
+- 独立检查从布尔 checks 升级为 `listing_draft_inspection_v2` 字段结果；缺失字段只有 `persisted/submit_reapply_required/failed` 三种状态，不能用数字零、空值或通过标记掩盖失败。
+- submit 从“重新填必填项后继续”收紧为“按已审核契约逐项重放、React 精确读回、再次扫描必填提示后才允许点击”。这允许处理平台不持久化行为，同时不降低一次提交的审计门槛。
+
 ## 2026-08-05 - Draft Patching Became Native-Contract Aware
 
 - 草稿修复从“按配置强制覆盖字段”演进为“先读取当前页面组件契约，再只写页面允许的数据”。配送服务只采用 `serviceTemplates` 中的 ID，运行态选择优先，过期默认 ID 不再进入请求。

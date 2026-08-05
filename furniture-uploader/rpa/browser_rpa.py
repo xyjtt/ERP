@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import html
 import json
 import math
@@ -6350,6 +6351,25 @@ class BrowserRPA:
                 required_labels = self._extract_required_labels_from_assist_messages(assist_messages)
                 if required_labels:
                     context["draft_required_field_labels"] = required_labels
+            applied_delivery_ids = self._normalize_positive_integer_list(
+                result.get("deliveryServiceApplied") or []
+            )
+            allowed_delivery_ids = self._normalize_positive_integer_list(
+                result.get("deliveryServiceAllowed") or []
+            )
+            if applied_delivery_ids:
+                delivery_state = {
+                    "exists": True,
+                    "selected": True,
+                    "selectedServiceIds": applied_delivery_ids,
+                    "selectedLabels": [],
+                    "allowedServiceIds": allowed_delivery_ids,
+                    "allowedServices": [
+                        {"id": item, "label": ""} for item in allowed_delivery_ids
+                    ],
+                }
+                context["draft_delivery_service_state"] = delivery_state
+                context["draft_delivery_service_state_pre_save"] = dict(delivery_state)
         self._pause(0.2)
 
     def _install_draft_request_patch(
@@ -6904,6 +6924,21 @@ class BrowserRPA:
                     (Array.isArray(template && template.data) ? template.data : []).map((item) => item && item.id)
                   )
                 );
+                const allowedDeliveryServices = [];
+                const allowedDeliverySeen = new Set();
+                deliveryTemplates.forEach((template) => {
+                  (Array.isArray(template && template.data) ? template.data : []).forEach((item) => {
+                    const id = normalizeServiceIds([item && item.id])[0];
+                    if (!id || allowedDeliverySeen.has(id)) return;
+                    allowedDeliverySeen.add(id);
+                    allowedDeliveryServices.push({
+                      id,
+                      label: String(
+                        (item && (item.name || item.serviceName || item.text || item.title || item.label)) || ''
+                      ).replace(/\\s+/g, ' ').trim(),
+                    });
+                  });
+                });
                 const stateCustomServices = normalizeServiceIds(
                   Array.isArray(customExtraValue.customServices) ? customExtraValue.customServices : []
                 );
@@ -6941,6 +6976,7 @@ class BrowserRPA:
                 return {
                   deliveryServiceIds: selectedId == null ? [] : [selectedId],
                   allowedDeliveryServiceIds: allowedDeliveryIds,
+                  allowedDeliveryServices,
                   deliveryServiceLabels: checkedLabels,
                 };
               };
@@ -7451,6 +7487,7 @@ class BrowserRPA:
                 logisticsDimensions,
                 deliveryServiceIds: deliveryServiceState.deliveryServiceIds,
                 allowedDeliveryServiceIds: deliveryServiceState.allowedDeliveryServiceIds,
+                allowedDeliveryServices: deliveryServiceState.allowedDeliveryServices,
                 deliveryServiceLabels: deliveryServiceState.deliveryServiceLabels,
                 availableBuyerServices: availableBuyerServices.map((item) => ({
                   serviceName: String(item.serviceName || ''),
@@ -8668,6 +8705,20 @@ class BrowserRPA:
 
         result.sort(key=lambda item: int(item.get("from", 0) or 0))
         return result
+
+    def _normalize_positive_integer_list(self, values: Any) -> list[int]:
+        normalized: list[int] = []
+        seen: set[int] = set()
+        for raw in list(values or []):
+            try:
+                value = int(str(raw).strip())
+            except (TypeError, ValueError):
+                continue
+            if value <= 0 or value in seen:
+                continue
+            seen.add(value)
+            normalized.append(value)
+        return normalized
 
     def _resolve_delivery_service_ids(
         self,
@@ -10250,9 +10301,103 @@ class BrowserRPA:
         if normalized_selected_value:
             context["send_address_id"] = normalized_selected_value
 
+    def _draft_delivery_service_state(self) -> dict[str, Any]:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        payload = self.driver.execute_script(
+            """
+            const sdk = window.SellPublishSdk;
+            const state = sdk && sdk.engine && sdk.engine.getJsonState ? sdk.engine.getJsonState() : {};
+            const components = (state || {}).components || {};
+            const props = ((components.customExtraService || {}).props) || {};
+            const value = props.value || {};
+            const normalizeText = (raw) => String(raw || '').replace(/\\s+/g, ' ').trim();
+            const compact = (raw) => normalizeText(raw).replace(/\\s+/g, '');
+            const normalizeIds = (values) => {
+              const result = [];
+              const seen = new Set();
+              (Array.isArray(values) ? values : [values]).flat(Infinity).forEach((raw) => {
+                const text = String(raw == null ? '' : raw).trim();
+                if (!/^\\d+$/.test(text)) return;
+                const value = Number(text);
+                if (!Number.isSafeInteger(value) || value <= 0 || seen.has(value)) return;
+                seen.add(value);
+                result.push(value);
+              });
+              return result;
+            };
+            const templates = (Array.isArray(props.serviceTemplates) ? props.serviceTemplates : [])
+              .filter((item) => compact(item && (item.name || item.serviceName)).includes('配送'));
+            const allowedServices = [];
+            const allowedSeen = new Set();
+            templates.forEach((template) => {
+              (Array.isArray(template && template.data) ? template.data : []).forEach((item) => {
+                const ids = normalizeIds([item && item.id]);
+                if (!ids.length || allowedSeen.has(ids[0])) return;
+                allowedSeen.add(ids[0]);
+                allowedServices.push({
+                  id: ids[0],
+                  label: normalizeText(
+                    item && (item.name || item.serviceName || item.text || item.title || item.label)
+                  ),
+                });
+              });
+            });
+            const allowedIds = allowedServices.map((item) => item.id);
+            const viewModelMap = value && typeof value.viewModelMap === 'object'
+              ? value.viewModelMap
+              : {};
+            const mapValues = Object.keys(viewModelMap)
+              .filter((key) => compact(key).includes('配送'))
+              .map((key) => viewModelMap[key]);
+            const stateIds = normalizeIds(
+              (Array.isArray(value.customServices) ? value.customServices : []).concat(mapValues)
+            ).filter((id) => allowedIds.includes(id));
+            const checkedLabels = Array.from(
+              document.querySelectorAll(
+                '#guid-customExtraService input.ant-checkbox-input[type="checkbox"]:checked'
+              )
+            ).map((input) => {
+              const label = input.closest('label');
+              const node = label && label.querySelector('span:last-child');
+              return normalizeText(node && (node.innerText || node.textContent));
+            }).filter(Boolean);
+            checkedLabels.forEach((label) => {
+              const match = allowedServices.find((item) => compact(item.label) === compact(label));
+              if (match && !stateIds.includes(match.id)) stateIds.push(match.id);
+            });
+            const selectedLabels = allowedServices
+              .filter((item) => stateIds.includes(item.id))
+              .map((item) => item.label)
+              .filter(Boolean);
+            return {
+              exists: Boolean(document.querySelector('#guid-customExtraService') || components.customExtraService),
+              selected: stateIds.length > 0,
+              selectedServiceIds: stateIds,
+              selectedLabels,
+              checkedLabels,
+              allowedServices,
+              allowedServiceIds: allowedIds,
+            };
+            """
+        )
+        return payload if isinstance(payload, dict) else {
+            "exists": False,
+            "selected": False,
+            "selectedServiceIds": [],
+            "selectedLabels": [],
+            "allowedServices": [],
+            "allowedServiceIds": [],
+        }
+
     def _ensure_draft_required_delivery_service(self, context: dict[str, Any]) -> None:
         if not self.driver:
             raise RuntimeError("Browser has not been opened.")
+        observed = self._draft_delivery_service_state()
+        if observed.get("selected"):
+            context["draft_delivery_service_state"] = observed
+            context["draft_delivery_service_state_pre_save"] = dict(observed)
+            return
         result: dict[str, Any] | None = None
         for _ in range(3):
             state = self.driver.execute_script(
@@ -10398,10 +10543,15 @@ class BrowserRPA:
                 """
             )
             result = state if isinstance(state, dict) else {"exists": False, "selected": False}
-            if bool(result.get("selected")):
+            observed = self._draft_delivery_service_state()
+            if bool(observed.get("selected")):
+                result = {**result, **observed}
                 break
             self._pause(0.6)
         context["draft_delivery_service_state"] = result if isinstance(result, dict) else {"exists": False}
+        context["draft_delivery_service_state_pre_save"] = dict(
+            context["draft_delivery_service_state"]
+        )
 
     def _ensure_draft_logistics_dimensions_before_save(
         self,
@@ -10419,9 +10569,13 @@ class BrowserRPA:
                 target_step = step
                 break
         if not target_step:
-            return
+            verification = publish_config.get("draft_verification", {})
+            if not verification.get("require_logistics_dimensions", False):
+                return
+            target_step = {"name": "logistics_dimensions", "action": "logistics_dimensions"}
         filled = self._fill_logistics_dimensions(target_step, context)
         context["draft_logistics_pre_save_filled"] = filled
+        context["draft_logistics_pre_save_values"] = self._draft_logistics_dimension_values()
 
     def _resolve_buyer_protection_ship_time_for_draft(
         self,
@@ -10548,6 +10702,40 @@ class BrowserRPA:
         publish_config: dict[str, Any],
         context: dict[str, Any],
     ) -> None:
+        required_reapply_fields = [
+            str(item or "").strip()
+            for item in list(context.get("submit_reapply_required_fields") or [])
+            if str(item or "").strip()
+        ]
+        reapply_contract = context.get("submit_reapply_evidence") or {}
+        reapply_fields = (
+            dict(reapply_contract.get("fields") or {})
+            if isinstance(reapply_contract, dict)
+            else {}
+        )
+        if required_reapply_fields:
+            expected_contract_hash = str(
+                context.get("submit_reapply_contract_sha256") or ""
+            ).strip().lower()
+            rendered_contract = json.dumps(
+                reapply_contract,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
+            actual_contract_hash = hashlib.sha256(
+                rendered_contract.encode("utf-8")
+            ).hexdigest()
+            if (
+                not expected_contract_hash
+                or expected_contract_hash != actual_contract_hash
+                or set(required_reapply_fields) != set(reapply_fields)
+            ):
+                raise PublishValidationError(
+                    "submit blocked: nonpersistent field replay contract is missing or stale."
+                )
+
         self._ensure_draft_send_address_selected(context)
         self._ensure_draft_required_delivery_service(context)
         self._apply_draft_page_state_patch(publish_config, context)
@@ -10556,8 +10744,13 @@ class BrowserRPA:
         self._ensure_buyer_protection_ship_time_before_draft_save(publish_config, context)
 
         verification = publish_config.get("draft_verification", {})
+        reapply_results: dict[str, Any] = {}
         actual_send_address = self._draft_selected_send_address()
-        expected_send_address = str(context.get("send_address_id", "")).strip()
+        send_address_evidence = dict(reapply_fields.get("send_address") or {})
+        expected_send_address = str(
+            send_address_evidence.get("expected_value")
+            or context.get("send_address_id", "")
+        ).strip()
         context["submit_send_address_value"] = actual_send_address
         if verification.get("require_send_address", False) and not actual_send_address:
             raise PublishValidationError("submit blocked: send address is empty after required-field reapply.")
@@ -10570,13 +10763,98 @@ class BrowserRPA:
             raise PublishValidationError(
                 "submit blocked: send address does not match the address selected for this submission."
             )
+        if "send_address" in required_reapply_fields:
+            if actual_send_address != expected_send_address:
+                raise PublishValidationError(
+                    "submit blocked: send address replay did not match the reviewed contract."
+                )
+            reapply_results["send_address"] = {
+                "status": "reapplied_and_read_back",
+                "actual_value": actual_send_address,
+            }
 
-        expected_buyer_protection = self._resolve_buyer_protection_ship_time_for_draft(
-            publish_config,
-            context,
+        delivery_state = self._draft_delivery_service_state()
+        context["submit_delivery_service_state"] = delivery_state
+        actual_delivery_ids = self._normalize_positive_integer_list(
+            delivery_state.get("selectedServiceIds") or []
         )
+        allowed_delivery_ids = self._normalize_positive_integer_list(
+            delivery_state.get("allowedServiceIds") or []
+        )
+        delivery_evidence = dict(reapply_fields.get("delivery_service") or {})
+        expected_delivery_ids = self._normalize_positive_integer_list(
+            delivery_evidence.get("requested_ids") or []
+        )
+        if verification.get("require_delivery_service", False) and not actual_delivery_ids:
+            raise PublishValidationError(
+                "submit blocked: delivery service is empty after required-field reapply."
+            )
+        if actual_delivery_ids and (
+            not allowed_delivery_ids
+            or not set(actual_delivery_ids).issubset(set(allowed_delivery_ids))
+        ):
+            raise PublishValidationError(
+                "submit blocked: delivery service is not allowed by the current page."
+            )
+        if "delivery_service" in required_reapply_fields:
+            if (
+                not expected_delivery_ids
+                or set(actual_delivery_ids) != set(expected_delivery_ids)
+                or not set(expected_delivery_ids).issubset(set(allowed_delivery_ids))
+            ):
+                raise PublishValidationError(
+                    "submit blocked: delivery service replay did not match the reviewed contract."
+                )
+            reapply_results["delivery_service"] = {
+                "status": "reapplied_and_read_back",
+                "actual_ids": actual_delivery_ids,
+                "allowed_ids": allowed_delivery_ids,
+            }
+
+        actual_logistics = self._draft_logistics_dimension_values()
+        context["submit_logistics_dimensions"] = actual_logistics
+        logistics_evidence = dict(reapply_fields.get("logistics") or {})
+        expected_logistics = dict(logistics_evidence.get("expected_values") or {})
+        if not expected_logistics:
+            expected_logistics = {
+                "length": self._normalize_dimension_value(str(context.get("length_cm", "")).strip()),
+                "width": self._normalize_dimension_value(str(context.get("width_cm", "")).strip()),
+                "height": self._normalize_dimension_value(str(context.get("height_cm", "")).strip()),
+                "weight": self._normalize_weight_value(str(context.get("weight_g", "")).strip()),
+            }
+        logistics_mismatches = []
+        for name, expected in expected_logistics.items():
+            if not str(expected or "").strip():
+                continue
+            normalizer = self._normalize_weight_value if name == "weight" else self._normalize_dimension_value
+            if normalizer(str(actual_logistics.get(name, "")).strip()) != normalizer(str(expected)):
+                logistics_mismatches.append(name)
+        if verification.get("require_logistics_dimensions", False) and logistics_mismatches:
+            raise PublishValidationError(
+                "submit blocked: logistics replay/readback mismatch -> "
+                + ",".join(logistics_mismatches)
+            )
+        if "logistics" in required_reapply_fields:
+            if logistics_mismatches or set(expected_logistics) != {"length", "width", "height", "weight"}:
+                raise PublishValidationError(
+                    "submit blocked: logistics replay did not match the reviewed contract."
+                )
+            reapply_results["logistics"] = {
+                "status": "reapplied_and_read_back",
+                "actual_values": actual_logistics,
+            }
+
+        buyer_evidence = dict(reapply_fields.get("buyer_protection") or {})
+        expected_buyer_protection = str(
+            buyer_evidence.get("service_name")
+            or self._resolve_buyer_protection_ship_time_for_draft(
+                publish_config,
+                context,
+            )
+        ).strip()
         expected_buyer_protection_code = str(
-            verification.get("buyer_protection_expected_code", "")
+            buyer_evidence.get("service_code")
+            or verification.get("buyer_protection_expected_code", "")
             or context.get("buyer_protection_ship_time_code", "")
         ).strip()
         actual_buyer_protection = self._draft_selected_buyer_protection()
@@ -10599,6 +10877,13 @@ class BrowserRPA:
                     "submit blocked: buyer protection must be reapplied and read back as "
                     f"'{expected_buyer_protection}/{expected_buyer_protection_code}'."
                 )
+        if "buyer_protection" in required_reapply_fields:
+            reapply_results["buyer_protection"] = {
+                "status": "reapplied_and_read_back",
+                "service_name": actual_buyer_protection,
+                "service_code": expected_buyer_protection_code,
+                "schedule": actual_schedule,
+            }
 
         assist_messages = self._collect_assist_messages()
         context["submit_assist_messages"] = assist_messages
@@ -10620,6 +10905,11 @@ class BrowserRPA:
             raise PublishValidationError(
                 "submit blocked by required-field warnings: " + " | ".join(blocking_messages)
             )
+        if set(reapply_results) != set(required_reapply_fields):
+            raise PublishValidationError(
+                "submit blocked: not every reviewed nonpersistent field was reapplied."
+            )
+        context["submit_reapply_results"] = reapply_results
         context["submit_required_fields_verified"] = True
 
     def _save_draft_once(self, publish_config: dict[str, Any], context: dict[str, Any]) -> None:
@@ -10871,11 +11161,12 @@ class BrowserRPA:
         context: dict[str, Any],
         trace_patch_snapshot: dict[str, Any],
     ) -> list[str]:
-        allowed_fields = {
+        configured_fields = [
             str(item).strip()
             for item in publish_config.get("submit_reapply_nonpersistent_fields", [])
             if str(item).strip()
-        }
+        ]
+        allowed_fields = set(configured_fields)
         trace = context.get("draft_submit_trace") or {}
         response_json = trace.get("responseJson") if isinstance(trace, dict) else None
         try:
@@ -10886,14 +11177,25 @@ class BrowserRPA:
             )
         except (TypeError, ValueError):
             response_status = 0
+        response_draft_id = str(context.get("draft_submit_response_draft_id", "")).strip()
+        expected_draft_id = str(publish_config.get("expected_draft_id", "")).strip()
+        identity_evidence = context.get("draft_submit_identity_evidence") or {}
+        request_draft_id = str(
+            ((identity_evidence.get("effective") or {}).get("draftId") or "")
+            if isinstance(identity_evidence, dict)
+            else ""
+        ).strip()
         response_succeeded = (
             200 <= response_status < 300
             and isinstance(response_json, dict)
             and response_json.get("success") is True
+            and bool(response_draft_id)
+            and response_draft_id == expected_draft_id
+            and request_draft_id == expected_draft_id
         )
 
         required_fields: list[str] = []
-        evidence: dict[str, Any] = {}
+        fields: dict[str, Any] = {}
         actual_send_address = str(context.get("draft_send_address_value", "")).strip()
         expected_send_address = str(context.get("send_address_id", "")).strip()
         trace_send_address = str(trace_patch_snapshot.get("sendAddressId", "")).strip()
@@ -10912,13 +11214,119 @@ class BrowserRPA:
             and trace_send_address == expected_send_address
         ):
             required_fields.append("send_address")
-            evidence["send_address"] = {
-                "save_response_succeeded": True,
-                "ui_selected_before_save": True,
+            fields["send_address"] = {
+                "status": "submit_reapply_required",
+                "pre_save_selected": True,
+                "expected_value": expected_send_address,
                 "requested_value": trace_send_address,
             }
 
+        persisted_delivery_state = context.get("draft_delivery_service_state_persisted") or {}
+        pre_save_delivery_state = context.get("draft_delivery_service_state_pre_save") or {}
+        persisted_delivery_ids = self._normalize_positive_integer_list(
+            (persisted_delivery_state.get("selectedServiceIds") or [])
+            if isinstance(persisted_delivery_state, dict)
+            else []
+        )
+        pre_save_delivery_ids = self._normalize_positive_integer_list(
+            (pre_save_delivery_state.get("selectedServiceIds") or [])
+            if isinstance(pre_save_delivery_state, dict)
+            else []
+        )
+        requested_delivery_ids = self._normalize_positive_integer_list(
+            trace_patch_snapshot.get("deliveryServiceIds") or []
+        )
+        allowed_delivery_services = [
+            {
+                "id": int(item.get("id")),
+                "label": str(item.get("label", "")).strip(),
+            }
+            for item in list(trace_patch_snapshot.get("allowedDeliveryServices", []) or [])
+            if isinstance(item, dict)
+            and str(item.get("id", "")).strip().isdigit()
+            and int(item.get("id")) > 0
+        ]
+        allowed_delivery_ids = self._normalize_positive_integer_list(
+            [item.get("id") for item in allowed_delivery_services]
+            or trace_patch_snapshot.get("allowedDeliveryServiceIds")
+            or []
+        )
+        if not allowed_delivery_services:
+            allowed_delivery_services = [
+                {"id": item, "label": ""} for item in allowed_delivery_ids
+            ]
+        if (
+            "delivery_service" in allowed_fields
+            and not persisted_delivery_ids
+            and response_succeeded
+            and requested_delivery_ids
+            and set(requested_delivery_ids).issubset(set(allowed_delivery_ids))
+            and set(requested_delivery_ids).issubset(set(pre_save_delivery_ids))
+        ):
+            required_fields.append("delivery_service")
+            fields["delivery_service"] = {
+                "status": "submit_reapply_required",
+                "requested_ids": requested_delivery_ids,
+                "allowed_services": allowed_delivery_services,
+                "pre_save_selected_ids": pre_save_delivery_ids,
+                "pre_save_selected_labels": list(
+                    pre_save_delivery_state.get("selectedLabels", []) or []
+                ),
+            }
+
         verification = publish_config.get("draft_verification", {})
+        actual_logistics = dict(context.get("draft_logistics_dimensions", {}) or {})
+        trace_logistics = {
+            name: str(value or "").strip()
+            for name, value in dict(trace_patch_snapshot.get("logisticsDimensions", {}) or {}).items()
+            if name in {"length", "width", "height", "weight"}
+        }
+        pre_save_logistics = {
+            name: str(value or "").strip()
+            for name, value in dict(context.get("draft_logistics_pre_save_values", {}) or {}).items()
+            if name in {"length", "width", "height", "weight"}
+        }
+        expected_logistics = {
+            "length": self._normalize_dimension_value(str(context.get("length_cm", "")).strip()),
+            "width": self._normalize_dimension_value(str(context.get("width_cm", "")).strip()),
+            "height": self._normalize_dimension_value(str(context.get("height_cm", "")).strip()),
+            "weight": self._normalize_weight_value(str(context.get("weight_g", "")).strip()),
+        }
+        normalized_pre_save_logistics = {
+            name: (
+                self._normalize_weight_value(pre_save_logistics.get(name, ""))
+                if name == "weight"
+                else self._normalize_dimension_value(pre_save_logistics.get(name, ""))
+            )
+            for name in expected_logistics
+        }
+        normalized_trace_logistics = {
+            name: (
+                self._normalize_weight_value(trace_logistics.get(name, ""))
+                if name == "weight"
+                else self._normalize_dimension_value(trace_logistics.get(name, ""))
+            )
+            for name in expected_logistics
+        }
+        actual_logistics_present = any(
+            str(actual_logistics.get(name, "")).strip() for name in expected_logistics
+        )
+        if (
+            "logistics" in allowed_fields
+            and not actual_logistics_present
+            and response_succeeded
+            and all(expected_logistics.values())
+            and normalized_trace_logistics == expected_logistics
+            and normalized_pre_save_logistics == expected_logistics
+        ):
+            required_fields.append("logistics")
+            fields["logistics"] = {
+                "status": "submit_reapply_required",
+                "expected_values": expected_logistics,
+                "requested_values": normalized_trace_logistics,
+                "pre_save_values": normalized_pre_save_logistics,
+            }
+
         expected_buyer_protection = self._resolve_context_preferred_value(
             context=context,
             source=str(verification.get("buyer_protection_source", "")).strip(),
@@ -10939,14 +11347,25 @@ class BrowserRPA:
             for item in list(trace_patch_snapshot.get("buyerProtectionSteps", []) or [])
             if isinstance(item, dict)
         ]
+        trace_buyer_service_name = str(
+            trace_patch_snapshot.get("buyerProtectionServiceName", "")
+        ).strip()
+        trace_buyer_service_code = str(
+            trace_patch_snapshot.get("buyerProtectionServiceCode", "")
+        ).strip()
         matching_trace_steps = [
             item
             for item in trace_buyer_steps
             if int(item.get("from", 0) or 0) == 1
-            and str(item.get("serviceName", "")).strip() == expected_buyer_protection
+            and str(item.get("serviceName") or trace_buyer_service_name).strip()
+            == expected_buyer_protection
             and (
                 not expected_buyer_protection_code
-                or str(item.get("value", item.get("serviceCode", ""))).strip()
+                or str(
+                    item.get("value")
+                    or item.get("serviceCode")
+                    or trace_buyer_service_code
+                ).strip()
                 == expected_buyer_protection_code
             )
         ]
@@ -10960,15 +11379,52 @@ class BrowserRPA:
             and matching_trace_steps
         ):
             required_fields.append("buyer_protection")
-            evidence["buyer_protection"] = {
-                "save_response_succeeded": True,
-                "ui_selected_before_save": True,
-                "requested_service_name": expected_buyer_protection,
-                "requested_service_code": str(
+            fields["buyer_protection"] = {
+                "status": "submit_reapply_required",
+                "pre_save_selected": True,
+                "service_name": expected_buyer_protection,
+                "service_code": str(
                     matching_trace_steps[0].get("value", matching_trace_steps[0].get("serviceCode", ""))
                 ).strip(),
+                "requested_steps": [
+                    {
+                        "from": int(item.get("from", 0) or 0),
+                        "serviceName": str(
+                            item.get("serviceName") or trace_buyer_service_name
+                        ).strip(),
+                        "serviceCode": str(
+                            item.get("value")
+                            or item.get("serviceCode")
+                            or trace_buyer_service_code
+                        ).strip(),
+                    }
+                    for item in matching_trace_steps
+                ],
+                "available_services": [
+                    {
+                        "serviceName": str(item.get("serviceName", "")).strip(),
+                        "serviceCode": str(item.get("serviceCode", "")).strip(),
+                    }
+                    for item in list(trace_patch_snapshot.get("availableBuyerServices", []) or [])
+                    if isinstance(item, dict)
+                ],
             }
 
+        required_fields = [name for name in configured_fields if name in required_fields]
+        evidence: dict[str, Any] = {}
+        if required_fields:
+            evidence = {
+                "contract_version": "listing_submit_reapply_v1",
+                "draft_id": expected_draft_id,
+                "required_fields": required_fields,
+                "save": {
+                    "http_status": response_status,
+                    "success": response_succeeded,
+                    "request_draft_id": request_draft_id,
+                    "response_draft_id": response_draft_id,
+                },
+                "fields": {name: fields[name] for name in required_fields},
+            }
         context["draft_submit_reapply_required_fields"] = required_fields
         context["draft_submit_reapply_evidence"] = evidence
         return required_fields
@@ -11144,6 +11600,7 @@ class BrowserRPA:
         context["draft_description_image_count"] = self._draft_description_image_count()
         context["draft_spec_values"] = self._collect_spec_values()
         context["draft_send_address_value"] = self._draft_selected_send_address()
+        context["draft_delivery_service_state_persisted"] = self._draft_delivery_service_state()
         context["draft_logistics_dimensions"] = self._draft_logistics_dimension_values()
         context["draft_buyer_protection_value"] = self._draft_selected_buyer_protection()
         context["draft_buyer_protection_schedule"] = self._draft_selected_buyer_protection_schedule()
@@ -11199,6 +11656,9 @@ class BrowserRPA:
                 context["draft_description_image_count"] = self._draft_description_image_count()
                 context["draft_spec_values"] = self._collect_spec_values()
                 context["draft_send_address_value"] = self._draft_selected_send_address()
+                context["draft_delivery_service_state_persisted"] = (
+                    self._draft_delivery_service_state()
+                )
                 context["draft_logistics_dimensions"] = self._draft_logistics_dimension_values()
                 context["draft_buyer_protection_value"] = self._draft_selected_buyer_protection()
                 context["draft_buyer_protection_schedule"] = self._draft_selected_buyer_protection_schedule()
@@ -11299,17 +11759,26 @@ class BrowserRPA:
                 ]
         nonpersistent_assist_messages_ignored: list[str] = []
         if "buyer_protection" in submit_reapply_required_fields:
-            nonpersistent_assist_messages_ignored = [
+            nonpersistent_assist_messages_ignored.extend(
+                [
                 message
                 for message in effective_assist_messages
                 if "\u53d1\u8d27\u65f6\u95f4" in message and "\u5fc5\u586b" in message
-            ]
-            if nonpersistent_assist_messages_ignored:
-                effective_assist_messages = [
+                ]
+            )
+        if "delivery_service" in submit_reapply_required_fields:
+            nonpersistent_assist_messages_ignored.extend(
+                [
                     message
                     for message in effective_assist_messages
-                    if message not in nonpersistent_assist_messages_ignored
+                    if "\u914d\u9001\u670d\u52a1" in message and "\u5fc5\u586b" in message
                 ]
+            )
+        if nonpersistent_assist_messages_ignored:
+            ignored = set(nonpersistent_assist_messages_ignored)
+            effective_assist_messages = [
+                message for message in effective_assist_messages if message not in ignored
+            ]
         context["draft_stale_assist_messages_ignored"] = stale_assist_messages_ignored
         context["draft_nonpersistent_assist_messages_ignored"] = nonpersistent_assist_messages_ignored
         context["draft_assist_messages_effective"] = effective_assist_messages
@@ -11341,6 +11810,33 @@ class BrowserRPA:
             for label in required_spec_labels:
                 if not str(context["draft_spec_values"].get(label, "")).strip():
                     raise PublishValidationError(f"draft_verify blocked: spec '{label}' is empty after save.")
+
+        if verification.get("require_delivery_service", False):
+            delivery_state = dict(
+                context.get("draft_delivery_service_state_persisted", {}) or {}
+            )
+            selected_delivery_ids = self._normalize_positive_integer_list(
+                delivery_state.get("selectedServiceIds") or []
+            )
+            allowed_delivery_ids = self._normalize_positive_integer_list(
+                delivery_state.get("allowedServiceIds") or []
+            )
+            if selected_delivery_ids and (
+                not allowed_delivery_ids
+                or not set(selected_delivery_ids).issubset(set(allowed_delivery_ids))
+            ):
+                raise PublishValidationError(
+                    "draft_verify blocked: persisted delivery service is not allowed by the page."
+                )
+            if (
+                not selected_delivery_ids
+                and "delivery_service" not in submit_reapply_required_fields
+            ):
+                raise PublishValidationError(
+                    "draft_verify blocked: delivery service did not persist after save."
+                )
+            if not selected_delivery_ids:
+                context["draft_delivery_service_source"] = "submit_reapply_required"
 
         if verification.get("require_send_address", False):
             strict_send_address_persist = bool(verification.get("strict_send_address_persist", False))
@@ -11410,11 +11906,14 @@ class BrowserRPA:
                 for name, expected in required_fields
                 if expected and not str(dimension_map.get(name, "")).strip()
             ]
-            if missing_fields:
+            logistics_reapply_required = "logistics" in submit_reapply_required_fields
+            if missing_fields and not logistics_reapply_required:
                 raise PublishValidationError(
                     "draft_verify blocked: logistics dimensions missing after save -> "
                     + ",".join(missing_fields)
                 )
+            if missing_fields:
+                context["draft_logistics_dimensions_source"] = "submit_reapply_required"
             mismatched_fields = []
             for name, expected in required_fields:
                 if not expected:
@@ -11422,7 +11921,7 @@ class BrowserRPA:
                 normalizer = self._normalize_weight_value if name == "weight" else self._normalize_dimension_value
                 if normalizer(str(dimension_map.get(name, "")).strip()) != normalizer(expected):
                     mismatched_fields.append(name)
-            if mismatched_fields:
+            if mismatched_fields and not logistics_reapply_required:
                 raise PublishValidationError(
                     "draft_verify blocked: logistics dimensions changed after save -> "
                     + ",".join(mismatched_fields)

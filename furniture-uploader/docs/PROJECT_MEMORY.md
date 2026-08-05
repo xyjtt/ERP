@@ -1,5 +1,13 @@
 # Project Memory
 
+## 2026-08-06 Managed Update (Bound Submit Reapply Contract)
+
+- CTG0286 仍只允许草稿 `6a69bee6e4b01cad1b297a52`，账号 `muke_lixiang`，店铺 `木刻理想`。截至部署前最后一次生产只读快照，workflow 为 `draft_pending`、approval 为 `pending`、最新 Saga 为 `failed_terminal`，没有 submit、Offer 或业务回写。
+- 真实页面已证明 `delivery_service/send_address/logistics/buyer_protection` 可能在成功保存后不出现在刷新后的 React 状态。它们不再被伪装成“已持久化”；只有同一草稿的 HTTP 2xx、`success=true`、保存请求值、保存前 React 值和页面允许值全部一致时，才记录 `listing_submit_reapply_v1`。
+- `listing_draft_inspection_v2` 对每个字段输出 `persisted/submit_reapply_required/failed`。只有上述四个字段可使用 `submit_reapply_required`，且必须绑定重放契约哈希；标题、图片、规格、价格和库存等字段缺失仍直接失败。
+- approve artifact 绑定 payload、草稿、账号、店铺、CDP、inspector build、字段状态及重放契约哈希。submit 点击前必须重新应用全部契约字段并从当前 React 状态精确读回；仍有任何必填提示时禁止点击。
+- 开发机最终回归为 `665 tests OK`；doctor 为 `status: ok`（保留两个既有空 selector warning），compileall、12 个 JSON 配置解析和 `git diff --check` 通过。本轮代码尚未部署，唯一草稿尚未执行新的真实保存和独立复核。
+
 ## 2026-08-05 Managed Update (CTG0286 Native Draft Contract Repair)
 
 - 对唯一草稿 `6a69bee6e4b01cad1b297a52` 完成了真实页面只读组件采集；采集过程没有保存草稿、没有提交 Offer，也没有创建第二草稿。
