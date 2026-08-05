@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sys
+import json
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -75,15 +77,20 @@ class Run1688SkuReplacePipelineTests(unittest.TestCase):
             resolve_pipeline_account(args, tasks)
 
     def test_jushuitan_command_uses_sync_action(self) -> None:
-        command = build_jushuitan_command(
-            self.build_args(),
-            Path("handoff.jsonl"),
-            Path("results"),
-        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            handoff = Path(temp_dir) / "handoff.jsonl"
+            handoff.write_text(json.dumps({"operation_key": "a" * 64}), encoding="utf-8")
+            command = build_jushuitan_command(
+                self.build_args(),
+                handoff,
+                Path(temp_dir) / "results",
+            )
 
-        self.assertTrue(command[1].endswith("run_1688_jushuitan_outbox_worker.py"))
-        self.assertEqual(command[command.index("--action") + 1], "sync")
-        self.assertIn("--yes", command)
+            self.assertTrue(command[1].endswith("run_1688_jushuitan_outbox_worker.py"))
+            self.assertEqual(command[command.index("--action") + 1], "sync")
+            self.assertIn("--approved-operation-keys-file", command)
+            self.assertIn("--approved-operation-keys-sha256", command)
+            self.assertIn("--yes", command)
 
     def test_jushuitan_environment_points_legacy_schema_to_handoff(self) -> None:
         environment = build_jushuitan_environment(Path("handoff.jsonl"))

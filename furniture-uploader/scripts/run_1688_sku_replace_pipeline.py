@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from contextlib import nullcontext
 from datetime import datetime
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -129,6 +130,10 @@ def build_jushuitan_command(
     handoff_path: Path,
     results_dir: Path,
 ) -> list[str]:
+    if not str(args.run_id or "").strip():
+        raise ValueError("Jushuitan Outbox execution requires --run-id")
+    if not handoff_path.is_file():
+        raise FileNotFoundError(f"Jushuitan approved operation-key file is missing: {handoff_path}")
     command = [
         sys.executable,
         str(PROJECT_ROOT / "scripts" / "run_1688_jushuitan_outbox_worker.py"),
@@ -140,8 +145,6 @@ def build_jushuitan_command(
         str(Path(getattr(args, "jushuitan_root", DEFAULT_JUSHUITAN_ROOT)).resolve()),
         "--timeout-seconds",
         str(getattr(args, "timeout_jushuitan_seconds", 1200)),
-        "--limit",
-        str(args.limit if args.limit > 0 else 10000),
         "--handoff-out",
         str(handoff_path),
         "--results-dir",
@@ -149,6 +152,14 @@ def build_jushuitan_command(
     ]
     if args.run_id:
         command.extend(["--run-id", args.run_id])
+    command.extend(
+        [
+            "--approved-operation-keys-file",
+            str(handoff_path.resolve()),
+            "--approved-operation-keys-sha256",
+            hashlib.sha256(handoff_path.read_bytes()).hexdigest(),
+        ]
+    )
     if args.mode == "execute":
         command.append("--yes")
     return command

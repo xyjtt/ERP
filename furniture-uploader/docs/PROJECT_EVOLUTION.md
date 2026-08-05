@@ -155,3 +155,7 @@
 - Explicit 1688 submit validation text is now a first-class `system_prompt` outcome instead of the ambiguous `submit_blocked_before_request` fallback.
 - A system prompt fails only the current product ID/SKU, preserves the original platform message, and allows the remaining store batch to continue.
 - Retry governance, daily-manager classification, Chinese reporting, and regression coverage were updated together; related tests pass `126/126`.
+# 2026-08-05 中断恢复从数量核对升级为身份集合门禁
+
+- 恢复授权不再依赖人工观察数量或 `run_id + limit`，改为文件 SHA-256、四字段身份集合 SHA-256 和 operation_key 精确集合。
+- 文件锁释放、恢复清单生成和 Outbox 领取均 fail closed，任何并发或证据漂移都保留现状并停止。

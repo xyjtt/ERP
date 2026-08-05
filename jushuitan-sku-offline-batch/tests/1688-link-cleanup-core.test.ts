@@ -6,6 +6,7 @@ import test from "node:test";
 import {
   appendLedgerResult,
   assertTasksAllowedForMode,
+  buildStructuredRowEvidence,
   buildOperationsMessages,
   buildProductGroupKey,
   buildTaskId,
@@ -73,36 +74,61 @@ test("execute rejects a task that has not succeeded on 1688", () => {
 
 test("row matching requires store, product, SKU and platform code", () => {
   const task = parseCleanupTask(rawTask);
+  const headers = ["店铺名称", "商品ID", "平台店铺商品编码", "线上商品编码"];
   const rows = findMatchingRows(task, [
-    {
-      index: 0,
-      text: "阿里巴巴-常州工莱家具 商品ID: 1005537490740 6166627859436 CY001301N35",
-    },
-    {
-      index: 1,
-      text: "阿里巴巴-常州工莱家具 商品ID: 1005537490740 other-code CY001301N35",
-    },
+    buildStructuredRowEvidence(0, "matching row", headers, [
+      "阿里巴巴-常州工莱家具", "1005537490740", "6166627859436", "CY001301N35",
+    ]),
+    buildStructuredRowEvidence(1, "other code", headers, [
+      "阿里巴巴-常州工莱家具", "1005537490740", "other-code", "CY001301N35",
+    ]),
   ]);
   assert.deepEqual(rows.map((row) => row.index), [0]);
 });
 
 test("identity siblings prove the query loaded while the target platform code is absent", () => {
   const task = parseCleanupTask(rawTask);
+  const headers = ["店铺名称", "商品ID", "平台店铺商品编码", "线上商品编码"];
   const rows = findIdentitySiblingRows(task, [
-    {
-      index: 0,
-      text: "阿里巴巴-常州工莱家具 商品ID: 1005537490740 other-code CY001301N35",
-    },
-    {
-      index: 1,
-      text: "阿里巴巴-常州工莱家具 商品ID: 1005537490740 6166627859436 CY001301N35",
-    },
-    {
-      index: 2,
-      text: "阿里巴巴-其他店铺 商品ID: 1005537490740 another-code CY001301N35",
-    },
+    buildStructuredRowEvidence(0, "sibling row", headers, [
+      "阿里巴巴-常州工莱家具", "1005537490740", "other-code", "CY001301N35",
+    ]),
+    buildStructuredRowEvidence(1, "matching row", headers, [
+      "阿里巴巴-常州工莱家具", "1005537490740", "6166627859436", "CY001301N35",
+    ]),
+    buildStructuredRowEvidence(2, "other store", headers, [
+      "阿里巴巴-其他店铺", "1005537490740", "another-code", "CY001301N35",
+    ]),
   ]);
   assert.deepEqual(rows.map((row) => row.index), [0]);
+});
+
+test("exact column matching rejects ABC1 versus ABC10 prefix collisions", () => {
+  const task = parseCleanupTask({
+    ...rawTask,
+    online_sku: "ABC1",
+    platform_store_item_code: "CODE1",
+  });
+  const headers = ["店铺名称", "商品ID", "平台店铺商品编码", "线上商品编码"];
+  const rows = [
+    buildStructuredRowEvidence(0, "prefix collision", headers, [
+      task.store_name, task.product_id, "CODE10", "ABC10",
+    ]),
+  ];
+  assert.deepEqual(findMatchingRows(task, rows), []);
+  assert.deepEqual(findIdentitySiblingRows(task, rows), []);
+});
+
+test("missing structured identity columns fail closed", () => {
+  const task = parseCleanupTask(rawTask);
+  const row = buildStructuredRowEvidence(
+    0,
+    `${task.store_name} ${task.product_id} ${task.online_sku} ${task.platform_store_item_code}`,
+    ["未知列"],
+    [`${task.store_name} ${task.product_id} ${task.online_sku} ${task.platform_store_item_code}`],
+  );
+  assert.deepEqual(findMatchingRows(task, [row]), []);
+  assert.deepEqual(findIdentitySiblingRows(task, [row]), []);
 });
 
 test("JSONL loading dedupes only identical four-field task identities", async () => {

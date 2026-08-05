@@ -32,7 +32,13 @@
 
 ## 部署前门禁
 
-1. 执行机部署目录和目标分支已确认，工作树无未知改动。
+1. 执行机部署目录和目标分支已确认，工作树无未知改动。远端必须是
+   `gitee=https://gitee.com/xyjtt/erp.git`，分支必须是
+   `codex/stop-sale-deploy-integration-20260804`。部署必须先执行
+   `git fetch gitee --prune`、`git checkout codex/stop-sale-deploy-integration-20260804`、
+   `git merge --ff-only gitee/codex/stop-sale-deploy-integration-20260804`，随后要求
+   `git rev-parse HEAD` 与 `git rev-parse gitee/codex/stop-sale-deploy-integration-20260804`
+   完全一致。最终批准 SHA 以交付回报为准；HEAD 不同或工作树非干净时停止。
 2. 新 commit 已完成 Python、TypeScript、编译、差异和密钥扫描。
 3. `YYDD-1688-Stop-Sale-Daily` 没有新的 Manager 正在运行。
 4. 锁文件仍存在且内容属于 `daily_20260804_130814_970163`；不得提前修改。
@@ -80,7 +86,9 @@ $RecoveryDir = Join-Path (Get-Location) "artifacts\stop_sale_recovery\$ManagerRu
 python scripts\build_interrupted_stop_sale_recovery_manifest.py `
   --manager-run-id $ManagerRunId `
   --manager-dir $ManagerDir `
-  --output-dir $RecoveryDir
+  --output-dir $RecoveryDir `
+  --approved-scope-file <经审批的52_missing_7_technical身份清单.json> `
+  --approved-scope-sha256 <批准文件的64位小写SHA-256>
 ```
 
 必须人工和脚本共同核对 `manifest.json`：
@@ -88,7 +96,10 @@ python scripts\build_interrupted_stop_sale_recovery_manifest.py `
 - `selected_count` 与原始 Preview 一致。
 - `classification_counts` 的总和等于 `selected_count`。
 - `recovery_count = missing + technical`。
-- 重新确认此前 52/7 的观察值；若新清单不同，以新工具的逐项证据为准并解释差异。
+- 批准文件必须为 `version=1`，精确声明 `manager_run_id`、52 个
+  `missing_identities`、7 个 `technical_identities` 和规范化身份集合 SHA-256。
+- 当前分类必须与批准的 52/7 四字段身份集合及哈希完全一致。
+- 任一数量、分类或身份漂移时只写 `diagnostic.json` 并返回 2，不得生成任何恢复 CSV 或 `manifest.json`。
 - `excluded` 中不能出现尚未完成的聚水潭项。
 
 ## 定向恢复规则
@@ -117,17 +128,27 @@ python scripts\requeue_1688_jushuitan_outbox.py `
 
 preview 的 `before` 与审批证据一致后，原命令追加 `--yes`。任一字段漂移都必须停止，不得调整参数去强行覆盖。
 
-经批准的单条重排完成后，再运行独立 Outbox Worker：
+经批准的单条重排完成后，建立只包含本次批准 key 的版本 1 JSON：
+
+```json
+{"version":1,"run_id":"<目标run_id>","operation_keys":["<64位operation_key>"]}
+```
+
+计算文件 SHA-256 后运行独立 Outbox Worker：
 
 ```powershell
 python scripts\run_1688_jushuitan_outbox_worker.py `
   --action cleanup `
   --run-id <目标run_id> `
-  --limit <本次批准条数> `
+  --approved-operation-keys-file <批准operation_key清单.json> `
+  --approved-operation-keys-sha256 <批准文件的64位小写SHA-256> `
   --shared-runtime-root E:\1688\1688-script-new `
   --jushuitan-root ..\jushuitan-sku-offline-batch `
   --yes
 ```
+
+Repository 在单一事务内校验所有批准 key 的 run_id、topic、状态和可领取性，再领取完整集合。
+缺少、多出、被占用或状态漂移都会整体回滚；禁止退回 `run_id + limit` 模糊领取。
 
 ## 验收与回滚
 

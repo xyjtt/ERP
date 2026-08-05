@@ -5,7 +5,7 @@
 - 中断日批 Manager 现在有正式 fail-closed 收口入口：校验锁归属、死 PID、child run 范围和终态后，先写 Summary，再二次校验锁快照，最后释放锁。
 - 新恢复清单工具从原始输入和 child reports 逐条分类 `missing`、`technical`、`excluded`，只把前两类写入定向恢复 CSV，不会重跑业务终态或已完成的聚水潭项。
 - 聚水潭 Outbox 已补齐逐项结果保留、精确 `already_cleared` 证据和单条 fenced CAS 重排；不允许把失败批次中的成功项重新归零，也不允许批量重排历史 11 条。
-- 本地开发验收已通过：Python `608/608`；定向 `19/19`；扩展下架 `76/76`；TypeScript `24/24`、`check`、`build`；`compileall` 和差异检查通过。
+- 本地开发验收已通过：Python `614/614`；定向 `19/19`；扩展下架 `76/76`；TypeScript `26/26`、`check`、`build`；`compileall`、PowerShell 解析和差异检查通过。
 - 当前节点不是生产完成：`daily_20260804_130814_970163` 仍须在执行机按操作手册完成收口，再重新生成清单核对此前 52 个 missing、7 个 technical 和历史 11 条 Outbox。禁止手删锁或广泛补跑。
 - 正式执行顺序见 `docs/operations/2026-08-05_interrupted_stop_sale_recovery.md`。Crawler 是否仍在后台运行不构成本开发、提交或部署的统一前置条件；只在同账号租约或浏览器资源实际冲突时等待对应任务自然结束。
 
@@ -345,3 +345,9 @@
 - The affected product ID/SKU is recorded as failed and skipped; execution continues with the next item in the same store.
 - This category is non-retryable and does not stop the store. It is not counted as an offline success and does not create a Jushuitan handoff.
 - Targeted behavior tests and the related stop-sale suite pass `126/126`. Executor deployment and a real hidden-validation Canary remain pending.
+# 2026-08-05 下架恢复安全补强
+
+- 中断 Manager 锁改为 owner/token 不可误删的 Windows 原子释放。
+- 59 项恢复范围必须精确匹配批准的 52 missing + 7 technical 身份集合和哈希。
+- 聚水潭已清除判断改为四列精确匹配，Outbox 改为批准 operation_key 集合原子领取。
+- 当前仅完成开发侧修复；执行机部署和生产恢复仍未执行。

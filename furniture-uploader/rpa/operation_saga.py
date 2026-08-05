@@ -337,6 +337,125 @@ class OperationSagaRepository:
             for row in rows
         ]
 
+    def claim_outbox_exact(
+        self,
+        *,
+        claim_owner: str,
+        run_id: str,
+        topic: str,
+        operation_keys: Iterable[str],
+        claim_seconds: int = 1800,
+    ) -> list[OutboxItem]:
+        approved_keys = sorted({str(key or "").strip().lower() for key in operation_keys})
+        if not approved_keys:
+            raise ValueError("Exact Outbox claim requires at least one operation_key")
+        if any(
+            len(key) != 64 or any(char not in "0123456789abcdef" for char in key)
+            for key in approved_keys
+        ):
+            raise ValueError("Exact Outbox claim requires lowercase SHA-256 operation_keys")
+        if not str(run_id or "").strip() or not str(topic or "").strip():
+            raise ValueError("Exact Outbox claim requires run_id and topic")
+
+        outbox = self._table("ali1688_operation_outbox")
+        saga = self._table("ali1688_operation_saga")
+        claim_token = uuid.uuid4().hex
+        with self._connect(self.config) as connection:
+            cursor = connection.cursor()
+            try:
+                cursor.execute(
+                    "CREATE TABLE #approved_operation_keys "
+                    "(operation_key CHAR(64) NOT NULL PRIMARY KEY)"
+                )
+                cursor.executemany(
+                    "INSERT INTO #approved_operation_keys (operation_key) VALUES (?)",
+                    [(key,) for key in approved_keys],
+                )
+                validation_rows = cursor.execute(
+                    f"""
+                    SELECT approved.operation_key,
+                           CASE WHEN outbox_row.outbox_id IS NULL THEN 0 ELSE 1 END AS exists_flag,
+                           ISNULL(outbox_row.status, ''), ISNULL(outbox_row.topic, ''),
+                           ISNULL(saga_row.run_id, ''),
+                           CASE WHEN outbox_row.status IN ('pending', 'failed_retryable')
+                                  AND outbox_row.available_at <= SYSUTCDATETIME()
+                                  AND (outbox_row.claim_until IS NULL
+                                       OR outbox_row.claim_until < SYSUTCDATETIME())
+                                THEN 1 ELSE 0 END AS eligible_flag
+                      FROM #approved_operation_keys AS approved
+                      LEFT JOIN {outbox} AS outbox_row WITH (UPDLOCK, HOLDLOCK)
+                        ON outbox_row.operation_key = approved.operation_key
+                      LEFT JOIN {saga} AS saga_row WITH (UPDLOCK, HOLDLOCK)
+                        ON saga_row.operation_key = approved.operation_key
+                     ORDER BY approved.operation_key
+                    """
+                ).fetchall()
+                observed_keys = {str(row[0]) for row in validation_rows}
+                if observed_keys != set(approved_keys) or len(validation_rows) != len(approved_keys):
+                    raise SagaReconcileRequiredError("outbox_approved_scope_query_mismatch")
+                invalid = [
+                    str(row[0])
+                    for row in validation_rows
+                    if int(row[1]) != 1
+                    or str(row[3]) != topic
+                    or str(row[4]) != run_id
+                    or int(row[5]) != 1
+                ]
+                if invalid:
+                    raise SagaReconcileRequiredError(
+                        "outbox_approved_scope_not_claimable:" + ",".join(invalid)
+                    )
+
+                rows = cursor.execute(
+                    f"""
+                    UPDATE outbox_row
+                       SET status = 'claimed', claim_owner = ?, claim_token = ?,
+                           claim_until = DATEADD(SECOND, ?, SYSUTCDATETIME()),
+                           attempt_count = attempt_count + 1,
+                           updated_at = SYSUTCDATETIME()
+                    OUTPUT inserted.outbox_id, inserted.operation_key, inserted.topic,
+                           inserted.payload_json, inserted.attempt_count, inserted.claim_token
+                      FROM {outbox} AS outbox_row
+                      JOIN #approved_operation_keys AS approved
+                        ON approved.operation_key = outbox_row.operation_key
+                      JOIN {saga} AS saga_row
+                        ON saga_row.operation_key = outbox_row.operation_key
+                     WHERE outbox_row.status IN ('pending', 'failed_retryable')
+                       AND outbox_row.available_at <= SYSUTCDATETIME()
+                       AND (outbox_row.claim_until IS NULL
+                            OR outbox_row.claim_until < SYSUTCDATETIME())
+                       AND outbox_row.topic = ?
+                       AND saga_row.run_id = ?
+                    """,
+                    (
+                        claim_owner[:100],
+                        claim_token,
+                        max(1, int(claim_seconds)),
+                        topic,
+                        run_id,
+                    ),
+                ).fetchall()
+                claimed_keys = {str(row[1]) for row in rows}
+                if claimed_keys != set(approved_keys) or len(rows) != len(approved_keys):
+                    raise SagaFencingError("outbox_exact_claim_compare_and_set_failed")
+                connection.commit()
+            except Exception:
+                rollback = getattr(connection, "rollback", None)
+                if callable(rollback):
+                    rollback()
+                raise
+        return [
+            OutboxItem(
+                outbox_id=int(row[0]),
+                operation_key=str(row[1]),
+                topic=str(row[2]),
+                payload=json.loads(str(row[3])),
+                attempt_count=int(row[4]),
+                claim_token=str(row[5]),
+            )
+            for row in rows
+        ]
+
     def finish_outbox(
         self,
         item: OutboxItem,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import nullcontext
+import hashlib
 import json
 import os
 import re
@@ -315,6 +316,11 @@ def build_jushuitan_command(
     jushuitan_root: Path,
     results_dir: Path | None = None,
 ) -> list[str]:
+    run_id = str(getattr(args, "run_id", "") or "").strip()
+    if args.mode == "execute" and not run_id:
+        raise ValueError("Jushuitan Outbox execution requires --run-id")
+    if args.mode == "execute" and not handoff_path.is_file():
+        raise FileNotFoundError(f"Jushuitan approved operation-key file is missing: {handoff_path}")
     command = [
         sys.executable,
         str(PROJECT_ROOT / "scripts" / "run_1688_jushuitan_outbox_worker.py"),
@@ -326,14 +332,20 @@ def build_jushuitan_command(
         str(jushuitan_root.resolve()),
         "--timeout-seconds",
         str(args.timeout_jushuitan_seconds),
-        "--limit",
-        str(args.limit if args.limit > 0 else 10000),
         "--handoff-out",
         str(handoff_path),
     ]
-    run_id = str(getattr(args, "run_id", "") or "").strip()
     if run_id:
         command.extend(["--run-id", run_id])
+    if args.mode == "execute":
+        command.extend(
+            [
+                "--approved-operation-keys-file",
+                str(handoff_path.resolve()),
+                "--approved-operation-keys-sha256",
+                hashlib.sha256(handoff_path.read_bytes()).hexdigest(),
+            ]
+        )
     if results_dir is not None:
         command.extend(["--results-dir", str(results_dir.resolve())])
     if args.mode == "execute":

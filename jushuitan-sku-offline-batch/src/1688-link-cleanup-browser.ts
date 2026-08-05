@@ -5,6 +5,7 @@ import { appConfig } from "./config";
 import {
   appendLedgerResult,
   buildProductGroupKey,
+  buildStructuredRowEvidence,
   CleanupMode,
   CleanupResult,
   CleanupTask,
@@ -159,6 +160,17 @@ async function collectRows(target: Target): Promise<{ locator: Locator; rows: Ro
   const locator = target.locator(resultRowSelector);
   const count = await locator.count().catch(() => 0);
   const rows: RowEvidence[] = [];
+  const headerRows = target.locator(
+    ".art-table-header thead tr, .ant-table-header thead tr, table thead tr",
+  );
+  let visibleHeaders: string[] = [];
+  const headerRowCount = await headerRows.count().catch(() => 0);
+  for (let index = 0; index < headerRowCount; index += 1) {
+    const headers = await headerRows.nth(index).locator("th").allInnerTexts().catch(() => []);
+    if (headers.length > visibleHeaders.length) {
+      visibleHeaders = headers;
+    }
+  }
   for (let index = 0; index < count; index += 1) {
     const row = locator.nth(index);
     if (!(await row.isVisible().catch(() => false))) {
@@ -169,7 +181,8 @@ async function collectRows(target: Target): Promise<{ locator: Locator; rows: Ro
     }
     const text = (await row.innerText().catch(() => "")).trim();
     if (text) {
-      rows.push({ index, text });
+      const cells = await row.locator(":scope > td").allInnerTexts().catch(() => []);
+      rows.push(buildStructuredRowEvidence(index, text, visibleHeaders, cells));
     }
   }
   return { locator, rows };

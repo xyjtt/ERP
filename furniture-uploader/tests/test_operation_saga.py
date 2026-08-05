@@ -114,6 +114,7 @@ class _FakeConnection:
     def __init__(self, cursor: _FakeCursor) -> None:
         self._cursor = cursor
         self.commits = 0
+        self.rollbacks = 0
 
     def __enter__(self):
         return self
@@ -126,6 +127,9 @@ class _FakeConnection:
 
     def commit(self):
         self.commits += 1
+
+    def rollback(self):
+        self.rollbacks += 1
 
 
 class _FakeConfig:
@@ -192,3 +196,72 @@ class OperationSagaOutboxRequeueTests(unittest.TestCase):
         self.assertTrue(all("WHERE operation_key = ?" in sql for sql in updates))
         self.assertIn("attempt_count = ?", updates[0])
         self.assertIn("run_id = ?", updates[1])
+
+
+class _ExactClaimCursor:
+    def __init__(self, keys: list[str], *, invalid_key: str = "") -> None:
+        self.keys = keys
+        self.invalid_key = invalid_key
+        self.stage = ""
+        self.executed: list[tuple] = []
+
+    def execute(self, sql, params=None):
+        self.executed.append((sql, params))
+        if "SELECT approved.operation_key" in sql:
+            self.stage = "validate"
+        elif "UPDATE outbox_row" in sql:
+            self.stage = "claim"
+        return self
+
+    def executemany(self, sql, params):
+        self.executed.append((sql, list(params)))
+        return self
+
+    def fetchall(self):
+        if self.stage == "validate":
+            return [
+                (key, 1, "failed_retryable", "jushuitan.cleanup_1688_link", "run-1", 0 if key == self.invalid_key else 1)
+                for key in self.keys
+            ]
+        if self.stage == "claim":
+            return [
+                (index + 1, key, "jushuitan.cleanup_1688_link", "{}", 2, "c" * 32)
+                for index, key in enumerate(self.keys)
+            ]
+        return []
+
+
+class OperationSagaExactClaimTests(unittest.TestCase):
+    def test_exact_claim_commits_only_the_approved_set(self) -> None:
+        keys = ["a" * 64, "b" * 64]
+        cursor = _ExactClaimCursor(keys)
+        connection = _FakeConnection(cursor)  # type: ignore[arg-type]
+        repository = OperationSagaRepository(_FakeConfig(), connect=lambda _config: connection)
+
+        items = repository.claim_outbox_exact(
+            claim_owner="worker-1",
+            run_id="run-1",
+            topic="jushuitan.cleanup_1688_link",
+            operation_keys=keys,
+        )
+
+        self.assertEqual({item.operation_key for item in items}, set(keys))
+        self.assertEqual(connection.commits, 1)
+        self.assertEqual(connection.rollbacks, 0)
+
+    def test_exact_claim_rolls_back_when_any_approved_key_is_not_claimable(self) -> None:
+        keys = ["a" * 64, "b" * 64]
+        cursor = _ExactClaimCursor(keys, invalid_key=keys[1])
+        connection = _FakeConnection(cursor)  # type: ignore[arg-type]
+        repository = OperationSagaRepository(_FakeConfig(), connect=lambda _config: connection)
+
+        with self.assertRaisesRegex(RuntimeError, "not_claimable"):
+            repository.claim_outbox_exact(
+                claim_owner="worker-1",
+                run_id="run-1",
+                topic="jushuitan.cleanup_1688_link",
+                operation_keys=keys,
+            )
+
+        self.assertEqual(connection.commits, 0)
+        self.assertEqual(connection.rollbacks, 1)

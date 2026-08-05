@@ -256,6 +256,51 @@ class InterruptedDailyManagerRecoveryTests(unittest.TestCase):
 
             self.assertTrue(lock.exists())
 
+    def test_atomic_release_failure_preserves_current_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            manager_id = "daily_1"
+            manager_dir = root / manager_id
+            manager_dir.mkdir()
+            runtime = root / "runtime"
+            lock = runtime / "artifacts" / "locks" / "ali1688_stop_sale_daily.lock"
+            lock.parent.mkdir(parents=True)
+            self.write_lock(lock, manager_run_id=manager_id)
+            args = SimpleNamespace(
+                manager_run_id=manager_id,
+                manager_dir=str(manager_dir),
+                shared_runtime_root=str(runtime),
+                shared_lock_path=str(lock),
+                reason="interrupted",
+                no_notify=True,
+                yes=True,
+            )
+
+            with (
+                patch(
+                    "recover_interrupted_stop_sale_daily_manager._is_process_running",
+                    return_value=False,
+                ),
+                patch(
+                    "recover_interrupted_stop_sale_daily_manager._query_child_runs",
+                    return_value=[],
+                ),
+                patch(
+                    "recover_interrupted_stop_sale_daily_manager.send_manager_notification",
+                    return_value=False,
+                ),
+                patch(
+                    "recover_interrupted_stop_sale_daily_manager._remove_windows_lock_if_unchanged",
+                    side_effect=RuntimeError("exclusive lock unavailable"),
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "exclusive lock unavailable"):
+                    recover(args)
+
+            self.assertTrue(lock.exists())
+            blocked = json.loads((manager_dir / "summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(blocked["recovery_status"], "blocked_lock_revalidation")
+
     def test_recovery_resumes_after_summary_write_with_identical_preconditions(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

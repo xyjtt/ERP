@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -34,7 +36,7 @@ class StopSalePipelineTests(unittest.TestCase):
             shared_lock_path="",
             shared_runtime_root="D:/script_1688",
             timeout_jushuitan_seconds=1200,
-            run_id="",
+            run_id="run-1",
         )
 
     def test_preview_commands_do_not_include_live_confirmation(self) -> None:
@@ -49,14 +51,18 @@ class StopSalePipelineTests(unittest.TestCase):
 
     def test_execute_commands_require_explicit_live_flags(self) -> None:
         args = self.build_args("execute")
-        handoff = PROJECT_ROOT / "logs" / "handoff.jsonl"
-        command_1688 = build_1688_command(args, handoff)
-        command_jushuitan = build_jushuitan_command(args, handoff, PROJECT_ROOT.parent)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            handoff = Path(temp_dir) / "handoff.jsonl"
+            handoff.write_text(json.dumps({"operation_key": "a" * 64}), encoding="utf-8")
+            command_1688 = build_1688_command(args, handoff)
+            command_jushuitan = build_jushuitan_command(args, handoff, PROJECT_ROOT.parent)
 
-        self.assertIn("--yes", command_1688)
-        self.assertIn("--yes", command_jushuitan)
-        self.assertTrue(command_jushuitan[1].endswith("run_1688_jushuitan_outbox_worker.py"))
-        self.assertEqual(command_jushuitan[command_jushuitan.index("--action") + 1], "cleanup")
+            self.assertIn("--yes", command_1688)
+            self.assertIn("--yes", command_jushuitan)
+            self.assertIn("--approved-operation-keys-file", command_jushuitan)
+            self.assertIn("--approved-operation-keys-sha256", command_jushuitan)
+            self.assertTrue(command_jushuitan[1].endswith("run_1688_jushuitan_outbox_worker.py"))
+            self.assertEqual(command_jushuitan[command_jushuitan.index("--action") + 1], "cleanup")
 
     def test_shared_lock_is_scoped_to_1688_account(self) -> None:
         args = self.build_args("execute")

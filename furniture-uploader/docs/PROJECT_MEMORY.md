@@ -2,13 +2,18 @@
 
 ## 2026-08-05 Managed Update (Interrupted Daily Manager Recovery)
 
+- 安全复核补强：Manager 锁释放改为 Windows 独占句柄内复核 cycle/run/token 指纹并标记删除；恢复清单必须与批准的 52 missing + 7 technical 四字段身份集合和双 SHA-256 完全一致，否则只产诊断。
+- 聚水潭 `already_cleared` 只接受表头映射后的店铺、商品 ID、线上 SKU、平台店铺商品编码四列精确匹配或精确筛选后的显式零行；`ABC1` 不匹配 `ABC10`。
+- Outbox Worker 必须按带 SHA-256 的批准 `operation_key` 集合事务领取，完整集合不一致则回滚；日常下架/替换 handoff 同样作为本批次批准集合。
+- 以上仍是开发变更，未部署或执行生产恢复。
+
 - 新增正式中断收口工具 `scripts/recover_interrupted_stop_sale_daily_manager.py`。它只在管理器锁的 `cycle/manager_run_id/token` 匹配、锁 PID 已死亡、artifact 与数据库 child run 范围完全一致、所有 child run 已终态且 Summary 与审计一致时继续。
 - 收口顺序固定为：原子写入管理器 `summary.json`，再次读取并校验完整锁快照和 fencing/token 证据，然后才释放管理器锁。二次校验漂移时保留锁并标记 `blocked_lock_revalidation`，禁止手删锁。
 - 新增 `scripts/build_interrupted_stop_sale_recovery_manifest.py`，仅接受已完成收口且 `lock_removed=true` 的管理器 Summary；按原始 Preview CSV 和 child reports 精确生成 `missing.csv`、`technical.csv`、`recovery.csv` 与 `manifest.json`。
 - 恢复清单排除业务终态、1688 与聚水潭已完成项；登录、风控、身份和页面技术异常单独归入 `technical`，缺少任何 1688 执行证据的项归入 `missing`。缺失不得伪装为 0 或成功。
 - Saga/Outbox 已兼容移植 `bfc3c6d`：逐项保留同批次中已验证成功结果；只有精确查询零行或目标链接已不存在时才记 `already_cleared`；单条重排使用 operation/status/error/attempt/run/saga 的锁内 CAS，禁止批量重排。
 - 当前仅完成开发验收。生产批次 `daily_20260804_130814_970163` 尚未收口；此前观察到的 52 个未执行、7 个技术失败和历史 11 条 Outbox 尚未通过新工具在生产重新核对或处理。
-- 开发验证：Python 全量 `608/608`，恢复与 Saga/Outbox 定向 `19/19`，扩展下架集合 `76/76`；聚水潭 TypeScript `24/24`、`check`、`build` 通过；Python `compileall` 与 `git diff --check` 通过。生产部署、Credential Manager、真实页面、数据库和浏览器验收仍待独立执行。
+- 开发验证：Python 全量 `614/614`，恢复与 Saga/Outbox 定向 `19/19`，扩展下架集合 `76/76`；聚水潭 TypeScript `26/26`、`check`、`build` 通过；Python `compileall`、PowerShell 解析与 `git diff --check` 通过。生产部署、Credential Manager、真实页面、数据库和浏览器验收仍待独立执行。
 
 ## 2026-07-28 Managed Update (Bounded Slider Login Recovery)
 

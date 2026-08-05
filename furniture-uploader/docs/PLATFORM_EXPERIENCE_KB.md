@@ -280,3 +280,7 @@
 - Preserve explicit platform text as `system_prompt`; fail and skip only the current product ID/SKU, then continue the store batch.
 - Do not retry the same unchanged product, stop the store, create a Jushuitan handoff, or report the SKU as successfully offline.
 - Keep dedicated business classifications, such as `sole_sku_requires_product_offline`, ahead of the generic system-prompt classification.
+# 2026-08-05 聚水潭已清除判定
+
+- 不能用整行文本 `includes` 判断店铺、商品、SKU 或平台编码，前缀值会产生误匹配。
+- 必须按表头解析四个结构化列并逐列规范化等值比较。目标不存在只能由精确 sibling 行或精确筛选回读后的显式零行证明，缺列时失败关闭。

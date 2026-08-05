@@ -48,6 +48,12 @@ export interface CleanupResult {
 export interface RowEvidence {
   index: number;
   text: string;
+  columns: {
+    store_name: string;
+    product_id: string;
+    online_sku: string;
+    platform_store_item_code: string;
+  };
 }
 
 const OPERATIONS_CATEGORY_LABELS: Record<string, string> = {
@@ -70,6 +76,68 @@ const OPERATIONS_CATEGORY_LABELS: Record<string, string> = {
 
 function normalizedKeyPart(value: string): string {
   return value.replace(/\s+/g, "").trim().toLowerCase();
+}
+
+function normalizedHeader(value: string): string {
+  return value.replace(/[\s：:()（）/\\_-]+/g, "").trim().toLowerCase();
+}
+
+const rowIdentityHeaderAliases = {
+  store_name: ["店铺名称", "店铺", "平台店铺", "平台/店铺"],
+  product_id: ["商品ID", "平台商品ID"],
+  online_sku: ["线上商品编码", "线上编码", "线上SKU"],
+  platform_store_item_code: ["平台店铺商品编码", "平台商品编码", "平台店铺商品ID"],
+} as const;
+
+export function buildStructuredRowEvidence(
+  index: number,
+  text: string,
+  headers: string[],
+  cells: string[],
+): RowEvidence {
+  const normalizedHeaders = headers.map(normalizedHeader);
+  const valueFor = (aliases: readonly string[]): string => {
+    const accepted = new Set(aliases.map(normalizedHeader));
+    const columnIndex = normalizedHeaders.findIndex((header) => accepted.has(header));
+    return columnIndex >= 0 ? (cells[columnIndex] ?? "").trim() : "";
+  };
+  return {
+    index,
+    text,
+    columns: {
+      store_name: valueFor(rowIdentityHeaderAliases.store_name),
+      product_id: valueFor(rowIdentityHeaderAliases.product_id),
+      online_sku: valueFor(rowIdentityHeaderAliases.online_sku),
+      platform_store_item_code: valueFor(rowIdentityHeaderAliases.platform_store_item_code),
+    },
+  };
+}
+
+function rowMatchesTaskIdentity(
+  task: CleanupTask,
+  row: RowEvidence,
+  includePlatformCode: boolean,
+): boolean {
+  const expectedStore = normalizedKeyPart(task.store_name);
+  const expectedStoreSuffix = normalizedKeyPart(task.store_name.replace(/^阿里巴巴[-—–]?/, ""));
+  const observedStore = normalizedKeyPart(row.columns.store_name);
+  const baseMatches = (
+    Boolean(observedStore) &&
+    (observedStore === expectedStore || observedStore === expectedStoreSuffix) &&
+    normalizedKeyPart(row.columns.product_id) === normalizedKeyPart(task.product_id) &&
+    normalizedKeyPart(row.columns.online_sku) === normalizedKeyPart(task.online_sku)
+  );
+  if (!baseMatches) {
+    return false;
+  }
+  const observedPlatformCode = normalizedKeyPart(row.columns.platform_store_item_code);
+  if (!observedPlatformCode) {
+    return false;
+  }
+  const expectedPlatformCode = normalizedKeyPart(task.platform_store_item_code);
+  return includePlatformCode
+    ? observedPlatformCode === expectedPlatformCode
+    : observedPlatformCode !== expectedPlatformCode;
 }
 
 export function buildTaskId(task: {
@@ -158,39 +226,11 @@ export async function loadCleanupTasks(filePath: string): Promise<CleanupTask[]>
 }
 
 export function findMatchingRows(task: CleanupTask, rows: RowEvidence[]): RowEvidence[] {
-  const storeName = normalizedKeyPart(task.store_name);
-  const storeSuffix = normalizedKeyPart(task.store_name.replace(/^阿里巴巴[-—–]?/, ""));
-  const productId = normalizedKeyPart(task.product_id);
-  const onlineSku = normalizedKeyPart(task.online_sku);
-  const platformCode = normalizedKeyPart(task.platform_store_item_code);
-
-  return rows.filter((row) => {
-    const text = normalizedKeyPart(row.text);
-    return (
-      (text.includes(storeName) || (text.includes("阿里巴巴") && text.includes(storeSuffix))) &&
-      text.includes(productId) &&
-      text.includes(onlineSku) &&
-      text.includes(platformCode)
-    );
-  });
+  return rows.filter((row) => rowMatchesTaskIdentity(task, row, true));
 }
 
 export function findIdentitySiblingRows(task: CleanupTask, rows: RowEvidence[]): RowEvidence[] {
-  const storeName = normalizedKeyPart(task.store_name);
-  const storeSuffix = normalizedKeyPart(task.store_name.replace(/^阿里巴巴[-—–]?/, ""));
-  const productId = normalizedKeyPart(task.product_id);
-  const onlineSku = normalizedKeyPart(task.online_sku);
-  const platformCode = normalizedKeyPart(task.platform_store_item_code);
-
-  return rows.filter((row) => {
-    const text = normalizedKeyPart(row.text);
-    return (
-      (text.includes(storeName) || (text.includes("阿里巴巴") && text.includes(storeSuffix))) &&
-      text.includes(productId) &&
-      text.includes(onlineSku) &&
-      !text.includes(platformCode)
-    );
-  });
+  return rows.filter((row) => rowMatchesTaskIdentity(task, row, false));
 }
 
 export function assertTasksAllowedForMode(mode: CleanupMode, tasks: CleanupTask[]): void {

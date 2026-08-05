@@ -42,6 +42,15 @@ class Manage1688StopSaleDailyTests(unittest.TestCase):
         self.assertIn("[int]$MaxParallelStores = 1", source)
         self.assertIn('"--max-parallel-stores", [string]$MaxParallelStores', source)
         self.assertIn('"-MaxParallelStores", [string]$MaxParallelStores', source)
+        self.assertIn('[string]$SourceDatabase = "JSReportReplica"', source)
+        self.assertIn('[string]$SourceTable = "app.op_stop_sale"', source)
+        self.assertIn('[string]$SourceDriver = "ODBC Driver 17 for SQL Server"', source)
+        self.assertIn('"--source-database", $SourceDatabase', source)
+        self.assertIn('"--source-table", $SourceTable', source)
+        self.assertIn('"--source-driver", $SourceDriver', source)
+        self.assertIn('"-SourceDatabase",', source)
+        self.assertIn('"-SourceTable",', source)
+        self.assertIn('"-SourceDriver",', source)
 
     @staticmethod
     def write_store_csv(path: Path, rows: list[tuple[str, str, str]]) -> None:
@@ -65,6 +74,8 @@ class Manage1688StopSaleDailyTests(unittest.TestCase):
             "D:/deploy/erp-stop-sale/jushuitan-sku-offline-batch",
             "--worker-task-name",
             "YYDD-1688-Crawler-Worker",
+            "--source-driver",
+            "ODBC Driver 17 for SQL Server",
             "--no-notify",
         ]
         if mode == "execute":
@@ -101,7 +112,10 @@ class Manage1688StopSaleDailyTests(unittest.TestCase):
         )
         self.assertEqual(command[command.index("--database") + 1], "JSReportReplica")
         self.assertEqual(command[command.index("--table") + 1], "app.op_stop_sale")
-        self.assertEqual(command[command.index("--driver") + 1], "SQL Server")
+        self.assertEqual(
+            command[command.index("--driver") + 1],
+            "ODBC Driver 17 for SQL Server",
+        )
 
     def test_app_source_preflight_does_not_require_legacy_source_credentials(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

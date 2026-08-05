@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+from ctypes import wintypes
 import hashlib
 import json
 import os
@@ -83,6 +84,107 @@ def _load_manager_lock(lock_path: Path, manager_run_id: str) -> dict[str, Any]:
 def _lock_fingerprint(payload: dict[str, Any]) -> str:
     serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _remove_windows_lock_if_unchanged(
+    lock_path: Path,
+    manager_run_id: str,
+    expected_fingerprint: str,
+) -> None:
+    if os.name != "nt":
+        raise RuntimeError("Atomic manager lock release is supported only on Windows.")
+
+    generic_read = 0x80000000
+    delete_access = 0x00010000
+    file_share_read = 0x00000001
+    open_existing = 3
+    file_attribute_normal = 0x00000080
+    file_disposition_info = 4
+    invalid_handle_value = ctypes.c_void_p(-1).value
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.GetFileSizeEx.argtypes = [wintypes.HANDLE, ctypes.POINTER(ctypes.c_longlong)]
+    kernel32.GetFileSizeEx.restype = wintypes.BOOL
+    kernel32.ReadFile.argtypes = [
+        wintypes.HANDLE,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+        wintypes.LPVOID,
+    ]
+    kernel32.ReadFile.restype = wintypes.BOOL
+    kernel32.SetFileInformationByHandle.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+    ]
+    kernel32.SetFileInformationByHandle.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    class FileDispositionInfo(ctypes.Structure):
+        _fields_ = [("delete_file", wintypes.BOOLEAN)]
+
+    handle = kernel32.CreateFileW(
+        str(lock_path),
+        generic_read | delete_access,
+        file_share_read,
+        None,
+        open_existing,
+        file_attribute_normal,
+        None,
+    )
+    if handle == invalid_handle_value:
+        raise OSError(ctypes.get_last_error(), "Unable to exclusively open manager lock")
+    try:
+        size = ctypes.c_longlong()
+        if not kernel32.GetFileSizeEx(handle, ctypes.byref(size)):
+            raise OSError(ctypes.get_last_error(), "Unable to read manager lock size")
+        if size.value <= 0 or size.value > 1024 * 1024:
+            raise RuntimeError(f"Daily manager lock has invalid size: {size.value}")
+        buffer = ctypes.create_string_buffer(size.value)
+        bytes_read = wintypes.DWORD()
+        if not kernel32.ReadFile(
+            handle,
+            buffer,
+            size.value,
+            ctypes.byref(bytes_read),
+            None,
+        ):
+            raise OSError(ctypes.get_last_error(), "Unable to read manager lock")
+        payload = json.loads(buffer.raw[: bytes_read.value].decode("utf-8"))
+        if not isinstance(payload, dict):
+            raise RuntimeError("Daily manager lock payload is not an object.")
+        metadata = payload.get("metadata")
+        if not isinstance(metadata, dict):
+            raise RuntimeError("Daily manager lock metadata is missing.")
+        if str(metadata.get("cycle") or "") != "1688_stop_sale_daily_manager":
+            raise RuntimeError("Lock does not belong to the daily stop-sale manager.")
+        if str(metadata.get("manager_run_id") or "") != manager_run_id:
+            raise RuntimeError("Daily manager lock manager_run_id does not match.")
+        if _lock_fingerprint(payload) != expected_fingerprint:
+            raise RuntimeError("Daily manager lock snapshot changed during recovery.")
+
+        disposition = FileDispositionInfo(True)
+        if not kernel32.SetFileInformationByHandle(
+            handle,
+            file_disposition_info,
+            ctypes.byref(disposition),
+            ctypes.sizeof(disposition),
+        ):
+            raise OSError(ctypes.get_last_error(), "Unable to atomically release manager lock")
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def _child_pattern(manager_run_id: str) -> re.Pattern[str]:
@@ -350,16 +452,17 @@ def recover(args: argparse.Namespace) -> dict[str, Any]:
     _write_json_atomic(summary_path, summary)
 
     try:
-        current_payload = _load_manager_lock(lock_path, manager_run_id)
-        if _lock_fingerprint(current_payload) != lock_fingerprint:
-            raise RuntimeError("Daily manager lock snapshot changed during recovery.")
+        _remove_windows_lock_if_unchanged(
+            lock_path,
+            manager_run_id,
+            lock_fingerprint,
+        )
     except Exception as exc:
         summary["recovery_status"] = "blocked_lock_revalidation"
         summary["lock_release_error"] = f"{type(exc).__name__}: {exc}"
         _write_json_atomic(summary_path, summary)
         raise
 
-    lock_path.unlink()
     summary["lock_removed"] = True
     summary["recovery_status"] = "finalized"
     summary.pop("lock_release_error", None)
