@@ -129,6 +129,40 @@ class InterruptedDailyManagerRecoveryTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "Unknown child log evidence"):
                 _discover_child_ids(manager_id, manager_dir, database_ids=set())
 
+    def test_discovery_accepts_known_runtime_rejection_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager_id = "daily_1"
+            manager_dir = Path(temp_dir) / manager_id
+            manager_dir.mkdir()
+            child_id = f"{manager_id}_s02_b002"
+            (manager_dir / f"STORE-A_{child_id}.log").write_text(
+                "\n".join(
+                    [
+                        '[1688-PIPELINE] {"run_id": "'
+                        + child_id
+                        + '", "event": "shared_lock_acquired"}',
+                        "Traceback (most recent call last):",
+                        "cross_project_runtime.RuntimeProtocolError: "
+                        "higher_priority_browser_write",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            discovery = _discover_child_ids(
+                manager_id,
+                manager_dir,
+                database_ids=set(),
+            )
+
+            self.assertEqual(discovery.child_ids, frozenset())
+            self.assertEqual(len(discovery.pre_audit_evidence), 1)
+            self.assertEqual(discovery.pre_audit_evidence[0]["run_id"], child_id)
+            self.assertEqual(
+                discovery.pre_audit_evidence[0]["reason"],
+                "higher_priority_browser_write",
+            )
+
     def test_discovery_uses_explicit_historical_evidence_root(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             evidence_root = Path(temp_dir) / "legacy-release"

@@ -233,6 +233,7 @@ def _formal_child_id_from_path(
 def _extract_pre_audit_fields(text: str, pattern: re.Pattern[str]) -> tuple[str, str] | None:
     decoder = json.JSONDecoder()
     objects: list[dict[str, Any]] = []
+    structured_run_ids: set[str] = set()
     for match in re.finditer(r"\{", text):
         try:
             payload, _ = decoder.raw_decode(text[match.start() :])
@@ -243,6 +244,8 @@ def _extract_pre_audit_fields(text: str, pattern: re.Pattern[str]) -> tuple[str,
 
     for payload in objects:
         run_id = str(payload.get("run_id") or "").strip()
+        if pattern.fullmatch(run_id):
+            structured_run_ids.add(run_id)
         reason = str(
             payload.get("reason")
             or payload.get("reason_code")
@@ -251,6 +254,16 @@ def _extract_pre_audit_fields(text: str, pattern: re.Pattern[str]) -> tuple[str,
         ).strip()
         if pattern.fullmatch(run_id) and reason:
             return run_id, reason
+
+    runtime_reason_match = re.search(
+        r"^cross_project_runtime\.RuntimeProtocolError:\s*([A-Za-z0-9_.-]+)\s*$",
+        text,
+        flags=re.MULTILINE,
+    )
+    if runtime_reason_match and len(structured_run_ids) == 1:
+        reason = runtime_reason_match.group(1)
+        if reason in PRE_AUDIT_REJECTION_REASONS:
+            return next(iter(structured_run_ids)), reason
 
     run_match = re.search(
         rf"(?:^|[\s,;])run_id\s*[:=]\s*[\"']?({pattern.pattern[1:-1]})[\"']?",
