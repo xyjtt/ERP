@@ -100,11 +100,12 @@ submit 点击前必须重新应用契约内全部非持久字段，并从当前 
 
 安装会保留 `YYDD-1688-Listing-Daily` 的 Interactive/Highest draft-only 任务，并额外注册同一 08:00 的 `YYDD-1688-Listing-Daily-Launcher`（SYSTEM）。launcher 只负责解析唯一活跃的 `Administrator` 会话并用 `Schedule.Service.RunEx($null, 4, session_id, $null)` 启动前者；它不执行 Python、浏览器或 submit。
 
-核对两个任务的 Action、Principal、IgnoreNew、触发时间、账号、`LastTaskResult` 和 `latest.summary.json`。受控等价触发使用 `-Action start`（可在已确认会话时传 `-SessionId 3`），不得再使用普通 `Start-ScheduledTask`。验收还必须包含 launcher/worker 任务历史、scheduled log、Saga、Offer/业务库和无第二草稿证明；安装不等于业务验收。
+核对两个任务的 Action、Principal、IgnoreNew、触发时间、账号、`LastTaskResult` 和 `latest.summary.json`。受控等价触发使用 `-Action start`（可在已确认会话时传 `-SessionId 3`），不得再使用普通 `Start-ScheduledTask`。本轮执行机已在 fresh lease/process gate 后部署 `b8c55de`，注册 launcher，并完成一次 `-Action start -SessionId 3`：worker 任务历史为成功 0、scheduled log 为 `20260806_131346.log`、summary 为 `duplicate_existing=1`，没有新 execution、草稿或 submit。launcher 已有注册事件但还没有自然 08:00 运行历史；下一次 08:00 仍需单独核对。验收还必须包含 launcher/worker 任务历史、scheduled log、Saga、Offer/业务库和无第二草稿证明；安装不等于业务验收。
 
 ## 8. 风险与未验证项
 
-- 当前重放契约修改只完成开发机验证；尚未部署到执行机，也未对唯一草稿执行新的真实保存、v2 独立检查或 submit。
+- 本轮 launcher 修复已部署并通过执行机 668 项 unittest、compileall、JSON、PowerShell parser 和 diff-check；本轮日度验证明确命中 `duplicate_existing`，未对唯一草稿执行新的保存、审批或 submit。Submit Saga/Offer 仍以既有 accepted reconciliation 与 fresh 只读审计为业务证据。
+- 执行机 Gitee fetch 因凭据不可交互认证失败，部署使用了权威 `b8c55de` 的唯一 bundle；该 bundle 和原有 untracked 项均保留，后续需恢复非交互 Gitee 凭据或继续使用可审计的 bundle 线。
 - CTG0286 历史草稿 ID 曾变化，必须以候选 payload、正式审计和商品管理行三方一致为准。
 - 正式 Profile 仍可能遇到 `SYS_ERROR`、登录风控或滑块；这些必须 fail closed，不能绕过。
 - 图片探针会向素材库上传图片但不会保存草稿，仍需在租约内受控执行。

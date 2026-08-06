@@ -4,7 +4,9 @@
 
 - Fresh `PC-20210622ARIU` evidence shows the existing 08:00 `YYDD-1688-Listing-Daily` task is enabled but its natural trigger produced `0x800710E0`; no 08:00 scheduler log or listing process was created. The only active browser-runtime process chain is the independent Crawler Worker.
 - The listing task wrapper now registers a separate `YYDD-1688-Listing-Daily-Launcher` under `SYSTEM` and starts the existing Interactive/Highest draft task through `Schedule.Service.RunEx($null, 4, session_id, $null)`. It fails closed when the active `Administrator` session is missing or ambiguous and never enables submit.
-- Development validation is complete for the wrapper contract and targeted manager tests. Executor registration and equivalent trigger validation remain pending the final lease recheck; the existing completed CTG0286 candidate must continue to return `duplicate_existing` without opening CDP 9306.
+- Development validation is complete for the wrapper contract and targeted manager tests. After the final lease/process check, the executor was fast-forwarded to `b8c55de` and registered the SYSTEM launcher. `-Action start -SessionId 3` produced a real Interactive worker run: TaskScheduler events recorded start and successful completion, `LastTaskResult=0`, a new scheduled log was written, and the existing CTG0286 candidate returned `duplicate_existing` without CDP 9306, a new execution, a draft, or submit.
+- The launcher registration is live and its 08:00 Action is the session-binding `-Action launch` path. Its own natural run history is still empty because installation happened after the 08:00 boundary; the direct `start` validation proves the shared `RunEx` transport, not a completed SYSTEM launcher event.
+- Fresh runtime inspection immediately before installation reported `crawler_active_count=0`, no active account/browser/request leases and no account lock. Stop-Sale remained Ready and the independent Crawler Worker remained Running; neither was changed.
 
 ## 2026-08-06 Production Closeout (Accepted)
 
@@ -13,7 +15,7 @@
 - 原 submit Execution 因成功跳转后继续等待旧按钮而误报 `TimeoutException`，不是平台发布失败。一次性 reconciliation 已生成 `reconcile-submit/success` Execution，审计为 `submit_succeeded`，Saga 为 `completed`；正式 writeback 后最终 workflow 为 `offer_written_back`。
 - `YYDD-1688-Listing-Daily` 已安装为每日 08:00，手动触发结果 0。当前 inbox 只有这一个已完成候选，两次调度检查均为 `duplicate_existing=1`，因此没有启动 9306、没有新草稿、没有自动 submit。
 - Crawler Worker 已恢复为 `Running`，队列当前 `due=0/active=0`；本轮所有临时计划任务已删除，正式 Listing Daily 与 Crawler Worker 保留。
-- 尚未完成的生产项只有：首次 08:00 自然触发复核，以及为日度 inbox 提供新的完整审核候选。单商品生产验收已完成，但不能据此宣称多商品或无人审批 submit 已验收。
+- 尚未完成的生产项只有：下一次 08:00 自然触发对 SYSTEM launcher 本身的独立复核，以及为日度 inbox 提供新的完整审核候选。单商品生产验收已完成，但不能据此宣称多商品或无人审批 submit 已验收。
 
 ## 2026-08-06 Managed Update (Submit Reapply Gate Ready)
 

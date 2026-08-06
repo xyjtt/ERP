@@ -5,6 +5,7 @@
 - The first fresh natural-trigger check exposed that an enabled `InteractiveToken` task can remain `Ready` with `0x800710E0` and no worker process even while the Administrator console is active. A normal `Start-ScheduledTask` call is not sufficient evidence of a bound interactive launch.
 - Scheduling now separates the 08:00 `SYSTEM` launcher from the existing draft-only Interactive listing task. The launcher discovers one active principal session and calls `Schedule.Service.RunEx` with `TASK_RUN_USE_SESSION_ID=4`; the same guarded path is used by the manual `start` action.
 - The launcher is a scheduler transport fix only. Candidate identity, account lease, draft-only execution, `duplicate_existing` short-circuiting, and the independent audit/submit gates remain unchanged.
+- The repair was deployed without touching the Crawler worktree: Gitee authentication on the executor failed, so the exact authoritative commit was transferred as a verified bundle and fast-forwarded in the listing worktree. A fresh lease inspection preceded Scheduler registration. The controlled worker run completed with `LastTaskResult=0` and `duplicate_existing=1`; the SYSTEM launcher remains pending its first natural 08:00 history entry.
 
 ## 2026-08-06 - Listing Reached a Guarded Production Offer
 

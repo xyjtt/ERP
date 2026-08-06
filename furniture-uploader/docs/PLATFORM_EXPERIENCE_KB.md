@@ -5,6 +5,8 @@
 - When an Interactive task has a live console session but its natural trigger stays `Ready/0x800710E0`, do not retry `Start-ScheduledTask` or infer a zero-business run. Keep the business task Interactive/Highest and add one scheduled `SYSTEM` launcher at the same boundary.
 - The launcher must resolve exactly one active session belonging to the task principal, call `Schedule.Service.RunEx($null, 4, session_id, $null)`, and fail closed for no or multiple sessions. Verify the child task's `Running` state or changed `LastRunTime`, its own scheduled log and summary, and the shared database/Saga evidence.
 - The launcher and worker must share `IgnoreNew`; the launcher must never invoke `--mode submit`, create a draft, or bypass the account/browser lease. A completed candidate must be observed as `duplicate_existing` with no CDP process.
+- On the executor, a verified commit bundle is a controlled deployment fallback when the configured Gitee remote cannot authenticate. Preserve the existing untracked bundle/scripts, confirm the exact HEAD and tracked-clean state, then run the lease/process gate again before `Register-ScheduledTask`.
+- A direct `-Action start -SessionId 3` validation can prove the shared `RunEx` child-task transport: require TaskScheduler start/completion events, worker `LastTaskResult=0`, a new scheduled log and `duplicate_existing`. It does not count as a natural SYSTEM launcher history entry; keep that transport gate explicit.
 
 ## 2026-08-06 Delayed Submit Success and Scheduler Findings
 
