@@ -298,3 +298,12 @@
 - `Run=failed` 和文件锁消失不代表下架审计已闭环；必须同时检查 Item、Saga 和 Outbox。
 - 对浏览器进程中断，Item 记录 `automation_error`，Saga 记录 `failed_terminal/interrupted_executor_process`，且两者都保留原始中断原因。
 - 只有 1688 成功或已下架才允许产生聚水潭 Outbox；技术失败的正确终态是无 Outbox，并在证据中明确 `not_created_ali1688_failed`。
+
+## 2026-08-07 过期 Stop-Sale 运行时恢复经验
+
+- 不要凭文件锁消失、任务计划状态或单次 SQL 快照判断 owner 已死亡。恢复只能在记录 hostname 与真实本机一致且 PID 为正数时进行，并用正常隔离级别同时核对数据库服务器时间、request/lease TTL、精确 PID、同账号 Crawler task/attempt、目标 Stop-Sale run 和外来 owner；安全门禁不得使用 `NOLOCK` 脏读。
+- 恢复快照必须覆盖 `account_key`、`run_id`、`request_key`、`task_type`、owner、PID、PID 存活证据、资格结论、fencing、资源键和正式存储过程集合；只有 Preview 当时已经 `eligible=true` 才能 Apply，Apply 前还要重新计算完全一致的指纹。旧 Preview 当时被阻塞时，即使条件后来变化也必须重新 Preview，不能复用。
+- 可恢复资源只允许目标账号租约和当前主机 `hostname:1..3` 的单一浏览器槽位。`jushuitan`、未知资源、跨账号资源或额外租约必须停止，不能顺手释放。
+- 多资源恢复必须先释放浏览器槽位、再释放账号租约，并与 request 接管/完成放在同一事务中执行。仅依赖逐条存储过程各自成功会留下部分释放窗口；调用方需统一 commit/rollback，并在提交后检查 request `cancelled/completed_at` 和目标 run 的残留租约。
+- 凭据或配置不可用同样是可审计阻塞，应输出结构化 `blocked` artifact，不能只留下 traceback。工具验证不等于真实页面、执行机或生产数据库验收。
+- 本地复用契约由 `19` 个恢复工具测试覆盖；下架/替换相关回归为 `543 passed, 7 subtests passed`，但生产 Apply 仍必须以实时快照为准。
