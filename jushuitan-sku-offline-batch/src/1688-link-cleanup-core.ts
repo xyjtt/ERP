@@ -233,24 +233,6 @@ export function findIdentitySiblingRows(task: CleanupTask, rows: RowEvidence[]):
   return rows.filter((row) => rowMatchesTaskIdentity(task, row, false));
 }
 
-export function findIdentitySiblingRows(task: CleanupTask, rows: RowEvidence[]): RowEvidence[] {
-  const storeName = normalizedKeyPart(task.store_name);
-  const storeSuffix = normalizedKeyPart(task.store_name.replace(/^阿里巴巴[-—–]?/, ""));
-  const productId = normalizedKeyPart(task.product_id);
-  const onlineSku = normalizedKeyPart(task.online_sku);
-  const platformCode = normalizedKeyPart(task.platform_store_item_code);
-
-  return rows.filter((row) => {
-    const text = normalizedKeyPart(row.text);
-    return (
-      (text.includes(storeName) || (text.includes("阿里巴巴") && text.includes(storeSuffix))) &&
-      text.includes(productId) &&
-      text.includes(onlineSku) &&
-      !text.includes(platformCode)
-    );
-  });
-}
-
 export function assertTasksAllowedForMode(mode: CleanupMode, tasks: CleanupTask[]): void {
   if (
     mode === "execute" &&
