@@ -1,5 +1,11 @@
 # Project Memory
 
+## 2026-08-06 Managed Update (Interactive Scheduler Launcher Repair)
+
+- Fresh executor evidence: `PC-20210622ARIU` has one active `Administrator` console session (`session_id=3`). `YYDD-1688-Listing-Daily` is enabled for 08:00 with `InteractiveToken/Highest` and `IgnoreNew`, but the 2026-08-06 natural trigger ended at `0x800710E0` before creating a listing process; `latest.summary.json` remained the earlier `duplicate_existing` run.
+- The unattended launch fix keeps the existing draft-only listing task and adds `YYDD-1688-Listing-Daily-Launcher` as an 08:00 `SYSTEM` task. The launcher resolves exactly one active session for the listing principal and calls `Schedule.Service.RunEx($null, 4, session_id, $null)`; ordinary `Start-ScheduledTask` is no longer used by the controlled `start` action.
+- The development worktree contains the launcher implementation and contract tests. No executor Scheduler registration has been changed by this update yet; production installation remains gated by a fresh account lease/process check and must be followed by task history, launcher/worker logs, Saga, Offer and database verification.
+
 ## 2026-08-06 Managed Update (Production Listing Closeout Accepted)
 
 - 上架修复提交 `a640e62a13e727226770f0540785a0536c7c2503` 已推送并部署到 `PC-20210622ARIU` 的 `E:\1688\ERP-auto-listing`。开发机 `668 tests OK`；执行机 unittest 退出码 0，compileall、JSON 配置和 tracked 工作树检查通过。

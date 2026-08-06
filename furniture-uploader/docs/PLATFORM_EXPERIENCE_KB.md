@@ -1,5 +1,11 @@
 # Platform Experience Knowledge Base
 
+## 2026-08-06 Scheduler Repair Pattern
+
+- When an Interactive task has a live console session but its natural trigger stays `Ready/0x800710E0`, do not retry `Start-ScheduledTask` or infer a zero-business run. Keep the business task Interactive/Highest and add one scheduled `SYSTEM` launcher at the same boundary.
+- The launcher must resolve exactly one active session belonging to the task principal, call `Schedule.Service.RunEx($null, 4, session_id, $null)`, and fail closed for no or multiple sessions. Verify the child task's `Running` state or changed `LastRunTime`, its own scheduled log and summary, and the shared database/Saga evidence.
+- The launcher and worker must share `IgnoreNew`; the launcher must never invoke `--mode submit`, create a draft, or bypass the account/browser lease. A completed candidate must be observed as `duplicate_existing` with no CDP process.
+
 ## 2026-08-06 Delayed Submit Success and Scheduler Findings
 
 - 1688 submit 成功后可能先进入结果页，再延迟完成页面组件切换。只要已从受信成功 URL、响应或页面状态提取并验证 Offer ID，就必须停止后续点击和旧按钮等待；不得因 `#submitFormButton` 已不存在而再次 submit。

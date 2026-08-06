@@ -1,5 +1,11 @@
 # DIRECT 1688 Progress
 
+## 2026-08-06 Scheduler Repair (Unattended Interactive Launch)
+
+- Fresh `PC-20210622ARIU` evidence shows the existing 08:00 `YYDD-1688-Listing-Daily` task is enabled but its natural trigger produced `0x800710E0`; no 08:00 scheduler log or listing process was created. The only active browser-runtime process chain is the independent Crawler Worker.
+- The listing task wrapper now registers a separate `YYDD-1688-Listing-Daily-Launcher` under `SYSTEM` and starts the existing Interactive/Highest draft task through `Schedule.Service.RunEx($null, 4, session_id, $null)`. It fails closed when the active `Administrator` session is missing or ambiguous and never enables submit.
+- Development validation is complete for the wrapper contract and targeted manager tests. Executor registration and equivalent trigger validation remain pending the final lease recheck; the existing completed CTG0286 candidate must continue to return `duplicate_existing` without opening CDP 9306.
+
 ## 2026-08-06 Production Closeout (Accepted)
 
 - `a640e62` 已部署到正式执行目录；开发机 668 个测试通过，执行机 unittest、compileall、JSON 与 tracked 工作树门禁通过。

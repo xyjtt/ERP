@@ -98,7 +98,9 @@ submit 点击前必须重新应用契约内全部非持久字段，并从当前 
 & .\scripts\manage_1688_listing_daily_task.ps1 -Action status
 ```
 
-核对任务 Action、Interactive/Highest、IgnoreNew、触发时间、账号、`LastTaskResult` 和 `latest.summary.json`。安装并不等于业务验收，首次自然触发后仍需核对审计、Saga、草稿和业务页面。
+安装会保留 `YYDD-1688-Listing-Daily` 的 Interactive/Highest draft-only 任务，并额外注册同一 08:00 的 `YYDD-1688-Listing-Daily-Launcher`（SYSTEM）。launcher 只负责解析唯一活跃的 `Administrator` 会话并用 `Schedule.Service.RunEx($null, 4, session_id, $null)` 启动前者；它不执行 Python、浏览器或 submit。
+
+核对两个任务的 Action、Principal、IgnoreNew、触发时间、账号、`LastTaskResult` 和 `latest.summary.json`。受控等价触发使用 `-Action start`（可在已确认会话时传 `-SessionId 3`），不得再使用普通 `Start-ScheduledTask`。验收还必须包含 launcher/worker 任务历史、scheduled log、Saga、Offer/业务库和无第二草稿证明；安装不等于业务验收。
 
 ## 8. 风险与未验证项
 

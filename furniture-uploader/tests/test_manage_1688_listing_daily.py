@@ -375,14 +375,20 @@ class ListingDailyTaskScriptContractTests(unittest.TestCase):
             Path(__file__).resolve().parents[1] / "scripts" / "manage_1688_listing_daily_task.ps1"
         ).read_text(encoding="utf-8")
         self.assertIn('TaskName = "YYDD-1688-Listing-Daily"', script)
+        self.assertIn('LauncherTaskName = "YYDD-1688-Listing-Daily-Launcher"', script)
         self.assertIn('AccountKey = "muke_lixiang"', script)
         self.assertIn("New-ScheduledTaskTrigger -Daily -At $DailyAt", script)
         self.assertIn("Register-ScheduledTask -TaskName $TaskName", script)
+        self.assertIn("Register-ScheduledTask -TaskName $LauncherTaskName", script)
         self.assertIn("-MultipleInstances IgnoreNew", script)
         self.assertIn("Remove-Item Env:ENABLE_1688_LISTING_SUBMIT", script)
         self.assertIn("logon_type = [string]$principal.LogonType", script)
         self.assertIn("run_level = [string]$principal.RunLevel", script)
         self.assertIn("working_directory = [string]$_.WorkingDirectory", script)
+        self.assertIn('New-Object -ComObject "Schedule.Service"', script)
+        self.assertIn("$registeredTask.RunEx($null, 4, $session, $null)", script)
+        self.assertIn('-UserId "SYSTEM" -LogonType ServiceAccount', script)
+        self.assertNotIn("Start-ScheduledTask -TaskName $TaskName", script)
         self.assertNotIn('"--mode", "submit"', script)
 
 

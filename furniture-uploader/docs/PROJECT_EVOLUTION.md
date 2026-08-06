@@ -1,5 +1,11 @@
 # Project Evolution
 
+## 2026-08-06 - Unattended Listing Launch Became Session-Bound
+
+- The first fresh natural-trigger check exposed that an enabled `InteractiveToken` task can remain `Ready` with `0x800710E0` and no worker process even while the Administrator console is active. A normal `Start-ScheduledTask` call is not sufficient evidence of a bound interactive launch.
+- Scheduling now separates the 08:00 `SYSTEM` launcher from the existing draft-only Interactive listing task. The launcher discovers one active principal session and calls `Schedule.Service.RunEx` with `TASK_RUN_USE_SESSION_ID=4`; the same guarded path is used by the manual `start` action.
+- The launcher is a scheduler transport fix only. Candidate identity, account lease, draft-only execution, `duplicate_existing` short-circuiting, and the independent audit/submit gates remain unchanged.
+
 ## 2026-08-06 - Listing Reached a Guarded Production Offer
 
 - 上架链路首次完成“既有草稿 -> 独立复核 -> 单次批准 -> 单次 submit -> 真实 Offer -> Repository reconciliation -> 正式 writeback”的生产闭环。最终 Offer 为 `1072868453052`，任务状态为 `offer_written_back`。
