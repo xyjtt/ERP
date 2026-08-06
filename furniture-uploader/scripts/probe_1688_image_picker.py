@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +20,7 @@ from auto_listing_executor import build_product_record, resolve_1688_publish_url
 from browser_rpa import BrowserRPA
 from config_loader import load_json_with_local_override
 from exceptions import ImageAlbumFullError
+from listing_browser_session import open_account_bound_listing_browser
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -29,6 +31,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--evidence-output",
         default=str(PROJECT_ROOT / "logs" / "production" / "1688-image-picker-probe-latest.json"),
+    )
+    parser.add_argument("--account-key", default="muke_lixiang")
+    parser.add_argument("--expected-shop", default="")
+    parser.add_argument("--expected-cdp-port", type=int, default=9306)
+    parser.add_argument("--lock-wait-seconds", type=int, default=0)
+    parser.add_argument("--runtime-lease-wait-seconds", type=float, default=0)
+    parser.add_argument(
+        "--shared-runtime-root",
+        default=os.getenv("YYDD_1688_RUNTIME_ROOT", "D:/script_1688"),
     )
     return parser
 
@@ -127,48 +138,57 @@ def main() -> int:
     if not picker_selector.get("value"):
         raise ValueError("detail_images fallback picker selector is not configured")
 
-    browser = BrowserRPA(operator_config.get("browser", {}), PROJECT_ROOT)
     context: dict[str, object] = {}
     page_diagnostics: dict[str, object] = {}
     probe_error: Exception | None = None
-    browser_opened = False
-    try:
-        browser.open()
-        browser_opened = True
-        publish_url, _category_id = resolve_1688_publish_url(payload, mode="draft")
-        same_draft_page = is_same_pending_draft_page(
-            draft_id,
-            str(browser.driver.current_url or ""),
-        )
-        if not same_draft_page:
-            browser.driver.get(publish_url)
-            browser._pause(float(browser.browser_config.get("page_load_wait_seconds", 2)))
-        elif not browser._is_publish_form_ready():
-            browser.driver.refresh()
-        browser._wait_for_publish_runtime_ready(timeout_seconds=180)
+    binding = None
+    identity = None
+    with open_account_bound_listing_browser(
+        payload=payload,
+        browser_class=BrowserRPA,
+        operator_config=operator_config,
+        project_root=PROJECT_ROOT,
+        shared_runtime_root=args.shared_runtime_root,
+        expected_account_key=args.account_key,
+        expected_shop_name=args.expected_shop,
+        expected_cdp_port=args.expected_cdp_port,
+        component="erp-listing-image-probe",
+        task_type="listing",
+        lock_wait_seconds=args.lock_wait_seconds,
+        runtime_lease_wait_seconds=args.runtime_lease_wait_seconds,
+    ) as (browser, binding, identity):
+        try:
+            publish_url, _category_id = resolve_1688_publish_url(payload, mode="draft")
+            same_draft_page = is_same_pending_draft_page(
+                draft_id,
+                str(browser.driver.current_url or ""),
+            )
+            if not same_draft_page:
+                browser.driver.get(publish_url)
+                browser._pause(float(browser.browser_config.get("page_load_wait_seconds", 2)))
+            elif not browser._is_publish_form_ready():
+                browser.driver.refresh()
+            browser._wait_for_publish_runtime_ready(timeout_seconds=180)
 
-        browser._run_picker_upload(
-            {
-                **detail_step,
-                "name": "image_probe",
-                "force_create_album": args.force_new_album,
-                "auto_create_album_when_full": True,
-                "require_album_ready": True,
-                "capture_uploaded_urls_only": True,
-                "auto_album_name_prefix": "AUTO_PROBE",
-                "max_insert_count": args.count,
-                "per_file_upload_timeout_seconds": 30,
-            },
-            picker_selector,
-            local_images,
-            context,
-        )
-    except Exception as exc:
-        probe_error = exc
-        page_diagnostics = collect_page_diagnostics(browser, args.evidence_output)
-    finally:
-        if browser_opened:
-            browser.close()
+            browser._run_picker_upload(
+                {
+                    **detail_step,
+                    "name": "image_probe",
+                    "force_create_album": args.force_new_album,
+                    "auto_create_album_when_full": True,
+                    "require_album_ready": True,
+                    "capture_uploaded_urls_only": True,
+                    "auto_album_name_prefix": "AUTO_PROBE",
+                    "max_insert_count": args.count,
+                    "per_file_upload_timeout_seconds": 30,
+                },
+                picker_selector,
+                local_images,
+                context,
+            )
+        except Exception as exc:
+            probe_error = exc
+            page_diagnostics = collect_page_diagnostics(browser, args.evidence_output)
 
     uploaded_urls = [
         str(item).strip()
@@ -196,6 +216,9 @@ def main() -> int:
             "page_diagnostics": page_diagnostics,
             "draft_saved": False,
             "offer_submitted": False,
+            "account_key": identity.account_key if identity else "",
+            "shop_name": identity.shop_name if identity else "",
+            "cdp_port": binding.cdp_port if binding else 0,
         }
         emit_evidence(evidence, args.evidence_output)
         return 2
@@ -219,6 +242,9 @@ def main() -> int:
         "remote_hosts": sorted({urlparse(url).hostname or "" for url in uploaded_urls}),
         "draft_saved": False,
         "offer_submitted": False,
+        "account_key": identity.account_key if identity else "",
+        "shop_name": identity.shop_name if identity else "",
+        "cdp_port": binding.cdp_port if binding else 0,
     }
     emit_evidence(evidence, args.evidence_output)
     return 0

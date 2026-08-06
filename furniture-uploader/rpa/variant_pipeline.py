@@ -245,6 +245,15 @@ def build_products_from_variants(
                     "variant_id": variant.variant_id,
                     "attributes_json": json.dumps(variant.attributes, ensure_ascii=False),
                     "image_enrichment_error": image_enrichment_error,
+                    "submit_reapply_required_fields": variant.raw.get(
+                        "submit_reapply_required_fields", []
+                    ),
+                    "submit_reapply_evidence": variant.raw.get(
+                        "submit_reapply_evidence", {}
+                    ),
+                    "submit_reapply_contract_sha256": variant.raw.get(
+                        "submit_reapply_contract_sha256", ""
+                    ),
                 }
             )
         )

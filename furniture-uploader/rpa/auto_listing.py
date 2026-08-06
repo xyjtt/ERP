@@ -394,8 +394,14 @@ def advance_listing_state(payload: dict[str, Any], event: str, *, evidence: dict
     next_state = transitions.get((current, event))
     if next_state is None:
         raise ListingContractError(f"invalid listing state transition: {current} -> {event}")
-    if event == "review_approved" and not evidence.get("approved_by"):
-        raise ListingContractError("approved_by is required")
+    approval_binding: dict[str, Any] = {}
+    if event == "review_approved":
+        from listing_review import ListingReviewError, assert_approval_binding
+
+        try:
+            approval_binding = assert_approval_binding(payload, evidence)
+        except ListingReviewError as exc:
+            raise ListingContractError(str(exc)) from exc
     if event == "submit_succeeded" and not evidence.get("offer_id"):
         raise ListingContractError("offer_id is required after submit")
     if event == "offer_written_back" and not evidence.get("offer_url"):
@@ -542,6 +548,10 @@ def advance_listing_state(payload: dict[str, Any], event: str, *, evidence: dict
     if event == "draft_saved":
         workflow["draft"] = dict(evidence)
         workflow.pop("pending_draft_id", None)
+    elif event == "review_approved":
+        draft = workflow.setdefault("draft", {})
+        draft["post_save_verified"] = True
+        draft["inspection_binding"] = approval_binding
     elif event == "submit_succeeded":
         workflow["offer"] = dict(evidence)
     return next_payload

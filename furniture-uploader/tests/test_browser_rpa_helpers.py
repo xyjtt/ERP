@@ -137,6 +137,54 @@ class BrowserRPAHelperTests(unittest.TestCase):
                 wait_seconds=0,
             )
 
+    def test_reopen_saved_draft_uses_previously_validated_category_when_url_omits_cat_id(self) -> None:
+        saved_url = (
+            "https://offer-new.1688.com/popular/publish.htm?"
+            "draftId=draft-1&operator=draft2offer"
+        )
+
+        class ReopenDriver(FakeDriver):
+            def get(self, url: str) -> None:
+                if "fillProductInfo.htm" in url:
+                    self.current_url = saved_url
+                else:
+                    self.current_url = url
+
+        self.browser.driver = ReopenDriver(current_url=saved_url)
+        context: dict[str, object] = {"actual_category_id": "122942001"}
+        with (
+            patch.object(self.browser, "_pause"),
+            patch.object(self.browser, "_wait_for_publish_runtime_ready"),
+        ):
+            self.browser._reopen_saved_draft_from_server(
+                {
+                    "expected_draft_id": "draft-1",
+                    "expected_category_id": "122942001",
+                },
+                context,
+                wait_seconds=0,
+            )
+
+        self.assertEqual(context["draft_server_reopen_category_id"], "122942001")
+        self.assertTrue(context["draft_verify_server_reopened"])
+
+    def test_reopen_saved_draft_rejects_mismatched_validated_category(self) -> None:
+        saved_url = (
+            "https://offer-new.1688.com/popular/publish.htm?"
+            "draftId=draft-1&operator=draft2offer"
+        )
+        self.browser.driver = FakeDriver(current_url=saved_url)
+
+        with self.assertRaisesRegex(PublishValidationError, "expected draft and category"):
+            self.browser._reopen_saved_draft_from_server(
+                {
+                    "expected_draft_id": "draft-1",
+                    "expected_category_id": "122942001",
+                },
+                {"actual_category_id": "123620022"},
+                wait_seconds=0,
+            )
+
     def test_build_picker_album_name_uses_prefix(self) -> None:
         album_name = self.browser._build_picker_album_name({"auto_album_name_prefix": "DETAIL"})
         self.assertTrue(album_name.startswith("DETAIL_"))
@@ -736,6 +784,37 @@ class BrowserRPAHelperTests(unittest.TestCase):
         self.assertEqual(len(context["detail_images_uploaded_urls"]), 2)
         self.assertEqual(captured["step"]["append_mode"], "replace")
         self.assertIn("https://images.example.com/1.webp", captured["value"])
+
+    def test_tinymce_images_reuses_complete_remote_source_without_picker(self) -> None:
+        self.browser.driver = FakeDriver()
+        self.browser._ensure_old_tinymce_mode = lambda _step: None  # type: ignore[assignment]
+        self.browser._upload_images_via_picker_batches = (  # type: ignore[assignment]
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("picker must be skipped"))
+        )
+        captured: dict[str, object] = {}
+        self.browser._write_tinymce_content = (  # type: ignore[assignment]
+            lambda _step, _selector, value: captured.update(value=value)
+        )
+        context: dict[str, object] = {
+            "detail_images_remote_list": [
+                "https://images.example.com/1.webp",
+                "https://images.example.com/2.webp",
+            ]
+        }
+
+        self.browser._insert_tinymce_images(
+            {
+                "name": "detail_images",
+                "fallback_picker_selector": {"by": "css", "value": "#picker"},
+            },
+            {"by": "css", "value": "#tinyMCE-0"},
+            ["C:/images/1.jpg", "C:/images/2.jpg"],
+            context,
+        )
+
+        self.assertEqual(context["detail_images_delivery_mode"], "external_url_capacity_fallback")
+        self.assertEqual(len(context["detail_images_uploaded_urls"]), 2)
+        self.assertIn("https://images.example.com/2.webp", captured["value"])
 
     def test_encode_file_as_data_url_uses_file_contents(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2361,6 +2440,10 @@ class BrowserRPAHelperTests(unittest.TestCase):
                 ]
             },
             "draft_submit_response_status": 200,
+            "draft_submit_response_draft_id": "draft-1",
+            "draft_submit_identity_evidence": {
+                "effective": {"draftId": "draft-1"},
+            },
             "draft_submit_trace": {
                 "status": 200,
                 "responseJson": {"success": True, "data": {"draftId": "draft-1"}},
@@ -2370,11 +2453,15 @@ class BrowserRPAHelperTests(unittest.TestCase):
                         "buyerProtectionSteps": [
                             {"from": 1, "serviceName": "15天发货", "value": "swtfh"},
                         ],
+                        "availableBuyerServices": [
+                            {"serviceName": "15天发货", "serviceCode": "swtfh"},
+                        ],
                     }
                 },
             },
         }
         publish_config = {
+            "expected_draft_id": "draft-1",
             "submit_reapply_nonpersistent_fields": ["send_address", "buyer_protection"],
             "draft_verification": {
                 "enabled": True,
@@ -2444,6 +2531,105 @@ class BrowserRPAHelperTests(unittest.TestCase):
                 context,
             )
 
+    def test_collect_submit_reapply_evidence_covers_four_nonpersistent_fields(self) -> None:
+        context: dict[str, object] = {
+            "send_address_id": "35281125",
+            "length_cm": "55",
+            "width_cm": "47",
+            "height_cm": "62.5",
+            "weight_g": "15250",
+            "draft_send_address_value": "",
+            "draft_send_address_state": {
+                "selected": True,
+                "selectedText": "江苏省 常州市 武进区",
+            },
+            "draft_delivery_service_state_persisted": {
+                "selectedServiceIds": [],
+            },
+            "draft_delivery_service_state_pre_save": {
+                "selected": True,
+                "selectedServiceIds": [365841],
+                "selectedLabels": ["送到楼下"],
+            },
+            "draft_logistics_dimensions": {
+                "length": "",
+                "width": "",
+                "height": "",
+                "weight": "",
+            },
+            "draft_logistics_pre_save_values": {
+                "length": "55",
+                "width": "47",
+                "height": "62.5",
+                "weight": "15250",
+            },
+            "draft_buyer_protection_value": "",
+            "draft_buyer_protection_schedule": [],
+            "buyer_protection_ship_time": "24小时发货",
+            "buyer_protection_ship_time_code": "essxsfh",
+            "draft_buyer_protection_pre_save_selected": True,
+            "draft_buyer_protection_pre_save_selected_text": "24小时发货",
+            "draft_submit_response_status": 200,
+            "draft_submit_response_draft_id": "draft-1",
+            "draft_submit_identity_evidence": {
+                "effective": {"draftId": "draft-1"},
+            },
+            "draft_submit_trace": {
+                "status": 200,
+                "responseJson": {"success": True, "data": {"draftId": "draft-1"}},
+                "patch": {
+                    "patchSnapshot": {
+                        "sendAddressId": 35281125,
+                        "deliveryServiceIds": [365841],
+                        "allowedDeliveryServices": [
+                            {"id": 365841, "label": "送到楼下"},
+                            {"id": 4511641, "label": "市区物流点自提"},
+                        ],
+                        "logisticsDimensions": {
+                            "length": "55",
+                            "width": "47",
+                            "height": "62.5",
+                            "weight": "15250",
+                        },
+                        "buyerProtectionServiceName": "24小时发货",
+                        "buyerProtectionServiceCode": "essxsfh",
+                        "buyerProtectionSteps": [{"from": 1, "value": "essxsfh"}],
+                        "availableBuyerServices": [
+                            {"serviceName": "24小时发货", "serviceCode": "essxsfh"}
+                        ],
+                    }
+                },
+            },
+        }
+        publish_config = {
+            "expected_draft_id": "draft-1",
+            "submit_reapply_nonpersistent_fields": [
+                "delivery_service",
+                "send_address",
+                "logistics",
+                "buyer_protection",
+            ],
+            "draft_verification": {
+                "buyer_protection_default_value": "24小时发货",
+                "buyer_protection_expected_code": "essxsfh",
+            },
+        }
+
+        required = self.browser._collect_draft_submit_reapply_evidence(
+            publish_config,
+            context,
+            context["draft_submit_trace"]["patch"]["patchSnapshot"],
+        )
+
+        self.assertEqual(
+            required,
+            ["delivery_service", "send_address", "logistics", "buyer_protection"],
+        )
+        contract = context["draft_submit_reapply_evidence"]
+        self.assertEqual(contract["draft_id"], "draft-1")
+        self.assertEqual(contract["fields"]["delivery_service"]["requested_ids"], [365841])
+        self.assertEqual(contract["fields"]["logistics"]["expected_values"]["weight"], "15250")
+
     def test_submit_required_fields_block_empty_address_and_wrong_buyer_protection(self) -> None:
         self.browser.driver = FakeDriver(current_url="https://offer-new.1688.com/popular/publish.htm")
         self.browser._ensure_draft_send_address_selected = lambda _context: None  # type: ignore[assignment]
@@ -2503,6 +2689,91 @@ class BrowserRPAHelperTests(unittest.TestCase):
 
         self.assertTrue(context.get("submit_required_fields_verified"))
 
+    def test_submit_replay_requires_exact_four_field_react_readback(self) -> None:
+        self.browser.driver = FakeDriver(current_url="https://offer-new.1688.com/popular/publish.htm")
+        self.browser._ensure_draft_send_address_selected = lambda _context: None  # type: ignore[assignment]
+        self.browser._ensure_draft_required_delivery_service = lambda _context: None  # type: ignore[assignment]
+        self.browser._apply_draft_page_state_patch = lambda _config, _context: None  # type: ignore[assignment]
+        self.browser._ensure_draft_logistics_dimensions_before_save = lambda _config, _context: None  # type: ignore[assignment]
+        self.browser._ensure_required_cat_props_before_draft_save = lambda _config, _context: None  # type: ignore[assignment]
+        self.browser._ensure_buyer_protection_ship_time_before_draft_save = lambda _config, _context: None  # type: ignore[assignment]
+        self.browser._draft_selected_send_address = lambda: "35281125"  # type: ignore[assignment]
+        self.browser._draft_delivery_service_state = lambda: {  # type: ignore[assignment]
+            "selectedServiceIds": [365841],
+            "allowedServiceIds": [365841, 4511641],
+        }
+        self.browser._draft_logistics_dimension_values = lambda: {  # type: ignore[assignment]
+            "length": "55",
+            "width": "47",
+            "height": "62.5",
+            "weight": "15250",
+        }
+        self.browser._draft_selected_buyer_protection = lambda: "24小时发货"  # type: ignore[assignment]
+        self.browser._draft_selected_buyer_protection_schedule = lambda: [  # type: ignore[assignment]
+            {"from": 1, "serviceName": "24小时发货", "serviceCode": "essxsfh"}
+        ]
+        self.browser._collect_assist_messages = lambda: []  # type: ignore[assignment]
+        fields = {
+            "delivery_service": {
+                "status": "submit_reapply_required",
+                "requested_ids": [365841],
+            },
+            "send_address": {
+                "status": "submit_reapply_required",
+                "expected_value": "35281125",
+            },
+            "logistics": {
+                "status": "submit_reapply_required",
+                "expected_values": {
+                    "length": "55",
+                    "width": "47",
+                    "height": "62.5",
+                    "weight": "15250",
+                },
+            },
+            "buyer_protection": {
+                "status": "submit_reapply_required",
+                "service_name": "24小时发货",
+                "service_code": "essxsfh",
+            },
+        }
+        contract = {"fields": fields}
+        contract_hash = __import__("hashlib").sha256(
+            json.dumps(
+                contract,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        context: dict[str, object] = {
+            "send_address_id": "35281125",
+            "length_cm": "55",
+            "width_cm": "47",
+            "height_cm": "62.5",
+            "weight_g": "15250",
+            "submit_reapply_required_fields": list(fields),
+            "submit_reapply_evidence": contract,
+            "submit_reapply_contract_sha256": contract_hash,
+        }
+
+        self.browser._prepare_and_verify_submit_required_fields(
+            {
+                "draft_verification": {
+                    "require_delivery_service": True,
+                    "require_send_address": True,
+                    "require_logistics_dimensions": True,
+                    "require_buyer_protection": True,
+                    "buyer_protection_default_value": "24小时发货",
+                    "buyer_protection_expected_code": "essxsfh",
+                }
+            },
+            context,
+        )
+
+        self.assertEqual(set(context["submit_reapply_results"]), set(fields))
+        self.assertTrue(context["submit_required_fields_verified"])
+
     def test_submit_success_navigation_extracts_offer_before_retry_click(self) -> None:
         self.browser.driver = FakeDriver(
             current_url="https://offer-new.1688.com/result.htm?offerId=1068081966540"
@@ -2524,6 +2795,33 @@ class BrowserRPAHelperTests(unittest.TestCase):
             context.get("platform_link_url"),
             "https://detail.1688.com/offer/1068081966540.html",
         )
+
+    def test_submit_success_navigation_grace_suppresses_retry_click(self) -> None:
+        class DelayedNavigationDriver:
+            reads = 0
+
+            @property
+            def current_url(self) -> str:
+                self.reads += 1
+                if self.reads < 3:
+                    return "https://offer-new.1688.com/popular/publish.htm"
+                return "https://offer-new.1688.com/result.htm?offerId=1072868453052"
+
+        self.browser.driver = DelayedNavigationDriver()
+        self.browser._pause = lambda _seconds: None  # type: ignore[assignment]
+        context: dict[str, object] = {}
+
+        detected = self.browser._wait_for_submit_success_navigation(
+            {
+                "submit_success_navigation_grace_seconds": 1,
+                "submit_verification": {"success_url_keywords": ["/result.htm"]},
+            },
+            context,
+        )
+
+        self.assertTrue(detected)
+        self.assertEqual(context["platform_link_id"], "1072868453052")
+        self.assertEqual(context["submit_retry_suppressed"], "success_navigation")
 
     def test_verify_saved_draft_accepts_logistics_trace_fallback_from_patch_snapshot(self) -> None:
         self.browser.driver = FakeDriver(current_url="https://offer-new.1688.com/popular/publish.htm")
@@ -2851,7 +3149,7 @@ class BrowserRPAHelperTests(unittest.TestCase):
         self.assertEqual(payload.get("unitText"), "件")
         self.assertEqual(payload.get("minBeginAmount"), "1")
 
-    def test_install_draft_request_patch_identity_only_changes_identity_fields(self) -> None:
+    def test_install_draft_request_patch_identity_only_preserves_native_edit_semantics(self) -> None:
         class PatchDriver(FakeDriver):
             def __init__(self) -> None:
                 super().__init__()
@@ -2881,13 +3179,15 @@ class BrowserRPAHelperTests(unittest.TestCase):
         self.assertEqual(payload.get("applyPatch"), False)
         self.assertEqual(payload.get("applyIdentityPatch"), True)
         self.assertIn("systemParam.draftId = expected", driver.last_script)
-        self.assertIn("systemParam.edit = true", driver.last_script)
-        self.assertIn("systemParam.isItemEdit = true", driver.last_script)
         self.assertIn("searchParams.set('draftId', expected)", driver.last_script)
-        self.assertIn("searchParams.set('edit', 'true')", driver.last_script)
-        self.assertIn("searchParams.set('isItemEdit', 'true')", driver.last_script)
+        self.assertNotIn("systemParam.edit = true", driver.last_script)
+        self.assertNotIn("systemParam.isItemEdit = true", driver.last_script)
+        self.assertNotIn("searchParams.set('edit', 'true')", driver.last_script)
+        self.assertNotIn("searchParams.set('isItemEdit', 'true')", driver.last_script)
         self.assertIn("collectDraftIdentityEvidence", driver.last_script)
         self.assertIn("__codexDraftIdentityPatchProbe", driver.last_script)
+        self.assertIn("originalBodyStructure", driver.last_script)
+        self.assertIn("patchedBodyStructure", driver.last_script)
 
     def test_install_draft_request_patch_includes_expected_draft_identity(self) -> None:
         class PatchDriver(FakeDriver):
@@ -3174,6 +3474,139 @@ class BrowserRPAHelperTests(unittest.TestCase):
             },
         )
 
+    def test_draft_request_patch_single_buyer_step_respects_native_process_offer_shape(self) -> None:
+        class PatchDriver(FakeDriver):
+            def __init__(self) -> None:
+                super().__init__()
+                self.scripts: list[str] = []
+                self.payloads: list[dict[str, object]] = []
+
+            def execute_script(self, script: str, *args: object) -> object:
+                self.scripts.append(script)
+                if args and isinstance(args[0], dict):
+                    self.payloads.append(args[0])
+                return None
+
+        publish_config = {
+            "draft_request_patch": {
+                "enabled": True,
+                "buyer_protection_include_sps_code": True,
+                "buyer_protection_default_value": "24小时发货",
+                "buyer_protection_step_template": [
+                    {
+                        "from": 1,
+                        "service_name": "24小时发货",
+                        "service_code": "essxsfh",
+                    }
+                ],
+            }
+        }
+        driver = PatchDriver()
+        self.browser.driver = driver
+
+        self.browser._install_draft_request_patch(publish_config, {})
+
+        payload = driver.payloads[-1]
+        script = driver.scripts[-1]
+        self.assertTrue(payload["includeBuyerProtectionSpsCode"])
+        self.assertEqual(payload["buyerProtectionServiceName"], "24小时发货")
+        self.assertEqual(
+            payload["buyerProtectionStepTemplate"],
+            [
+                {
+                    "from": 1,
+                    "serviceName": "24小时发货",
+                    "serviceCode": "essxsfh",
+                }
+            ],
+        )
+        self.assertIn(
+            "const requiresProcessSupplyType = buyerProtectionSteps.length > 0;",
+            script,
+        )
+        self.assertIn(
+            "includeBuyerProtectionSpsCode && Boolean(buyerProps.processOffer)",
+            script,
+        )
+        self.assertIn("const buildBuyerProtectionSpsCode = (dscGroups, jgdzGroups) =>", script)
+        self.assertIn("delete nextStep.serviceName", script)
+        self.assertIn("const meaningfulNextGroups = nextGroups.filter(", script)
+        self.assertIn(
+            "nodeId === 'supplyType' && node.fields && Array.isArray(node.fields.value)",
+            script,
+        )
+        self.assertIn("nodeId === 'supplyType' && Array.isArray(node.value)", script)
+        self.assertIn("node.renderData.cbuSupplyType = patchSnapshot.supplyTypeValues.slice();", script)
+        self.assertIn("nodeId === 'cbuSendAddress'", script)
+        self.assertIn("nodeId === 'freight'", script)
+        self.assertIn("node.sendAddressId = sendAddressId", script)
+        self.assertIn("originalBodyStructure", script)
+        self.assertIn("patchedBodyStructure", script)
+
+    def test_draft_page_state_patch_single_buyer_step_respects_native_process_offer_shape(self) -> None:
+        class PatchDriver(FakeDriver):
+            def __init__(self) -> None:
+                super().__init__()
+                self.script = ""
+                self.payload: dict[str, object] = {}
+
+            def execute_script(self, script: str, *args: object) -> object:
+                self.script = script
+                if args and isinstance(args[0], dict):
+                    self.payload = args[0]
+                return {"ok": True}
+
+        publish_config = {
+            "draft_page_state_patch": {
+                "enabled": True,
+                "buyer_protection_include_sps_code": True,
+                "buyer_protection_default_value": "24小时发货",
+                "buyer_protection_step_template": [
+                    {
+                        "from": 1,
+                        "service_name": "24小时发货",
+                        "service_code": "essxsfh",
+                    }
+                ],
+            }
+        }
+        driver = PatchDriver()
+        self.browser.driver = driver
+        self.browser._pause = lambda _seconds: None  # type: ignore[assignment]
+
+        self.browser._apply_draft_page_state_patch(publish_config, {})
+
+        self.assertTrue(driver.payload["includeBuyerProtectionSpsCode"])
+        self.assertEqual(driver.payload["buyerProtectionServiceName"], "24小时发货")
+        self.assertEqual(
+            driver.payload["buyerProtectionStepTemplate"],
+            [
+                {
+                    "from": 1,
+                    "serviceName": "24小时发货",
+                    "serviceCode": "essxsfh",
+                }
+            ],
+        )
+        self.assertIn(
+            "const requiresProcessSupplyType = expectedBuyerSteps.length > 0;",
+            driver.script,
+        )
+        self.assertIn(
+            "core.changeElementValue('supplyType', expectedSupplyTypes, { isDepth: false });",
+            driver.script,
+        )
+        self.assertIn(
+            "buyerProtectionValue.spsCode = buildBuyerProtectionSpsCode(",
+            driver.script,
+        )
+        self.assertIn(
+            "includeBuyerProtectionSpsCode && Boolean(buyerProtectionProps.processOffer)",
+            driver.script,
+        )
+        self.assertIn("delete nextStep.serviceName", driver.script)
+        self.assertIn("const meaningfulNextGroups = nextGroups.filter(", driver.script)
+
     def test_build_draft_page_state_patch_payload_includes_delivery_service_ids(self) -> None:
         payload = self.browser._build_draft_page_state_patch_payload(
             {
@@ -3214,6 +3647,19 @@ class BrowserRPAHelperTests(unittest.TestCase):
             },
         )
         self.assertEqual(resolved, [3385307])
+
+    def test_resolve_delivery_service_ids_prefers_runtime_selection_over_stale_default(self) -> None:
+        resolved = self.browser._resolve_delivery_service_ids(
+            patch_config={"delivery_service_default_ids": [3385307]},
+            context={
+                "draft_delivery_service_state": {
+                    "selected": True,
+                    "selectedServiceIds": [365841],
+                }
+            },
+        )
+
+        self.assertEqual(resolved, [365841])
 
     def test_build_draft_page_state_patch_payload_returns_empty_when_disabled(self) -> None:
         self.assertEqual(
@@ -3508,7 +3954,10 @@ class BrowserRPAHelperTests(unittest.TestCase):
         self.assertTrue(verification["strict_logistics_persist"])
         self.assertTrue(verification["strict_buyer_protection_persist"])
         self.assertEqual(config["publish"]["draft_request_patch_retry_modes"], ["full", "identity_only"])
-        self.assertEqual(config["publish"]["submit_reapply_nonpersistent_fields"], [])
+        self.assertEqual(
+            config["publish"]["submit_reapply_nonpersistent_fields"],
+            ["delivery_service", "send_address", "logistics", "buyer_protection"],
+        )
         main_image_step = next(
             step
             for step in config["publish"]["steps"]
@@ -3656,7 +4105,7 @@ class BrowserRPAHelperTests(unittest.TestCase):
         self.assertTrue(detected)
         self.assertEqual(context["draft_submit_response_draft_id"], "existing")
 
-    def test_assert_draft_request_trace_requires_existing_draft_edit_semantics(self) -> None:
+    def test_assert_draft_request_trace_accepts_native_existing_draft_edit_semantics(self) -> None:
         class TraceDriver(FakeDriver):
             def execute_script(self, script: str, *args: object) -> object:
                 if "window.__codexDraftSubmitRecords" in script:
@@ -3676,14 +4125,21 @@ class BrowserRPAHelperTests(unittest.TestCase):
                 return None
 
         self.browser.driver = TraceDriver()
-        with self.assertRaisesRegex(PublishSubmitError, "edit=true/isItemEdit=true"):
-            self.browser._assert_draft_request_trace(
-                {
-                    "expected_draft_id": "existing",
-                    "draft_request_patch": {"enabled": True, "timeout_seconds": 0},
-                },
-                {"draft_request_patch_mode": "identity_only"},
-            )
+        context: dict[str, object] = {"draft_request_patch_mode": "identity_only"}
+
+        detected = self.browser._assert_draft_request_trace(
+            {
+                "expected_draft_id": "existing",
+                "draft_request_patch": {"enabled": True, "timeout_seconds": 0},
+            },
+            context,
+        )
+
+        self.assertTrue(detected)
+        self.assertEqual(
+            context["draft_submit_identity_evidence"]["effective"],
+            {"draftId": "existing", "edit": False, "isItemEdit": False},
+        )
 
     def test_assert_draft_request_trace_records_existing_draft_identity_evidence(self) -> None:
         identity_evidence = {

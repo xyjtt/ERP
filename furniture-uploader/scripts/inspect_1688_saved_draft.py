@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import time
@@ -24,7 +25,16 @@ if str(RPA_ROOT) not in sys.path:
 from auto_listing_executor import resolve_1688_publish_url
 from browser_rpa import BrowserRPA
 from config_loader import load_json_with_local_override
+from listing_browser_session import open_account_bound_listing_browser
 from listing_duplicate_probe import ListingCandidate, LiveListingDuplicateProbe
+from listing_review import (
+    INSPECTION_ARTIFACT_VERSION,
+    build_review_contract_sha256,
+    build_submit_reapply_contract,
+    build_submit_reapply_contract_sha256,
+    require_unique_existing_draft_id,
+)
+from cross_project_runtime import resolve_build_sha
 from sku_offline_browser import SkuOfflineBrowser
 
 
@@ -32,7 +42,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Read-only independent refresh check for one 1688 draft.")
     parser.add_argument("--payload", required=True)
     parser.add_argument("--output", required=True)
-    parser.add_argument("--draft-id", default="", help="override the payload draft ID for read-only inspection")
+    parser.add_argument(
+        "--draft-id",
+        default="",
+        help="confirm the payload's unique existing draft ID for read-only inspection",
+    )
     parser.add_argument(
         "--publish-url",
         default="",
@@ -43,7 +57,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="open the draft by clicking its real product-management draft-box link",
     )
-    parser.add_argument("--expected-shop", default="木刻理想")
+    parser.add_argument("--expected-shop", default="")
+    parser.add_argument("--account-key", default="muke_lixiang")
+    parser.add_argument("--expected-cdp-port", type=int, default=9306)
+    parser.add_argument("--lock-wait-seconds", type=int, default=0)
+    parser.add_argument("--runtime-lease-wait-seconds", type=float, default=0)
+    parser.add_argument(
+        "--shared-runtime-root",
+        default=os.getenv("YYDD_1688_RUNTIME_ROOT", "D:/script_1688"),
+    )
     return parser
 
 
@@ -64,6 +86,14 @@ def _expected_main_image_count(payload: dict[str, object]) -> int:
     return max(1, min(4, len(main_urls)))
 
 
+def _resolve_inspection_draft_id(payload: dict[str, object], requested_draft_id: str) -> str:
+    expected_draft_id = require_unique_existing_draft_id(payload)
+    requested = str(requested_draft_id or "").strip()
+    if requested and requested != expected_draft_id:
+        raise ValueError("--draft-id must match the payload's unique existing draft ID")
+    return expected_draft_id
+
+
 def _buyer_protection_matches(
     actual_value: object,
     actual_schedule: list[dict[str, object]],
@@ -80,6 +110,30 @@ def _buyer_protection_matches(
         for item in actual_schedule
         if isinstance(item, dict)
     )
+
+
+def _classify_field_outcomes(
+    persisted_checks: dict[str, bool],
+    *,
+    submit_reapply_fields: set[str],
+    submit_reapply_contract_sha256: str,
+) -> tuple[dict[str, bool], dict[str, dict[str, object]]]:
+    checks: dict[str, bool] = {}
+    field_outcomes: dict[str, dict[str, object]] = {}
+    for name, persisted in persisted_checks.items():
+        if persisted:
+            checks[name] = True
+            field_outcomes[name] = {"status": "persisted"}
+        elif name in submit_reapply_fields:
+            checks[name] = True
+            field_outcomes[name] = {
+                "status": "submit_reapply_required",
+                "contract_sha256": submit_reapply_contract_sha256,
+            }
+        else:
+            checks[name] = False
+            field_outcomes[name] = {"status": "failed"}
+    return checks, field_outcomes
 
 
 def _validate_publish_url_override(raw_url: object, expected_draft_id: str) -> str:
@@ -323,13 +377,7 @@ def main() -> int:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     args = build_parser().parse_args()
     payload = json.loads(Path(args.payload).read_text(encoding="utf-8-sig"))
-    expected_draft_id = str(
-        args.draft_id
-        or ((payload.get("workflow") or {}).get("draft") or {}).get("draft_id")
-        or ""
-    ).strip()
-    if not re.fullmatch(r"[A-Za-z0-9_-]+", expected_draft_id):
-        raise ValueError("read-only draft inspection requires a valid draft ID")
+    expected_draft_id = _resolve_inspection_draft_id(payload, args.draft_id)
     expected_detail_count = len(list(((payload.get("images") or {}).get("detail_urls") or [])))
     expected_main_image_count = _expected_main_image_count(payload)
     expected_title = str((payload.get("product") or {}).get("selected_title") or "").strip()
@@ -347,6 +395,9 @@ def main() -> int:
     }
     expected_buyer_protection = "24小时发货"
     expected_buyer_protection_code = "essxsfh"
+    submit_reapply_contract = build_submit_reapply_contract(payload)
+    submit_reapply_contract_sha256 = build_submit_reapply_contract_sha256(payload)
+    submit_reapply_fields = set(submit_reapply_contract["required_fields"])
 
     config_dir = PROJECT_ROOT / "config"
     operator_config = load_json_with_local_override(config_dir / "operator_config.json")
@@ -372,17 +423,28 @@ def main() -> int:
                 "publish_url": publish_url,
             }
     browser_class = SkuOfflineBrowser if args.open_from_management else BrowserRPA
-    browser = browser_class(operator_config.get("browser", {}), PROJECT_ROOT)
-    browser.open()
-    boot_network_probe_installed = _install_draft_boot_network_probe(browser)
-    try:
+    with open_account_bound_listing_browser(
+        payload=payload,
+        browser_class=browser_class,
+        operator_config=operator_config,
+        project_root=PROJECT_ROOT,
+        shared_runtime_root=args.shared_runtime_root,
+        expected_account_key=args.account_key,
+        expected_shop_name=args.expected_shop,
+        expected_cdp_port=args.expected_cdp_port,
+        component="erp-listing-draft-inspector",
+        task_type="listing",
+        lock_wait_seconds=args.lock_wait_seconds,
+        runtime_lease_wait_seconds=args.runtime_lease_wait_seconds,
+    ) as (browser, binding, identity):
+        boot_network_probe_installed = _install_draft_boot_network_probe(browser)
         if args.open_from_management:
             entry_evidence = _open_draft_from_management(
                 browser,
                 system_config,
                 payload,
                 expected_draft_id=expected_draft_id,
-                expected_shop=args.expected_shop,
+                expected_shop=identity.shop_name,
             )
             publish_url = str(entry_evidence.get("clicked_href") or publish_url)
         elif expected_draft_id not in str(browser.driver.current_url or ""):
@@ -427,6 +489,9 @@ def main() -> int:
                 "screenshot_path": str(screenshot_path) if screenshot_saved else "",
                 "draft_saved": False,
                 "offer_submitted": False,
+                "account_key": identity.account_key,
+                "shop_name": identity.shop_name,
+                "cdp_port": binding.cdp_port,
             }
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_text(
@@ -476,14 +541,23 @@ def main() -> int:
         spec_values = browser._collect_spec_values()
         logistics = browser._draft_logistics_dimension_values()
         send_address = browser._draft_selected_send_address()
+        delivery_service = browser._draft_delivery_service_state()
         buyer_protection = browser._draft_selected_buyer_protection()
         buyer_schedule = browser._draft_selected_buyer_protection_schedule()
         assist_messages = browser._collect_assist_messages()
         boot_network_records = _collect_draft_boot_network_records(browser)
-    finally:
-        browser.close()
 
-    checks = {
+    selected_delivery_ids = {
+        int(item)
+        for item in list(delivery_service.get("selectedServiceIds") or [])
+        if str(item).strip().isdigit() and int(item) > 0
+    }
+    allowed_delivery_ids = {
+        int(item)
+        for item in list(delivery_service.get("allowedServiceIds") or [])
+        if str(item).strip().isdigit() and int(item) > 0
+    }
+    persisted_checks = {
         "draft_id": str(core.get("draft_id") or "") == expected_draft_id,
         "title": str(core.get("title") or "") == expected_title,
         "price": _decimal_equal(core.get("price"), expected_price),
@@ -494,6 +568,9 @@ def main() -> int:
         "detail_image_count": description_image_count == expected_detail_count,
         "spec_color": _spec_equal(spec_values.get("颜色"), expected_specs["颜色"]),
         "spec_size": _spec_equal(spec_values.get("尺寸"), expected_specs["尺寸"]),
+        "delivery_service": bool(selected_delivery_ids)
+        and bool(allowed_delivery_ids)
+        and selected_delivery_ids.issubset(allowed_delivery_ids),
         "logistics": all(str(logistics.get(key, "")).strip() == value for key, value in expected_logistics.items()),
         "send_address": bool(send_address),
         "buyer_protection": _buyer_protection_matches(
@@ -503,7 +580,15 @@ def main() -> int:
             expected_code=expected_buyer_protection_code,
         ),
     }
+    checks, field_outcomes = _classify_field_outcomes(
+        persisted_checks,
+        submit_reapply_fields=submit_reapply_fields,
+        submit_reapply_contract_sha256=submit_reapply_contract_sha256,
+    )
     evidence = {
+        "artifact_version": INSPECTION_ARTIFACT_VERSION,
+        "inspector_build_sha": resolve_build_sha(PROJECT_ROOT.parent),
+        "payload_contract_sha256": build_review_contract_sha256(payload),
         "status": "passed" if all(checks.values()) else "failed",
         "checked_at": datetime.now(timezone.utc).isoformat(),
         "task_id": str(payload.get("task_id") or ""),
@@ -512,6 +597,8 @@ def main() -> int:
         "requested_url": publish_url,
         "current_url": current_url,
         "checks": checks,
+        "field_outcomes": field_outcomes,
+        "submit_reapply_contract_sha256": submit_reapply_contract_sha256,
         "actual": {
             "title": str(core.get("title") or ""),
             "price": str(core.get("price") or ""),
@@ -519,6 +606,7 @@ def main() -> int:
             "main_image": main_image,
             "detail_image_count": description_image_count,
             "spec_values": spec_values,
+            "delivery_service": delivery_service,
             "logistics": logistics,
             "send_address": send_address,
             "buyer_protection": buyer_protection,
@@ -535,11 +623,15 @@ def main() -> int:
             "detail_image_count": expected_detail_count,
             "buyer_protection": expected_buyer_protection,
             "buyer_protection_code": expected_buyer_protection_code,
+            "submit_reapply_required_fields": sorted(submit_reapply_fields),
         },
         "boot_network_probe_installed": boot_network_probe_installed,
         "boot_network_records": boot_network_records,
         "draft_saved": False,
         "offer_submitted": False,
+        "account_key": identity.account_key,
+        "shop_name": identity.shop_name,
+        "cdp_port": binding.cdp_port,
     }
     rendered = json.dumps(evidence, ensure_ascii=False, indent=2)
     output_path.parent.mkdir(parents=True, exist_ok=True)

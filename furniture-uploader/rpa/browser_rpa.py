@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import html
 import json
 import math
@@ -587,8 +588,22 @@ class BrowserRPA:
                     context,
                 )
                 if not trace_detected and not success_navigation_detected:
+                    success_navigation_detected = self._wait_for_submit_success_navigation(
+                        publish_config,
+                        context,
+                    )
+                if not trace_detected and not success_navigation_detected:
                     context["submit_retry_mode"] = "dispatch_event_click"
-                    self._dispatch_click_with_events(submit_selector)
+                    try:
+                        self._dispatch_click_with_events(submit_selector)
+                    except TimeoutException:
+                        success_navigation_detected = self._submit_success_navigation_detected(
+                            publish_config,
+                            context,
+                        )
+                        if not success_navigation_detected:
+                            raise
+                        context["submit_retry_mode"] = "success_navigation_during_dispatch"
                     self._pause(1.0)
                     self._check_publish_error_state(
                         publish_config.get("submit_error_detection", {}),
@@ -4354,12 +4369,16 @@ class BrowserRPA:
                 f"TinyMCE editor '{editor_id}' does not configure a picker upload opener."
             )
 
-        if step.get("use_remote_detail_urls", False):
-            uploaded_urls = [
-                str(item).strip()
-                for item in context.get("detail_images_remote_list", [])
-                if str(item).strip()
-            ]
+        remote_detail_urls = [
+            str(item).strip()
+            for item in context.get("detail_images_remote_list", [])
+            if str(item).strip()
+        ]
+        use_remote_detail_urls = bool(step.get("use_remote_detail_urls", False)) or (
+            bool(remote_detail_urls) and len(remote_detail_urls) == len(values)
+        )
+        if use_remote_detail_urls:
+            uploaded_urls = remote_detail_urls
             if len(uploaded_urls) != len(values):
                 raise PublishValidationError(
                     "External detail URL fallback count does not match prepared images: "
@@ -5702,22 +5721,53 @@ class BrowserRPA:
             }
 
             const requestedDeliveryServiceIds = normalizeServiceIds(payload.deliveryServiceIds);
-            if (requestedDeliveryServiceIds.length > 0) {
-              const customExtraComponent = components.customExtraService || {};
-              const customExtraProps = customExtraComponent.props || {};
-              const customExtraValue = cloneValue(customExtraProps.value || {});
-              const nextViewModelMap =
-                customExtraValue.viewModelMap && typeof customExtraValue.viewModelMap === 'object'
-                  ? { ...customExtraValue.viewModelMap }
-                  : {};
-              const deliveryMapKey =
-                Object.keys(nextViewModelMap).find((key) => normalizeText(key).includes('配送')) ||
-                '配送服务';
-              nextViewModelMap[deliveryMapKey] = requestedDeliveryServiceIds[0];
+            const customExtraComponent = components.customExtraService || {};
+            const customExtraProps = customExtraComponent.props || {};
+            const customExtraValue = cloneValue(customExtraProps.value || {});
+            const deliveryTemplates = (Array.isArray(customExtraProps.serviceTemplates)
+              ? customExtraProps.serviceTemplates
+              : []
+            ).filter((item) => normalizeText((item && (item.name || item.serviceName)) || '').includes('配送'));
+            const allowedDeliveryServiceIds = normalizeServiceIds(
+              deliveryTemplates.flatMap((template) =>
+                (Array.isArray(template && template.data) ? template.data : []).map((item) => item && item.id)
+              )
+            );
+            const nextViewModelMap =
+              customExtraValue.viewModelMap && typeof customExtraValue.viewModelMap === 'object'
+                ? { ...customExtraValue.viewModelMap }
+                : {};
+            const deliveryMapKey =
+              Object.keys(nextViewModelMap).find((key) => normalizeText(key).includes('配送')) ||
+              '配送服务';
+            const currentDeliveryServiceIds = normalizeServiceIds(
+              (Array.isArray(customExtraValue.customServices) ? customExtraValue.customServices : []).concat(
+                nextViewModelMap[deliveryMapKey]
+              )
+            ).filter(
+              (item) => allowedDeliveryServiceIds.length === 0 || allowedDeliveryServiceIds.includes(item)
+            );
+            const validRequestedDeliveryServiceIds = requestedDeliveryServiceIds.filter(
+              (item) => allowedDeliveryServiceIds.length === 0 || allowedDeliveryServiceIds.includes(item)
+            );
+            const selectedDeliveryServiceId =
+              currentDeliveryServiceIds[0] ||
+              validRequestedDeliveryServiceIds[0] ||
+              allowedDeliveryServiceIds[0] ||
+              null;
+            if (selectedDeliveryServiceId != null) {
+              const currentCustomServices = normalizeServiceIds(customExtraValue.customServices || []);
+              const preservedCustomServices = allowedDeliveryServiceIds.length > 0
+                ? currentCustomServices.filter((item) => !allowedDeliveryServiceIds.includes(item))
+                : [];
+              nextViewModelMap[deliveryMapKey] = selectedDeliveryServiceId;
               customExtraValue.viewModelMap = nextViewModelMap;
-              customExtraValue.customServices = requestedDeliveryServiceIds.slice();
+              customExtraValue.customServices = normalizeServiceIds(
+                preservedCustomServices.concat([selectedDeliveryServiceId])
+              );
               core.changeElementValue('customExtraService', customExtraValue, { isDepth: false });
-              result.deliveryServiceApplied = requestedDeliveryServiceIds;
+              result.deliveryServiceApplied = [selectedDeliveryServiceId];
+              result.deliveryServiceAllowed = allowedDeliveryServiceIds;
             }
 
             const buyerProtectionServiceName = normalizeText(payload.buyerProtectionServiceName);
@@ -5870,9 +5920,7 @@ class BrowserRPA:
                   .map((item) => Number(item))
                   .filter((item) => Number.isFinite(item) && item > 0)
               : [];
-            const requiresProcessSupplyType =
-              expectedBuyerSteps.length > 1 ||
-              expectedBuyerSteps.some((item) => Number(item && item.from) > 1);
+            const requiresProcessSupplyType = expectedBuyerSteps.length > 0;
             const expectedSupplyTypes = Array.from(
               new Set(
                 (requiresProcessSupplyType ? currentSupplyTypes.concat([1, 2]) : currentSupplyTypes)
@@ -5922,8 +5970,12 @@ class BrowserRPA:
                       ...(existingStep || {}),
                       from: Number(stepItem.from),
                       value: String(stepItem.value || ''),
-                      serviceName: String(stepItem.serviceName || ''),
                     };
+                    if (buyerProtectionProps.processOffer) {
+                      nextStep.serviceName = String(stepItem.serviceName || '');
+                    } else if (Object.prototype.hasOwnProperty.call(nextStep, 'serviceName')) {
+                      delete nextStep.serviceName;
+                    }
                     if (stepItem.end != null && Number(stepItem.end) >= Number(stepItem.from)) {
                       nextStep.end = Number(stepItem.end);
                     } else {
@@ -5943,15 +5995,7 @@ class BrowserRPA:
                 const selectedModels = Array.isArray(groupItem && groupItem.ptsOfferTagModels)
                   ? groupItem.ptsOfferTagModels.filter((item) => item && item.selected)
                   : [];
-                const shouldForceDefaultService = ['4', '6'].includes(logicGroupId);
-                const fallbackModels = Array.isArray(groupItem && groupItem.ptsOfferTagModels)
-                  ? groupItem.ptsOfferTagModels
-                  : [];
-                const effectiveModels =
-                  selectedModels.length > 0
-                    ? selectedModels
-                    : (shouldForceDefaultService ? fallbackModels.slice(0, 1) : []);
-                nextGroup.steps = effectiveModels
+                nextGroup.steps = selectedModels
                   .map((item) => {
                     const value = String((item && item.serviceCode) || '').trim();
                     return value ? { value } : null;
@@ -5959,10 +6003,15 @@ class BrowserRPA:
                   .filter(Boolean);
                 return nextGroup;
               });
-              if (nextGroups.length > 0) {
-                return nextGroups;
+              const meaningfulNextGroups = nextGroups.filter(
+                (groupItem) => Array.isArray(groupItem && groupItem.steps) && groupItem.steps.length > 0
+              );
+              if (meaningfulNextGroups.length > 0) {
+                return meaningfulNextGroups;
               }
-              return currentDscGroups;
+              return currentDscGroups.filter(
+                (groupItem) => Array.isArray(groupItem && groupItem.steps) && groupItem.steps.length > 0
+              );
             };
             const buildBuyerProtectionJgdzGroups = (sourceSelectedServices) => {
               const buyerJgdzGroups = (((buyerProtectionProps.channelRenderMap || {}).jgdz) || []);
@@ -5990,15 +6039,7 @@ class BrowserRPA:
                 const selectedModels = Array.isArray(groupItem && groupItem.ptsOfferTagModels)
                   ? groupItem.ptsOfferTagModels.filter((item) => item && item.selected)
                   : [];
-                const shouldForceDefaultService = ['4', '6'].includes(logicGroupId);
-                const fallbackModels = Array.isArray(groupItem && groupItem.ptsOfferTagModels)
-                  ? groupItem.ptsOfferTagModels
-                  : [];
-                const effectiveModels =
-                  selectedModels.length > 0
-                    ? selectedModels
-                    : (shouldForceDefaultService ? fallbackModels.slice(0, 1) : []);
-                nextGroup.steps = effectiveModels
+                nextGroup.steps = selectedModels
                   .map((item) => {
                     const value = String((item && item.serviceCode) || '').trim();
                     return value ? { value } : null;
@@ -6016,28 +6057,32 @@ class BrowserRPA:
                 (groupItem) => Array.isArray(groupItem && groupItem.steps) && groupItem.steps.length > 0
               );
             };
+            const effectiveIncludeBuyerProtectionSpsCode =
+              includeBuyerProtectionSpsCode && Boolean(buyerProtectionProps.processOffer);
             const buildBuyerProtectionSpsCode = (dscGroups, jgdzGroups) => {
               const values = [];
-              const pushValue = (rawValue) => {
+              const append = (rawValue) => {
                 const value = String(rawValue || '').trim();
-                if (value && !values.includes(value)) {
-                  values.push(value);
-                }
+                if (value && !values.includes(value)) values.push(value);
               };
-              (Array.isArray(dscGroups) ? dscGroups : []).forEach((groupItem) => {
-                const logicGroupId = String((groupItem && groupItem.logicGroupId) || (groupItem && groupItem.groupId) || '').trim();
-                const steps = Array.isArray(groupItem && groupItem.steps) ? groupItem.steps : [];
-                if (logicGroupId === '1') {
-                  pushValue(((steps[0] || {}).value));
-                  return;
-                }
-                steps.forEach((stepItem) => pushValue(stepItem && stepItem.value));
-              });
-              (Array.isArray(jgdzGroups) ? jgdzGroups : []).forEach((groupItem) => {
-                const steps = Array.isArray(groupItem && groupItem.steps) ? groupItem.steps : [];
-                steps.forEach((stepItem) => pushValue(stepItem && stepItem.value));
+              [dscGroups, jgdzGroups].forEach((groups) => {
+                (Array.isArray(groups) ? groups : []).forEach((groupItem) => {
+                  (Array.isArray(groupItem && groupItem.steps) ? groupItem.steps : [])
+                    .forEach((stepItem) => append(stepItem && stepItem.value));
+                });
               });
               return values;
+            };
+            const buyerProtectionSpsCodeMatches = (buyerValue, dscGroups, jgdzGroups) => {
+              if (!effectiveIncludeBuyerProtectionSpsCode) {
+                return true;
+              }
+              const currentSpsCode = Array.isArray((buyerValue || {}).spsCode)
+                ? (buyerValue || {}).spsCode.map((item) => String(item || '').trim()).filter(Boolean)
+                : [];
+              return JSON.stringify(currentSpsCode) === JSON.stringify(
+                buildBuyerProtectionSpsCode(dscGroups, jgdzGroups)
+              );
             };
             if (requiresProcessSupplyType && expectedSupplyTypes.length > 0) {
               if (JSON.stringify(currentSupplyTypes) !== JSON.stringify(expectedSupplyTypes)) {
@@ -6057,7 +6102,12 @@ class BrowserRPA:
               const currentItemMessage = String(((buyerProtectionProps.itemMessage || {})['dsc|1'] || '')).trim();
               if (
                 JSON.stringify(currentSimplifiedSteps) === JSON.stringify(expectedSimplifiedSteps) &&
-                !currentItemMessage
+                !currentItemMessage &&
+                buyerProtectionSpsCodeMatches(
+                  buyerProtectionValue,
+                  currentSelectedGroups,
+                  (((buyerProtectionProps.value || {}).selectedServices || {}).jgdz) || []
+                )
               ) {
                 result.buyerProtectionApplied =
                   expectedBuyerSteps.map((item) => String(item.serviceName || '').trim()).filter(Boolean).join(' | ') ||
@@ -6193,7 +6243,12 @@ class BrowserRPA:
                 const refreshedItemMessage = String(((refreshedBuyerProps.itemMessage || {})['dsc|1'] || '')).trim();
                 if (
                   JSON.stringify(refreshedSimplifiedSteps) === JSON.stringify(expectedSimplifiedSteps) &&
-                  !refreshedItemMessage
+                  !refreshedItemMessage &&
+                  buyerProtectionSpsCodeMatches(
+                    refreshedBuyerProps.value || {},
+                    refreshedSelectedGroups,
+                    (((refreshedBuyerProps.value || {}).selectedServices || {}).jgdz) || []
+                  )
                 ) {
                   result.buyerProtectionApplied =
                     expectedBuyerSteps.map((item) => String(item.serviceName || '').trim()).filter(Boolean).join(' | ') ||
@@ -6205,7 +6260,7 @@ class BrowserRPA:
                   const nextDscGroups = buildBuyerProtectionGroups(selectedServices);
                   const nextJgdzGroups = buildBuyerProtectionJgdzGroups(selectedServices);
                   buyerProtectionValue.suggestBuyerProtectionDeliveryTime =
-                    expectedBuyerSteps.length === 1
+                    buyerProtectionProps.processOffer && expectedBuyerSteps.length === 1
                       ? String((expectedBuyerSteps[0] || {}).serviceName || '')
                       : '';
                   const nextSelectedServices = {
@@ -6218,7 +6273,7 @@ class BrowserRPA:
                     delete nextSelectedServices.jgdz;
                   }
                   buyerProtectionValue.selectedServices = nextSelectedServices;
-                  if (includeBuyerProtectionSpsCode) {
+                  if (effectiveIncludeBuyerProtectionSpsCode) {
                     buyerProtectionValue.spsCode = buildBuyerProtectionSpsCode(
                       nextDscGroups,
                       nextSelectedServices.jgdz || []
@@ -6310,6 +6365,25 @@ class BrowserRPA:
                 required_labels = self._extract_required_labels_from_assist_messages(assist_messages)
                 if required_labels:
                     context["draft_required_field_labels"] = required_labels
+            applied_delivery_ids = self._normalize_positive_integer_list(
+                result.get("deliveryServiceApplied") or []
+            )
+            allowed_delivery_ids = self._normalize_positive_integer_list(
+                result.get("deliveryServiceAllowed") or []
+            )
+            if applied_delivery_ids:
+                delivery_state = {
+                    "exists": True,
+                    "selected": True,
+                    "selectedServiceIds": applied_delivery_ids,
+                    "selectedLabels": [],
+                    "allowedServiceIds": allowed_delivery_ids,
+                    "allowedServices": [
+                        {"id": item, "label": ""} for item in allowed_delivery_ids
+                    ],
+                }
+                context["draft_delivery_service_state"] = delivery_state
+                context["draft_delivery_service_state_pre_save"] = dict(delivery_state)
         self._pause(0.2)
 
     def _install_draft_request_patch(
@@ -6450,6 +6524,99 @@ class BrowserRPA:
               }
             };
 
+            const summarizeDraftRequestBody = (body) => {
+              const clone = (value) => {
+                try {
+                  return JSON.parse(JSON.stringify(value));
+                } catch (error) {
+                  return null;
+                }
+              };
+              const summarizeModel = (model) => {
+                if (!model || typeof model !== 'object' || Array.isArray(model)) return null;
+                const formValues = model.formValues;
+                if (!formValues || typeof formValues !== 'object' || Array.isArray(formValues)) return null;
+                const globalModel = model.global && typeof model.global === 'object' ? model.global : {};
+                const systemParam = globalModel.systemParam && typeof globalModel.systemParam === 'object'
+                  ? globalModel.systemParam
+                  : {};
+                const renderData = globalModel.renderData && typeof globalModel.renderData === 'object'
+                  ? globalModel.renderData
+                  : {};
+                return {
+                  identity: {
+                    systemParam: {
+                      draftId: systemParam.draftId == null ? '' : String(systemParam.draftId),
+                      edit: systemParam.edit == null ? '' : systemParam.edit,
+                      isItemEdit: systemParam.isItemEdit == null ? '' : systemParam.isItemEdit,
+                    },
+                    renderData: {
+                      draftId: renderData.draftId == null ? '' : String(renderData.draftId),
+                      operator: renderData.operator == null ? '' : String(renderData.operator),
+                    },
+                  },
+                  formValues: clone({
+                    supplyType: formValues.supplyType,
+                    buyerProtection: formValues.buyerProtection,
+                    customExtraService: formValues.customExtraService,
+                    cbuSendAddress: formValues.cbuSendAddress,
+                    freight: formValues.freight,
+                    officialLogistics: formValues.officialLogistics,
+                  }),
+                };
+              };
+              const visited = new WeakSet();
+              const inspect = (value, depth = 0) => {
+                if (value == null || depth > 8) return null;
+                if (typeof value === 'string') {
+                  const text = value.trim();
+                  if (!text) return null;
+                  if (text.startsWith('{') || text.startsWith('[')) {
+                    try {
+                      return inspect(JSON.parse(text), depth + 1);
+                    } catch (error) {
+                      return null;
+                    }
+                  }
+                  try {
+                    const params = new URLSearchParams(text);
+                    for (const [, entryValue] of params.entries()) {
+                      const found = inspect(entryValue, depth + 1);
+                      if (found) return found;
+                    }
+                  } catch (error) {
+                    return null;
+                  }
+                  return null;
+                }
+                if (typeof URLSearchParams !== 'undefined' && value instanceof URLSearchParams) {
+                  for (const [, entryValue] of value.entries()) {
+                    const found = inspect(entryValue, depth + 1);
+                    if (found) return found;
+                  }
+                  return null;
+                }
+                if (typeof FormData !== 'undefined' && value instanceof FormData) {
+                  for (const [, entryValue] of value.entries()) {
+                    if (typeof entryValue !== 'string') continue;
+                    const found = inspect(entryValue, depth + 1);
+                    if (found) return found;
+                  }
+                  return null;
+                }
+                if (typeof value !== 'object' || visited.has(value)) return null;
+                visited.add(value);
+                const direct = summarizeModel(value);
+                if (direct) return direct;
+                for (const entryValue of Object.values(value)) {
+                  const found = inspect(entryValue, depth + 1);
+                  if (found) return found;
+                }
+                return null;
+              };
+              return inspect(body) || {};
+            };
+
             const requestCarriesExpectedDraftId = (rawUrl, body) => {
               const expected = String(window.__codexDraftPatchConfig.expectedDraftId || '').trim();
               if (!expected) {
@@ -6532,8 +6699,6 @@ class BrowserRPA:
               try {
                 const parsed = new URL(text, window.location.href);
                 parsed.searchParams.set('draftId', expected);
-                parsed.searchParams.set('edit', 'true');
-                parsed.searchParams.set('isItemEdit', 'true');
                 return parsed.toString();
               } catch (error) {
                 return text;
@@ -6554,8 +6719,6 @@ class BrowserRPA:
                 return false;
               }
               systemParam.draftId = expected;
-              systemParam.edit = true;
-              systemParam.isItemEdit = true;
               return true;
             };
 
@@ -6766,6 +6929,30 @@ class BrowserRPA:
                 const configuredIds = normalizeServiceIds(window.__codexDraftPatchConfig.deliveryServiceIds || []);
                 const customExtraProps = ((components.customExtraService || {}).props) || {};
                 const customExtraValue = (customExtraProps.value || {});
+                const deliveryTemplates = (Array.isArray(customExtraProps.serviceTemplates)
+                  ? customExtraProps.serviceTemplates
+                  : []
+                ).filter((item) => normalizeDeliveryLabel((item && (item.name || item.serviceName)) || '').includes('配送'));
+                const allowedDeliveryIds = normalizeServiceIds(
+                  deliveryTemplates.flatMap((template) =>
+                    (Array.isArray(template && template.data) ? template.data : []).map((item) => item && item.id)
+                  )
+                );
+                const allowedDeliveryServices = [];
+                const allowedDeliverySeen = new Set();
+                deliveryTemplates.forEach((template) => {
+                  (Array.isArray(template && template.data) ? template.data : []).forEach((item) => {
+                    const id = normalizeServiceIds([item && item.id])[0];
+                    if (!id || allowedDeliverySeen.has(id)) return;
+                    allowedDeliverySeen.add(id);
+                    allowedDeliveryServices.push({
+                      id,
+                      label: String(
+                        (item && (item.name || item.serviceName || item.text || item.title || item.label)) || ''
+                      ).replace(/\\s+/g, ' ').trim(),
+                    });
+                  });
+                });
                 const stateCustomServices = normalizeServiceIds(
                   Array.isArray(customExtraValue.customServices) ? customExtraValue.customServices : []
                 );
@@ -6791,11 +6978,19 @@ class BrowserRPA:
                     .map((label) => normalizeDeliveryServiceId(label))
                     .filter((item) => item != null)
                 );
-                const merged = normalizeServiceIds(
-                  configuredIds.concat(stateCustomServices, mapDeliveryIds, labelMappedIds)
+                const validIds = (values) => normalizeServiceIds(values).filter(
+                  (item) => allowedDeliveryIds.length === 0 || allowedDeliveryIds.includes(item)
                 );
+                const selectedId =
+                  validIds(stateCustomServices.concat(mapDeliveryIds))[0] ||
+                  validIds(labelMappedIds)[0] ||
+                  validIds(configuredIds)[0] ||
+                  allowedDeliveryIds[0] ||
+                  null;
                 return {
-                  deliveryServiceIds: merged,
+                  deliveryServiceIds: selectedId == null ? [] : [selectedId],
+                  allowedDeliveryServiceIds: allowedDeliveryIds,
+                  allowedDeliveryServices,
                   deliveryServiceLabels: checkedLabels,
                 };
               };
@@ -6880,7 +7075,10 @@ class BrowserRPA:
                   return (
                     parsePositiveInteger(obj.value) ||
                     parsePositiveInteger(obj.id) ||
-                    parsePositiveInteger(obj.key)
+                    parsePositiveInteger(obj.key) ||
+                    parsePositiveInteger(obj.addressId) ||
+                    parsePositiveInteger(obj.sendAddressId) ||
+                    parseSendAddressId(obj.value)
                   );
                 }
                 return parsePositiveInteger(value);
@@ -7115,18 +7313,15 @@ class BrowserRPA:
                   {
                     from: 1,
                     value: String(firstStep.value || '').trim(),
-                    serviceName: String(firstStep.serviceName || '').trim(),
                   },
-                ].filter((item) => item.value && item.serviceName);
+                ].filter((item) => item.value);
               }
               const currentSupplyTypes = Array.isArray(supplyTypeProps.value)
                 ? supplyTypeProps.value
                     .map((item) => Number(item))
                     .filter((item) => Number.isFinite(item) && item > 0)
                 : [];
-              const requiresProcessSupplyType =
-                buyerProtectionSteps.length > 1 ||
-                buyerProtectionSteps.some((item) => Number(item && item.from) > 1);
+              const requiresProcessSupplyType = buyerProtectionSteps.length > 0;
               const supplyTypeValues = Array.from(
                 new Set(
                   (requiresProcessSupplyType ? currentSupplyTypes.concat([1, 2]) : currentSupplyTypes)
@@ -7158,8 +7353,12 @@ class BrowserRPA:
                         ...(existingStep || {}),
                         from: Number(stepItem.from),
                         value: String(stepItem.value || ''),
-                        serviceName: String(stepItem.serviceName || ''),
                       };
+                      if (buyerProps.processOffer) {
+                        nextStep.serviceName = String(stepItem.serviceName || '');
+                      } else if (Object.prototype.hasOwnProperty.call(nextStep, 'serviceName')) {
+                        delete nextStep.serviceName;
+                      }
                       if (stepItem.end != null && Number(stepItem.end) >= Number(stepItem.from)) {
                         nextStep.end = Number(stepItem.end);
                       } else {
@@ -7179,15 +7378,7 @@ class BrowserRPA:
                   const selectedModels = Array.isArray(groupItem && groupItem.ptsOfferTagModels)
                     ? groupItem.ptsOfferTagModels.filter((item) => item && item.selected)
                     : [];
-                  const shouldForceDefaultService = ['4', '6'].includes(logicGroupId);
-                  const fallbackModels = Array.isArray(groupItem && groupItem.ptsOfferTagModels)
-                    ? groupItem.ptsOfferTagModels
-                    : [];
-                  const effectiveModels =
-                    selectedModels.length > 0
-                      ? selectedModels
-                      : (shouldForceDefaultService ? fallbackModels.slice(0, 1) : []);
-                  nextGroup.steps = effectiveModels
+                  nextGroup.steps = selectedModels
                     .map((item) => {
                       const value = String((item && item.serviceCode) || '').trim();
                       return value ? { value } : null;
@@ -7195,10 +7386,15 @@ class BrowserRPA:
                     .filter(Boolean);
                   return nextGroup;
                 });
-                if (nextGroups.length > 0) {
-                  return nextGroups;
+                const meaningfulNextGroups = nextGroups.filter(
+                  (groupItem) => Array.isArray(groupItem && groupItem.steps) && groupItem.steps.length > 0
+                );
+                if (meaningfulNextGroups.length > 0) {
+                  return meaningfulNextGroups;
                 }
-                return currentDscGroups;
+                return currentDscGroups.filter(
+                  (groupItem) => Array.isArray(groupItem && groupItem.steps) && groupItem.steps.length > 0
+                );
               };
               const buildBuyerProtectionJgdzGroups = () => {
                 const selectedServices = (buyerProps.value || {}).selectedServices || {};
@@ -7242,15 +7438,7 @@ class BrowserRPA:
                   const selectedModels = Array.isArray(groupItem && groupItem.ptsOfferTagModels)
                     ? groupItem.ptsOfferTagModels.filter((item) => item && item.selected)
                     : [];
-                  const shouldForceDefaultService = ['4', '6'].includes(logicGroupId);
-                  const fallbackModels = Array.isArray(groupItem && groupItem.ptsOfferTagModels)
-                    ? groupItem.ptsOfferTagModels
-                    : [];
-                  const effectiveModels =
-                    selectedModels.length > 0
-                      ? selectedModels
-                      : (shouldForceDefaultService ? fallbackModels.slice(0, 1) : []);
-                  nextGroup.steps = effectiveModels
+                  nextGroup.steps = selectedModels
                     .map((item) => {
                       const value = String((item && item.serviceCode) || '').trim();
                       return value ? { value } : null;
@@ -7269,26 +7457,19 @@ class BrowserRPA:
                   (groupItem) => Array.isArray(groupItem && groupItem.steps) && groupItem.steps.length > 0
                 );
               };
+              const effectiveIncludeBuyerProtectionSpsCode =
+                includeBuyerProtectionSpsCode && Boolean(buyerProps.processOffer);
               const buildBuyerProtectionSpsCode = (dscGroups, jgdzGroups) => {
                 const values = [];
-                const pushValue = (rawValue) => {
+                const append = (rawValue) => {
                   const value = String(rawValue || '').trim();
-                  if (value && !values.includes(value)) {
-                    values.push(value);
-                  }
+                  if (value && !values.includes(value)) values.push(value);
                 };
-                (Array.isArray(dscGroups) ? dscGroups : []).forEach((groupItem) => {
-                  const logicGroupId = String((groupItem && groupItem.logicGroupId) || (groupItem && groupItem.groupId) || '').trim();
-                  const steps = Array.isArray(groupItem && groupItem.steps) ? groupItem.steps : [];
-                  if (logicGroupId === '1') {
-                    pushValue(((steps[0] || {}).value));
-                    return;
-                  }
-                  steps.forEach((stepItem) => pushValue(stepItem && stepItem.value));
-                });
-                (Array.isArray(jgdzGroups) ? jgdzGroups : []).forEach((groupItem) => {
-                  const steps = Array.isArray(groupItem && groupItem.steps) ? groupItem.steps : [];
-                  steps.forEach((stepItem) => pushValue(stepItem && stepItem.value));
+                [dscGroups, jgdzGroups].forEach((groups) => {
+                  (Array.isArray(groups) ? groups : []).forEach((groupItem) => {
+                    (Array.isArray(groupItem && groupItem.steps) ? groupItem.steps : [])
+                      .forEach((stepItem) => append(stepItem && stepItem.value));
+                  });
                 });
                 return values;
               };
@@ -7303,10 +7484,10 @@ class BrowserRPA:
                 buyerProtectionSteps,
                 buyerProtectionGroups,
                 buyerProtectionJgdzGroups,
-                buyerProtectionSpsCode: includeBuyerProtectionSpsCode
+                buyerProtectionSpsCode: effectiveIncludeBuyerProtectionSpsCode
                   ? buildBuyerProtectionSpsCode(buyerProtectionGroups, buyerProtectionJgdzGroups)
                   : [],
-                includeBuyerProtectionSpsCode,
+                includeBuyerProtectionSpsCode: effectiveIncludeBuyerProtectionSpsCode,
                 detailHtml: String(window.__codexDraftPatchConfig.detailHtml || '').trim(),
                 supplyTypeValues,
                 draftTitle,
@@ -7319,6 +7500,8 @@ class BrowserRPA:
                 sendAddressId,
                 logisticsDimensions,
                 deliveryServiceIds: deliveryServiceState.deliveryServiceIds,
+                allowedDeliveryServiceIds: deliveryServiceState.allowedDeliveryServiceIds,
+                allowedDeliveryServices: deliveryServiceState.allowedDeliveryServices,
                 deliveryServiceLabels: deliveryServiceState.deliveryServiceLabels,
                 availableBuyerServices: availableBuyerServices.map((item) => ({
                   serviceName: String(item.serviceName || ''),
@@ -7498,15 +7681,16 @@ class BrowserRPA:
                 const sendAddressId = parsePositiveInteger(patchSnapshot.sendAddressId);
                 if (sendAddressId != null) {
                   const currentSendAddress = formValues.cbuSendAddress;
-                  let currentSendAddressId = null;
-                  if (currentSendAddress && typeof currentSendAddress === 'object') {
-                    currentSendAddressId = parsePositiveInteger(currentSendAddress.value);
-                  } else {
-                    currentSendAddressId = parsePositiveInteger(currentSendAddress);
-                  }
-                  if (currentSendAddressId == null) {
-                    formValues.cbuSendAddress = { value: sendAddressId };
-                  }
+                  formValues.cbuSendAddress = currentSendAddress && typeof currentSendAddress === 'object'
+                    ? { ...(currentSendAddress || {}), value: sendAddressId }
+                    : { value: sendAddressId };
+                  const currentFreight = formValues.freight && typeof formValues.freight === 'object'
+                    ? formValues.freight
+                    : {};
+                  formValues.freight = {
+                    ...(currentFreight || {}),
+                    sendAddressId,
+                  };
                 }
                 const draftQuantity = parsePositiveInteger(patchSnapshot.draftQuantity);
                 if (draftQuantity != null) {
@@ -7631,24 +7815,41 @@ class BrowserRPA:
                   const sendAddressId = parsePositiveInteger(patchSnapshot.sendAddressId);
                   if (sendAddressId != null) {
                     if (node.fields && node.fields.value && typeof node.fields.value === 'object') {
-                      if (parsePositiveInteger(node.fields.value.value) == null) {
-                        node.fields.value = {
-                          ...(node.fields.value || {}),
-                          value: sendAddressId,
-                        };
-                      }
-                    } else if (node.fields && parsePositiveInteger(node.fields.value) == null) {
+                      node.fields.value = {
+                        ...(node.fields.value || {}),
+                        value: sendAddressId,
+                      };
+                    } else if (node.fields) {
                       node.fields.value = { value: sendAddressId };
                     }
                     if (node.value && typeof node.value === 'object') {
-                      if (parsePositiveInteger(node.value.value) == null) {
-                        node.value = {
-                          ...(node.value || {}),
-                          value: sendAddressId,
-                        };
-                      }
-                    } else if (parsePositiveInteger(node.value) == null) {
+                      node.value = {
+                        ...(node.value || {}),
+                        value: sendAddressId,
+                      };
+                    } else {
                       node.value = { value: sendAddressId };
+                    }
+                  }
+                } else if (nodeId === 'freight') {
+                  const sendAddressId = parsePositiveInteger(patchSnapshot.sendAddressId);
+                  if (sendAddressId != null) {
+                    node.sendAddressId = sendAddressId;
+                    if (node.fields && node.fields.value && typeof node.fields.value === 'object') {
+                      node.fields.value = {
+                        ...(node.fields.value || {}),
+                        sendAddressId,
+                      };
+                    } else if (node.fields) {
+                      node.fields.value = { sendAddressId };
+                    }
+                    if (node.value && typeof node.value === 'object') {
+                      node.value = {
+                        ...(node.value || {}),
+                        sendAddressId,
+                      };
+                    } else {
+                      node.value = { sendAddressId };
                     }
                   }
                 }
@@ -7682,10 +7883,10 @@ class BrowserRPA:
                 }
 
                 if (Array.isArray(patchSnapshot.supplyTypeValues) && patchSnapshot.supplyTypeValues.length > 0) {
-                  if (String((node && node.id) || '').trim() === 'supplyType' && Array.isArray(node.value)) {
+                  if (nodeId === 'supplyType' && Array.isArray(node.value)) {
                     node.value = patchSnapshot.supplyTypeValues.slice();
                   }
-                  if (node.fields && Array.isArray(node.fields.value)) {
+                  if (nodeId === 'supplyType' && node.fields && Array.isArray(node.fields.value)) {
                     node.fields.value = patchSnapshot.supplyTypeValues.slice();
                   }
                   if (Array.isArray(node.supplyType)) {
@@ -7717,11 +7918,20 @@ class BrowserRPA:
                   };
                   if (looksLikeCustomExtraNode()) {
                     const deliveryServiceIds = normalizeServiceIds(patchSnapshot.deliveryServiceIds);
+                    const allowedDeliveryServiceIds = normalizeServiceIds(
+                      patchSnapshot.allowedDeliveryServiceIds || []
+                    );
                     const patchCustomExtraValue = (target) => {
                       if (!target || typeof target !== 'object') {
                         return;
                       }
-                      target.customServices = deliveryServiceIds.slice();
+                      const currentCustomServices = normalizeServiceIds(target.customServices || []);
+                      const preservedCustomServices = allowedDeliveryServiceIds.length > 0
+                        ? currentCustomServices.filter((item) => !allowedDeliveryServiceIds.includes(item))
+                        : [];
+                      target.customServices = normalizeServiceIds(
+                        preservedCustomServices.concat(deliveryServiceIds)
+                      );
                       const nextMap = target.viewModelMap && typeof target.viewModelMap === 'object'
                         ? { ...target.viewModelMap }
                         : {};
@@ -7957,10 +8167,12 @@ class BrowserRPA:
                   originalUrl: String(meta.originalUrl || url),
                   identityUrlPatched: Boolean(meta.identityUrlPatched),
                   originalBodyPreview: previewValue(body),
+                  originalBodyStructure: summarizeDraftRequestBody(body),
                 };
                 const rewritten = rewriteRequestBody(body);
                 record.patch = rewritten.meta;
                 record.patchedBodyPreview = previewValue(rewritten.body);
+                record.patchedBodyStructure = summarizeDraftRequestBody(rewritten.body);
                 record.expectedDraftId = String(window.__codexDraftPatchConfig.expectedDraftId || '').trim();
                 record.draftIdentityEvidence = collectDraftIdentityEvidence(url, rewritten.body);
                 record.requestDraftIdentityPresent = requestCarriesExpectedDraftId(url, rewritten.body);
@@ -8012,10 +8224,12 @@ class BrowserRPA:
                   originalUrl,
                   identityUrlPatched: url !== originalUrl,
                   originalBodyPreview: previewValue(requestInit.body),
+                  originalBodyStructure: summarizeDraftRequestBody(requestInit.body),
                 };
                 const rewritten = rewriteRequestBody(requestInit.body);
                 record.patch = rewritten.meta;
                 record.patchedBodyPreview = previewValue(rewritten.body);
+                record.patchedBodyStructure = summarizeDraftRequestBody(rewritten.body);
                 record.expectedDraftId = String(window.__codexDraftPatchConfig.expectedDraftId || '').trim();
                 record.draftIdentityEvidence = collectDraftIdentityEvidence(url, rewritten.body);
                 record.requestDraftIdentityPresent = requestCarriesExpectedDraftId(url, rewritten.body);
@@ -8154,10 +8368,6 @@ class BrowserRPA:
             if str(effective_identity.get("draftId") or "").strip() != expected_draft_id:
                 raise PublishSubmitError(
                     "draft_submit existing-draft request does not carry the expected draft identity"
-                )
-            if effective_identity.get("edit") is not True or effective_identity.get("isItemEdit") is not True:
-                raise PublishSubmitError(
-                    "draft_submit existing-draft request is missing edit=true/isItemEdit=true"
                 )
         if expected_draft_id and isinstance(response_json, dict):
             def find_draft_id(value: Any) -> str:
@@ -8447,6 +8657,26 @@ class BrowserRPA:
             context["submit_success_result_url"] = current_url
         return detected
 
+    def _wait_for_submit_success_navigation(
+        self,
+        publish_config: dict[str, Any],
+        context: dict[str, Any],
+    ) -> bool:
+        grace_seconds = max(
+            0.0,
+            float(publish_config.get("submit_success_navigation_grace_seconds", 8.0) or 0.0),
+        )
+        poll_seconds = 0.25
+        attempts = max(1, int(grace_seconds / poll_seconds) + 1)
+        context["submit_success_navigation_grace_seconds"] = grace_seconds
+        for attempt in range(attempts):
+            if self._submit_success_navigation_detected(publish_config, context):
+                context["submit_retry_suppressed"] = "success_navigation"
+                return True
+            if attempt + 1 < attempts:
+                self._pause(poll_seconds)
+        return False
+
     def _resolve_context_preferred_value(
         self,
         *,
@@ -8510,6 +8740,20 @@ class BrowserRPA:
         result.sort(key=lambda item: int(item.get("from", 0) or 0))
         return result
 
+    def _normalize_positive_integer_list(self, values: Any) -> list[int]:
+        normalized: list[int] = []
+        seen: set[int] = set()
+        for raw in list(values or []):
+            try:
+                value = int(str(raw).strip())
+            except (TypeError, ValueError):
+                continue
+            if value <= 0 or value in seen:
+                continue
+            seen.add(value)
+            normalized.append(value)
+        return normalized
+
     def _resolve_delivery_service_ids(
         self,
         *,
@@ -8517,8 +8761,10 @@ class BrowserRPA:
         context: dict[str, Any],
     ) -> list[int]:
         values: list[Any] = []
+        runtime_selection_present = False
         delivery_state = context.get("draft_delivery_service_state")
         if isinstance(delivery_state, dict):
+            runtime_selection_present = bool(delivery_state.get("selected"))
             values.extend(list(delivery_state.get("selectedServiceIds", []) or []))
 
             label_map = patch_config.get("delivery_service_label_id_map", {})
@@ -8530,7 +8776,8 @@ class BrowserRPA:
 
         values.extend(list(context.get("delivery_service_ids", []) or []))
         values.extend(list(patch_config.get("delivery_service_ids", []) or []))
-        values.extend(list(patch_config.get("delivery_service_default_ids", []) or []))
+        if not runtime_selection_present:
+            values.extend(list(patch_config.get("delivery_service_default_ids", []) or []))
 
         normalized: list[int] = []
         seen: set[str] = set()
@@ -10088,9 +10335,103 @@ class BrowserRPA:
         if normalized_selected_value:
             context["send_address_id"] = normalized_selected_value
 
+    def _draft_delivery_service_state(self) -> dict[str, Any]:
+        if not self.driver:
+            raise RuntimeError("Browser has not been opened.")
+        payload = self.driver.execute_script(
+            """
+            const sdk = window.SellPublishSdk;
+            const state = sdk && sdk.engine && sdk.engine.getJsonState ? sdk.engine.getJsonState() : {};
+            const components = (state || {}).components || {};
+            const props = ((components.customExtraService || {}).props) || {};
+            const value = props.value || {};
+            const normalizeText = (raw) => String(raw || '').replace(/\\s+/g, ' ').trim();
+            const compact = (raw) => normalizeText(raw).replace(/\\s+/g, '');
+            const normalizeIds = (values) => {
+              const result = [];
+              const seen = new Set();
+              (Array.isArray(values) ? values : [values]).flat(Infinity).forEach((raw) => {
+                const text = String(raw == null ? '' : raw).trim();
+                if (!/^\\d+$/.test(text)) return;
+                const value = Number(text);
+                if (!Number.isSafeInteger(value) || value <= 0 || seen.has(value)) return;
+                seen.add(value);
+                result.push(value);
+              });
+              return result;
+            };
+            const templates = (Array.isArray(props.serviceTemplates) ? props.serviceTemplates : [])
+              .filter((item) => compact(item && (item.name || item.serviceName)).includes('配送'));
+            const allowedServices = [];
+            const allowedSeen = new Set();
+            templates.forEach((template) => {
+              (Array.isArray(template && template.data) ? template.data : []).forEach((item) => {
+                const ids = normalizeIds([item && item.id]);
+                if (!ids.length || allowedSeen.has(ids[0])) return;
+                allowedSeen.add(ids[0]);
+                allowedServices.push({
+                  id: ids[0],
+                  label: normalizeText(
+                    item && (item.name || item.serviceName || item.text || item.title || item.label)
+                  ),
+                });
+              });
+            });
+            const allowedIds = allowedServices.map((item) => item.id);
+            const viewModelMap = value && typeof value.viewModelMap === 'object'
+              ? value.viewModelMap
+              : {};
+            const mapValues = Object.keys(viewModelMap)
+              .filter((key) => compact(key).includes('配送'))
+              .map((key) => viewModelMap[key]);
+            const stateIds = normalizeIds(
+              (Array.isArray(value.customServices) ? value.customServices : []).concat(mapValues)
+            ).filter((id) => allowedIds.includes(id));
+            const checkedLabels = Array.from(
+              document.querySelectorAll(
+                '#guid-customExtraService input.ant-checkbox-input[type="checkbox"]:checked'
+              )
+            ).map((input) => {
+              const label = input.closest('label');
+              const node = label && label.querySelector('span:last-child');
+              return normalizeText(node && (node.innerText || node.textContent));
+            }).filter(Boolean);
+            checkedLabels.forEach((label) => {
+              const match = allowedServices.find((item) => compact(item.label) === compact(label));
+              if (match && !stateIds.includes(match.id)) stateIds.push(match.id);
+            });
+            const selectedLabels = allowedServices
+              .filter((item) => stateIds.includes(item.id))
+              .map((item) => item.label)
+              .filter(Boolean);
+            return {
+              exists: Boolean(document.querySelector('#guid-customExtraService') || components.customExtraService),
+              selected: stateIds.length > 0,
+              selectedServiceIds: stateIds,
+              selectedLabels,
+              checkedLabels,
+              allowedServices,
+              allowedServiceIds: allowedIds,
+            };
+            """
+        )
+        return payload if isinstance(payload, dict) else {
+            "exists": False,
+            "selected": False,
+            "selectedServiceIds": [],
+            "selectedLabels": [],
+            "allowedServices": [],
+            "allowedServiceIds": [],
+        }
+
     def _ensure_draft_required_delivery_service(self, context: dict[str, Any]) -> None:
         if not self.driver:
             raise RuntimeError("Browser has not been opened.")
+        observed = self._draft_delivery_service_state()
+        if observed.get("selected"):
+            context["draft_delivery_service_state"] = observed
+            context["draft_delivery_service_state_pre_save"] = dict(observed)
+            return
         result: dict[str, Any] | None = None
         for _ in range(3):
             state = self.driver.execute_script(
@@ -10236,10 +10577,15 @@ class BrowserRPA:
                 """
             )
             result = state if isinstance(state, dict) else {"exists": False, "selected": False}
-            if bool(result.get("selected")):
+            observed = self._draft_delivery_service_state()
+            if bool(observed.get("selected")):
+                result = {**result, **observed}
                 break
             self._pause(0.6)
         context["draft_delivery_service_state"] = result if isinstance(result, dict) else {"exists": False}
+        context["draft_delivery_service_state_pre_save"] = dict(
+            context["draft_delivery_service_state"]
+        )
 
     def _ensure_draft_logistics_dimensions_before_save(
         self,
@@ -10257,9 +10603,13 @@ class BrowserRPA:
                 target_step = step
                 break
         if not target_step:
-            return
+            verification = publish_config.get("draft_verification", {})
+            if not verification.get("require_logistics_dimensions", False):
+                return
+            target_step = {"name": "logistics_dimensions", "action": "logistics_dimensions"}
         filled = self._fill_logistics_dimensions(target_step, context)
         context["draft_logistics_pre_save_filled"] = filled
+        context["draft_logistics_pre_save_values"] = self._draft_logistics_dimension_values()
 
     def _resolve_buyer_protection_ship_time_for_draft(
         self,
@@ -10386,6 +10736,40 @@ class BrowserRPA:
         publish_config: dict[str, Any],
         context: dict[str, Any],
     ) -> None:
+        required_reapply_fields = [
+            str(item or "").strip()
+            for item in list(context.get("submit_reapply_required_fields") or [])
+            if str(item or "").strip()
+        ]
+        reapply_contract = context.get("submit_reapply_evidence") or {}
+        reapply_fields = (
+            dict(reapply_contract.get("fields") or {})
+            if isinstance(reapply_contract, dict)
+            else {}
+        )
+        if required_reapply_fields:
+            expected_contract_hash = str(
+                context.get("submit_reapply_contract_sha256") or ""
+            ).strip().lower()
+            rendered_contract = json.dumps(
+                reapply_contract,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
+            actual_contract_hash = hashlib.sha256(
+                rendered_contract.encode("utf-8")
+            ).hexdigest()
+            if (
+                not expected_contract_hash
+                or expected_contract_hash != actual_contract_hash
+                or set(required_reapply_fields) != set(reapply_fields)
+            ):
+                raise PublishValidationError(
+                    "submit blocked: nonpersistent field replay contract is missing or stale."
+                )
+
         self._ensure_draft_send_address_selected(context)
         self._ensure_draft_required_delivery_service(context)
         self._apply_draft_page_state_patch(publish_config, context)
@@ -10394,8 +10778,13 @@ class BrowserRPA:
         self._ensure_buyer_protection_ship_time_before_draft_save(publish_config, context)
 
         verification = publish_config.get("draft_verification", {})
+        reapply_results: dict[str, Any] = {}
         actual_send_address = self._draft_selected_send_address()
-        expected_send_address = str(context.get("send_address_id", "")).strip()
+        send_address_evidence = dict(reapply_fields.get("send_address") or {})
+        expected_send_address = str(
+            send_address_evidence.get("expected_value")
+            or context.get("send_address_id", "")
+        ).strip()
         context["submit_send_address_value"] = actual_send_address
         if verification.get("require_send_address", False) and not actual_send_address:
             raise PublishValidationError("submit blocked: send address is empty after required-field reapply.")
@@ -10408,13 +10797,98 @@ class BrowserRPA:
             raise PublishValidationError(
                 "submit blocked: send address does not match the address selected for this submission."
             )
+        if "send_address" in required_reapply_fields:
+            if actual_send_address != expected_send_address:
+                raise PublishValidationError(
+                    "submit blocked: send address replay did not match the reviewed contract."
+                )
+            reapply_results["send_address"] = {
+                "status": "reapplied_and_read_back",
+                "actual_value": actual_send_address,
+            }
 
-        expected_buyer_protection = self._resolve_buyer_protection_ship_time_for_draft(
-            publish_config,
-            context,
+        delivery_state = self._draft_delivery_service_state()
+        context["submit_delivery_service_state"] = delivery_state
+        actual_delivery_ids = self._normalize_positive_integer_list(
+            delivery_state.get("selectedServiceIds") or []
         )
+        allowed_delivery_ids = self._normalize_positive_integer_list(
+            delivery_state.get("allowedServiceIds") or []
+        )
+        delivery_evidence = dict(reapply_fields.get("delivery_service") or {})
+        expected_delivery_ids = self._normalize_positive_integer_list(
+            delivery_evidence.get("requested_ids") or []
+        )
+        if verification.get("require_delivery_service", False) and not actual_delivery_ids:
+            raise PublishValidationError(
+                "submit blocked: delivery service is empty after required-field reapply."
+            )
+        if actual_delivery_ids and (
+            not allowed_delivery_ids
+            or not set(actual_delivery_ids).issubset(set(allowed_delivery_ids))
+        ):
+            raise PublishValidationError(
+                "submit blocked: delivery service is not allowed by the current page."
+            )
+        if "delivery_service" in required_reapply_fields:
+            if (
+                not expected_delivery_ids
+                or set(actual_delivery_ids) != set(expected_delivery_ids)
+                or not set(expected_delivery_ids).issubset(set(allowed_delivery_ids))
+            ):
+                raise PublishValidationError(
+                    "submit blocked: delivery service replay did not match the reviewed contract."
+                )
+            reapply_results["delivery_service"] = {
+                "status": "reapplied_and_read_back",
+                "actual_ids": actual_delivery_ids,
+                "allowed_ids": allowed_delivery_ids,
+            }
+
+        actual_logistics = self._draft_logistics_dimension_values()
+        context["submit_logistics_dimensions"] = actual_logistics
+        logistics_evidence = dict(reapply_fields.get("logistics") or {})
+        expected_logistics = dict(logistics_evidence.get("expected_values") or {})
+        if not expected_logistics:
+            expected_logistics = {
+                "length": self._normalize_dimension_value(str(context.get("length_cm", "")).strip()),
+                "width": self._normalize_dimension_value(str(context.get("width_cm", "")).strip()),
+                "height": self._normalize_dimension_value(str(context.get("height_cm", "")).strip()),
+                "weight": self._normalize_weight_value(str(context.get("weight_g", "")).strip()),
+            }
+        logistics_mismatches = []
+        for name, expected in expected_logistics.items():
+            if not str(expected or "").strip():
+                continue
+            normalizer = self._normalize_weight_value if name == "weight" else self._normalize_dimension_value
+            if normalizer(str(actual_logistics.get(name, "")).strip()) != normalizer(str(expected)):
+                logistics_mismatches.append(name)
+        if verification.get("require_logistics_dimensions", False) and logistics_mismatches:
+            raise PublishValidationError(
+                "submit blocked: logistics replay/readback mismatch -> "
+                + ",".join(logistics_mismatches)
+            )
+        if "logistics" in required_reapply_fields:
+            if logistics_mismatches or set(expected_logistics) != {"length", "width", "height", "weight"}:
+                raise PublishValidationError(
+                    "submit blocked: logistics replay did not match the reviewed contract."
+                )
+            reapply_results["logistics"] = {
+                "status": "reapplied_and_read_back",
+                "actual_values": actual_logistics,
+            }
+
+        buyer_evidence = dict(reapply_fields.get("buyer_protection") or {})
+        expected_buyer_protection = str(
+            buyer_evidence.get("service_name")
+            or self._resolve_buyer_protection_ship_time_for_draft(
+                publish_config,
+                context,
+            )
+        ).strip()
         expected_buyer_protection_code = str(
-            verification.get("buyer_protection_expected_code", "")
+            buyer_evidence.get("service_code")
+            or verification.get("buyer_protection_expected_code", "")
             or context.get("buyer_protection_ship_time_code", "")
         ).strip()
         actual_buyer_protection = self._draft_selected_buyer_protection()
@@ -10437,6 +10911,13 @@ class BrowserRPA:
                     "submit blocked: buyer protection must be reapplied and read back as "
                     f"'{expected_buyer_protection}/{expected_buyer_protection_code}'."
                 )
+        if "buyer_protection" in required_reapply_fields:
+            reapply_results["buyer_protection"] = {
+                "status": "reapplied_and_read_back",
+                "service_name": actual_buyer_protection,
+                "service_code": expected_buyer_protection_code,
+                "schedule": actual_schedule,
+            }
 
         assist_messages = self._collect_assist_messages()
         context["submit_assist_messages"] = assist_messages
@@ -10458,6 +10939,11 @@ class BrowserRPA:
             raise PublishValidationError(
                 "submit blocked by required-field warnings: " + " | ".join(blocking_messages)
             )
+        if set(reapply_results) != set(required_reapply_fields):
+            raise PublishValidationError(
+                "submit blocked: not every reviewed nonpersistent field was reapplied."
+            )
+        context["submit_reapply_results"] = reapply_results
         context["submit_required_fields_verified"] = True
 
     def _save_draft_once(self, publish_config: dict[str, Any], context: dict[str, Any]) -> None:
@@ -10709,11 +11195,12 @@ class BrowserRPA:
         context: dict[str, Any],
         trace_patch_snapshot: dict[str, Any],
     ) -> list[str]:
-        allowed_fields = {
+        configured_fields = [
             str(item).strip()
             for item in publish_config.get("submit_reapply_nonpersistent_fields", [])
             if str(item).strip()
-        }
+        ]
+        allowed_fields = set(configured_fields)
         trace = context.get("draft_submit_trace") or {}
         response_json = trace.get("responseJson") if isinstance(trace, dict) else None
         try:
@@ -10724,14 +11211,25 @@ class BrowserRPA:
             )
         except (TypeError, ValueError):
             response_status = 0
+        response_draft_id = str(context.get("draft_submit_response_draft_id", "")).strip()
+        expected_draft_id = str(publish_config.get("expected_draft_id", "")).strip()
+        identity_evidence = context.get("draft_submit_identity_evidence") or {}
+        request_draft_id = str(
+            ((identity_evidence.get("effective") or {}).get("draftId") or "")
+            if isinstance(identity_evidence, dict)
+            else ""
+        ).strip()
         response_succeeded = (
             200 <= response_status < 300
             and isinstance(response_json, dict)
             and response_json.get("success") is True
+            and bool(response_draft_id)
+            and response_draft_id == expected_draft_id
+            and request_draft_id == expected_draft_id
         )
 
         required_fields: list[str] = []
-        evidence: dict[str, Any] = {}
+        fields: dict[str, Any] = {}
         actual_send_address = str(context.get("draft_send_address_value", "")).strip()
         expected_send_address = str(context.get("send_address_id", "")).strip()
         trace_send_address = str(trace_patch_snapshot.get("sendAddressId", "")).strip()
@@ -10750,13 +11248,119 @@ class BrowserRPA:
             and trace_send_address == expected_send_address
         ):
             required_fields.append("send_address")
-            evidence["send_address"] = {
-                "save_response_succeeded": True,
-                "ui_selected_before_save": True,
+            fields["send_address"] = {
+                "status": "submit_reapply_required",
+                "pre_save_selected": True,
+                "expected_value": expected_send_address,
                 "requested_value": trace_send_address,
             }
 
+        persisted_delivery_state = context.get("draft_delivery_service_state_persisted") or {}
+        pre_save_delivery_state = context.get("draft_delivery_service_state_pre_save") or {}
+        persisted_delivery_ids = self._normalize_positive_integer_list(
+            (persisted_delivery_state.get("selectedServiceIds") or [])
+            if isinstance(persisted_delivery_state, dict)
+            else []
+        )
+        pre_save_delivery_ids = self._normalize_positive_integer_list(
+            (pre_save_delivery_state.get("selectedServiceIds") or [])
+            if isinstance(pre_save_delivery_state, dict)
+            else []
+        )
+        requested_delivery_ids = self._normalize_positive_integer_list(
+            trace_patch_snapshot.get("deliveryServiceIds") or []
+        )
+        allowed_delivery_services = [
+            {
+                "id": int(item.get("id")),
+                "label": str(item.get("label", "")).strip(),
+            }
+            for item in list(trace_patch_snapshot.get("allowedDeliveryServices", []) or [])
+            if isinstance(item, dict)
+            and str(item.get("id", "")).strip().isdigit()
+            and int(item.get("id")) > 0
+        ]
+        allowed_delivery_ids = self._normalize_positive_integer_list(
+            [item.get("id") for item in allowed_delivery_services]
+            or trace_patch_snapshot.get("allowedDeliveryServiceIds")
+            or []
+        )
+        if not allowed_delivery_services:
+            allowed_delivery_services = [
+                {"id": item, "label": ""} for item in allowed_delivery_ids
+            ]
+        if (
+            "delivery_service" in allowed_fields
+            and not persisted_delivery_ids
+            and response_succeeded
+            and requested_delivery_ids
+            and set(requested_delivery_ids).issubset(set(allowed_delivery_ids))
+            and set(requested_delivery_ids).issubset(set(pre_save_delivery_ids))
+        ):
+            required_fields.append("delivery_service")
+            fields["delivery_service"] = {
+                "status": "submit_reapply_required",
+                "requested_ids": requested_delivery_ids,
+                "allowed_services": allowed_delivery_services,
+                "pre_save_selected_ids": pre_save_delivery_ids,
+                "pre_save_selected_labels": list(
+                    pre_save_delivery_state.get("selectedLabels", []) or []
+                ),
+            }
+
         verification = publish_config.get("draft_verification", {})
+        actual_logistics = dict(context.get("draft_logistics_dimensions", {}) or {})
+        trace_logistics = {
+            name: str(value or "").strip()
+            for name, value in dict(trace_patch_snapshot.get("logisticsDimensions", {}) or {}).items()
+            if name in {"length", "width", "height", "weight"}
+        }
+        pre_save_logistics = {
+            name: str(value or "").strip()
+            for name, value in dict(context.get("draft_logistics_pre_save_values", {}) or {}).items()
+            if name in {"length", "width", "height", "weight"}
+        }
+        expected_logistics = {
+            "length": self._normalize_dimension_value(str(context.get("length_cm", "")).strip()),
+            "width": self._normalize_dimension_value(str(context.get("width_cm", "")).strip()),
+            "height": self._normalize_dimension_value(str(context.get("height_cm", "")).strip()),
+            "weight": self._normalize_weight_value(str(context.get("weight_g", "")).strip()),
+        }
+        normalized_pre_save_logistics = {
+            name: (
+                self._normalize_weight_value(pre_save_logistics.get(name, ""))
+                if name == "weight"
+                else self._normalize_dimension_value(pre_save_logistics.get(name, ""))
+            )
+            for name in expected_logistics
+        }
+        normalized_trace_logistics = {
+            name: (
+                self._normalize_weight_value(trace_logistics.get(name, ""))
+                if name == "weight"
+                else self._normalize_dimension_value(trace_logistics.get(name, ""))
+            )
+            for name in expected_logistics
+        }
+        actual_logistics_present = any(
+            str(actual_logistics.get(name, "")).strip() for name in expected_logistics
+        )
+        if (
+            "logistics" in allowed_fields
+            and not actual_logistics_present
+            and response_succeeded
+            and all(expected_logistics.values())
+            and normalized_trace_logistics == expected_logistics
+            and normalized_pre_save_logistics == expected_logistics
+        ):
+            required_fields.append("logistics")
+            fields["logistics"] = {
+                "status": "submit_reapply_required",
+                "expected_values": expected_logistics,
+                "requested_values": normalized_trace_logistics,
+                "pre_save_values": normalized_pre_save_logistics,
+            }
+
         expected_buyer_protection = self._resolve_context_preferred_value(
             context=context,
             source=str(verification.get("buyer_protection_source", "")).strip(),
@@ -10777,14 +11381,25 @@ class BrowserRPA:
             for item in list(trace_patch_snapshot.get("buyerProtectionSteps", []) or [])
             if isinstance(item, dict)
         ]
+        trace_buyer_service_name = str(
+            trace_patch_snapshot.get("buyerProtectionServiceName", "")
+        ).strip()
+        trace_buyer_service_code = str(
+            trace_patch_snapshot.get("buyerProtectionServiceCode", "")
+        ).strip()
         matching_trace_steps = [
             item
             for item in trace_buyer_steps
             if int(item.get("from", 0) or 0) == 1
-            and str(item.get("serviceName", "")).strip() == expected_buyer_protection
+            and str(item.get("serviceName") or trace_buyer_service_name).strip()
+            == expected_buyer_protection
             and (
                 not expected_buyer_protection_code
-                or str(item.get("value", item.get("serviceCode", ""))).strip()
+                or str(
+                    item.get("value")
+                    or item.get("serviceCode")
+                    or trace_buyer_service_code
+                ).strip()
                 == expected_buyer_protection_code
             )
         ]
@@ -10798,15 +11413,52 @@ class BrowserRPA:
             and matching_trace_steps
         ):
             required_fields.append("buyer_protection")
-            evidence["buyer_protection"] = {
-                "save_response_succeeded": True,
-                "ui_selected_before_save": True,
-                "requested_service_name": expected_buyer_protection,
-                "requested_service_code": str(
+            fields["buyer_protection"] = {
+                "status": "submit_reapply_required",
+                "pre_save_selected": True,
+                "service_name": expected_buyer_protection,
+                "service_code": str(
                     matching_trace_steps[0].get("value", matching_trace_steps[0].get("serviceCode", ""))
                 ).strip(),
+                "requested_steps": [
+                    {
+                        "from": int(item.get("from", 0) or 0),
+                        "serviceName": str(
+                            item.get("serviceName") or trace_buyer_service_name
+                        ).strip(),
+                        "serviceCode": str(
+                            item.get("value")
+                            or item.get("serviceCode")
+                            or trace_buyer_service_code
+                        ).strip(),
+                    }
+                    for item in matching_trace_steps
+                ],
+                "available_services": [
+                    {
+                        "serviceName": str(item.get("serviceName", "")).strip(),
+                        "serviceCode": str(item.get("serviceCode", "")).strip(),
+                    }
+                    for item in list(trace_patch_snapshot.get("availableBuyerServices", []) or [])
+                    if isinstance(item, dict)
+                ],
             }
 
+        required_fields = [name for name in configured_fields if name in required_fields]
+        evidence: dict[str, Any] = {}
+        if required_fields:
+            evidence = {
+                "contract_version": "listing_submit_reapply_v1",
+                "draft_id": expected_draft_id,
+                "required_fields": required_fields,
+                "save": {
+                    "http_status": response_status,
+                    "success": response_succeeded,
+                    "request_draft_id": request_draft_id,
+                    "response_draft_id": response_draft_id,
+                },
+                "fields": {name: fields[name] for name in required_fields},
+            }
         context["draft_submit_reapply_required_fields"] = required_fields
         context["draft_submit_reapply_evidence"] = evidence
         return required_fields
@@ -10826,13 +11478,18 @@ class BrowserRPA:
         saved_draft_id = str(
             (query.get("draftId") or query.get("offerDraftId") or [""])[0]
         ).strip()
+        url_category_id = str((query.get("catId") or [""])[0]).strip()
+        validated_category_id = str(context.get("actual_category_id") or "").strip()
+        expected_category_id = str(publish_config.get("expected_category_id") or "").strip()
+        saved_category_id = url_category_id or validated_category_id
         expected_draft_id = str(publish_config.get("expected_draft_id") or "").strip()
         if (
             parsed.scheme != "https"
             or parsed.hostname != "offer-new.1688.com"
             or parsed.path != "/popular/publish.htm"
             or not saved_draft_id
-            or not str((query.get("catId") or [""])[0]).strip()
+            or not saved_category_id
+            or (expected_category_id and saved_category_id != expected_category_id)
             or (expected_draft_id and saved_draft_id != expected_draft_id)
         ):
             raise PublishValidationError(
@@ -10841,6 +11498,7 @@ class BrowserRPA:
 
         context["draft_server_reopen_url"] = saved_url
         context["draft_server_reopen_draft_id"] = saved_draft_id
+        context["draft_server_reopen_category_id"] = saved_category_id
         official_entry_url = (
             "https://offer.1688.com/offer/post/fillProductInfo.htm?"
             + urlencode({"operator": "draft2offer", "offerDraftId": saved_draft_id})
@@ -10976,6 +11634,7 @@ class BrowserRPA:
         context["draft_description_image_count"] = self._draft_description_image_count()
         context["draft_spec_values"] = self._collect_spec_values()
         context["draft_send_address_value"] = self._draft_selected_send_address()
+        context["draft_delivery_service_state_persisted"] = self._draft_delivery_service_state()
         context["draft_logistics_dimensions"] = self._draft_logistics_dimension_values()
         context["draft_buyer_protection_value"] = self._draft_selected_buyer_protection()
         context["draft_buyer_protection_schedule"] = self._draft_selected_buyer_protection_schedule()
@@ -11031,6 +11690,9 @@ class BrowserRPA:
                 context["draft_description_image_count"] = self._draft_description_image_count()
                 context["draft_spec_values"] = self._collect_spec_values()
                 context["draft_send_address_value"] = self._draft_selected_send_address()
+                context["draft_delivery_service_state_persisted"] = (
+                    self._draft_delivery_service_state()
+                )
                 context["draft_logistics_dimensions"] = self._draft_logistics_dimension_values()
                 context["draft_buyer_protection_value"] = self._draft_selected_buyer_protection()
                 context["draft_buyer_protection_schedule"] = self._draft_selected_buyer_protection_schedule()
@@ -11131,17 +11793,26 @@ class BrowserRPA:
                 ]
         nonpersistent_assist_messages_ignored: list[str] = []
         if "buyer_protection" in submit_reapply_required_fields:
-            nonpersistent_assist_messages_ignored = [
+            nonpersistent_assist_messages_ignored.extend(
+                [
                 message
                 for message in effective_assist_messages
                 if "\u53d1\u8d27\u65f6\u95f4" in message and "\u5fc5\u586b" in message
-            ]
-            if nonpersistent_assist_messages_ignored:
-                effective_assist_messages = [
+                ]
+            )
+        if "delivery_service" in submit_reapply_required_fields:
+            nonpersistent_assist_messages_ignored.extend(
+                [
                     message
                     for message in effective_assist_messages
-                    if message not in nonpersistent_assist_messages_ignored
+                    if "\u914d\u9001\u670d\u52a1" in message and "\u5fc5\u586b" in message
                 ]
+            )
+        if nonpersistent_assist_messages_ignored:
+            ignored = set(nonpersistent_assist_messages_ignored)
+            effective_assist_messages = [
+                message for message in effective_assist_messages if message not in ignored
+            ]
         context["draft_stale_assist_messages_ignored"] = stale_assist_messages_ignored
         context["draft_nonpersistent_assist_messages_ignored"] = nonpersistent_assist_messages_ignored
         context["draft_assist_messages_effective"] = effective_assist_messages
@@ -11173,6 +11844,33 @@ class BrowserRPA:
             for label in required_spec_labels:
                 if not str(context["draft_spec_values"].get(label, "")).strip():
                     raise PublishValidationError(f"draft_verify blocked: spec '{label}' is empty after save.")
+
+        if verification.get("require_delivery_service", False):
+            delivery_state = dict(
+                context.get("draft_delivery_service_state_persisted", {}) or {}
+            )
+            selected_delivery_ids = self._normalize_positive_integer_list(
+                delivery_state.get("selectedServiceIds") or []
+            )
+            allowed_delivery_ids = self._normalize_positive_integer_list(
+                delivery_state.get("allowedServiceIds") or []
+            )
+            if selected_delivery_ids and (
+                not allowed_delivery_ids
+                or not set(selected_delivery_ids).issubset(set(allowed_delivery_ids))
+            ):
+                raise PublishValidationError(
+                    "draft_verify blocked: persisted delivery service is not allowed by the page."
+                )
+            if (
+                not selected_delivery_ids
+                and "delivery_service" not in submit_reapply_required_fields
+            ):
+                raise PublishValidationError(
+                    "draft_verify blocked: delivery service did not persist after save."
+                )
+            if not selected_delivery_ids:
+                context["draft_delivery_service_source"] = "submit_reapply_required"
 
         if verification.get("require_send_address", False):
             strict_send_address_persist = bool(verification.get("strict_send_address_persist", False))
@@ -11242,11 +11940,14 @@ class BrowserRPA:
                 for name, expected in required_fields
                 if expected and not str(dimension_map.get(name, "")).strip()
             ]
-            if missing_fields:
+            logistics_reapply_required = "logistics" in submit_reapply_required_fields
+            if missing_fields and not logistics_reapply_required:
                 raise PublishValidationError(
                     "draft_verify blocked: logistics dimensions missing after save -> "
                     + ",".join(missing_fields)
                 )
+            if missing_fields:
+                context["draft_logistics_dimensions_source"] = "submit_reapply_required"
             mismatched_fields = []
             for name, expected in required_fields:
                 if not expected:
@@ -11254,7 +11955,7 @@ class BrowserRPA:
                 normalizer = self._normalize_weight_value if name == "weight" else self._normalize_dimension_value
                 if normalizer(str(dimension_map.get(name, "")).strip()) != normalizer(expected):
                     mismatched_fields.append(name)
-            if mismatched_fields:
+            if mismatched_fields and not logistics_reapply_required:
                 raise PublishValidationError(
                     "draft_verify blocked: logistics dimensions changed after save -> "
                     + ",".join(mismatched_fields)

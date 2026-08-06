@@ -58,6 +58,7 @@ class ExecutorBinding:
     config_revision: str = ""
     config_hash: str = ""
     target_hostname: str = ""
+    browser_profile_dir: str = ""
 
 
 @dataclass(frozen=True)
@@ -166,6 +167,7 @@ def resolve_executor_binding(
         config_revision=revision,
         config_hash=declared_hash,
         target_hostname=target_hostname,
+        browser_profile_dir=str(account.get("browser_profile_dir") or "").strip(),
     )
 
 

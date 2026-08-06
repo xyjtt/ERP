@@ -33,18 +33,23 @@ from auto_listing_executor import (
 from config_loader import load_json_with_local_override
 from exceptions import ImageAlbumFullError
 from listing_audit import ListingAuditRepository
+from listing_review import (
+    ListingReviewError,
+    build_listing_operation_key,
+    require_unique_existing_draft_id,
+    validate_independent_inspection,
+)
 from cross_project_runtime import (
     RuntimeLeaseGuard,
     RuntimeLeaseRepository,
     resolve_build_sha,
     resolve_executor_binding,
 )
-from operation_saga import OperationSagaRepository, SagaOperation, build_operation_key
+from operation_saga import OperationSagaRepository, SagaOperation
 from sku_offline_auth import (
     OfflineLoginRequiredError,
-    OfflineRiskControlError,
-    OfflineStoreMismatchError,
     ensure_1688_authenticated_session,
+    stop_owned_1688_account_runtime,
 )
 from stop_sale_audit import resolve_stop_sale_app_config
 
@@ -172,6 +177,9 @@ def _known_historical_draft_ids(payload: dict) -> set[str]:
     current = str(((workflow.get("draft") or {}).get("draft_id") or "")).strip()
     if current:
         known.add(current)
+    pending = str(workflow.get("pending_draft_id") or "").strip()
+    if pending:
+        known.add(pending)
     for item in list(workflow.get("event_history") or []):
         if not isinstance(item, dict):
             continue
@@ -181,6 +189,63 @@ def _known_historical_draft_ids(payload: dict) -> set[str]:
         if draft_id:
             known.add(draft_id)
     return known
+
+
+def _listing_operation_key(payload: dict, mode: str) -> str:
+    task_id = str(payload.get("task_id") or "").strip()
+    account_key = str(((payload.get("shop") or {}).get("account_key") or "")).strip()
+    draft_id = require_unique_existing_draft_id(payload)
+    return build_listing_operation_key(
+        account_key=account_key,
+        task_id=task_id,
+        draft_id=draft_id,
+        mode=mode,
+    )
+
+
+def _terminal_saga_payload(payload: dict, saga_state: dict) -> dict:
+    raw_evidence = saga_state.get("evidence_json")
+    try:
+        evidence = json.loads(str(raw_evidence or "{}"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("terminal listing saga evidence is invalid") from exc
+    workflow = evidence.get("workflow")
+    if not isinstance(workflow, dict):
+        raise RuntimeError("terminal listing saga has no workflow evidence")
+    updated = json.loads(json.dumps(payload, ensure_ascii=False, default=str))
+    updated["workflow"] = workflow
+    updated["saga_replay"] = {
+        "status": "terminal_success_short_circuit",
+        "operation_key": str(saga_state.get("operation_key") or ""),
+        "saga_state": str(saga_state.get("state") or ""),
+        "ali1688_status": str(saga_state.get("ali1688_status") or ""),
+    }
+    return updated
+
+
+def _prepare_listing_saga(
+    saga_repository: OperationSagaRepository,
+    operation: SagaOperation,
+    *,
+    payload: dict,
+    owner_token: str,
+    account_fencing_token: int,
+    browser_slot_key: str,
+    browser_slot_fencing_token: int,
+) -> dict | None:
+    status = saga_repository.prepare(
+        operation,
+        owner_token=owner_token,
+        account_fencing_token=account_fencing_token,
+        browser_slot_key=browser_slot_key,
+        browser_slot_fencing_token=browser_slot_fencing_token,
+    )
+    if status not in {"completed", "ali1688_success", "jushuitan_pending"}:
+        return None
+    return _terminal_saga_payload(
+        payload,
+        saga_repository.get_saga_state(operation.operation_key),
+    )
 
 
 def _apply_draft_rebind(
@@ -195,9 +260,9 @@ def _apply_draft_rebind(
     event), and it becomes the execution ``pending_draft_id`` so the publish URL
     and the draft-request patch both carry the existing draft identity.
 
-    Without an explicit rebind, draft mode must never silently create a new
-    draft for a task that already has a historical draft; the only exception is
-    an explicitly authorized rebuild (last_event=authorized_draft_rebuild_resumed).
+    Without an explicit rebind, draft mode must never create a new draft. The
+    caller must provide an existing draft ID through ``--draft-id`` or an
+    already-recorded ``pending_draft_id``.
     """
     requested = str(getattr(args, "draft_id", "") or "").strip()
     if args.mode != "draft":
@@ -217,14 +282,9 @@ def _apply_draft_rebind(
     pending = str(workflow.get("pending_draft_id") or "").strip()
     if pending:
         return execution_payload
-    last_event = str((workflow.get("last_event") or "")).strip()
-    if last_event != "authorized_draft_rebuild_resumed" and _known_historical_draft_ids(payload):
-        raise ListingContractError(
-            "draft mode would create a new 1688 draft, but this task already has "
-            "a historical draft; re-run with --draft-id <known draft_id> to explicitly "
-            "rebind the existing draft"
-        )
-    return execution_payload
+    raise ListingContractError(
+        "draft mode requires an existing draft_id; new 1688 draft creation is disabled"
+    )
 
 
 def _record_controlled_saga_failure(
@@ -285,6 +345,50 @@ def _build_listing_account_lock(args: argparse.Namespace, payload: dict):
             "payload": str(Path(args.payload).resolve()),
         },
     )
+
+
+def _open_authenticated_listing_browser(
+    browser,
+    *,
+    shared_runtime_root: str,
+    account_key: str,
+    shop_name: str,
+    system_config: dict,
+    skip_login: bool,
+) -> bool:
+    if skip_login:
+        browser.open()
+        return False
+
+    del system_config
+    login_result = ensure_1688_authenticated_session(
+        shared_runtime_root,
+        account_key,
+        shop_name,
+        keep_browser_open=True,
+        allow_unconfirmed_identity=True,
+    )
+    if str(login_result.get("status") or "") not in {"success", "identity_unconfirmed"}:
+        raise OfflineLoginRequiredError("1688 automatic login did not return a usable session.")
+    if not login_result.get("browser_runtime_preserved"):
+        raise OfflineLoginRequiredError("1688 automatic login did not preserve the account browser runtime.")
+
+    # The shared login flow owns startup of the account CDP runtime. Connect
+    # BrowserRPA only after that runtime is ready.
+    browser.open()
+    return True
+
+
+def _build_listing_browser_config(operator_config: dict, *, cdp_port: int) -> dict:
+    browser_config = dict(operator_config.get("browser") or {})
+    if int(cdp_port) <= 0:
+        raise ValueError("cdp_port must be positive")
+    # Account runtimes are launched by the shared crawler as Microsoft Edge.
+    # Force the matching Selenium driver instead of inheriting the legacy
+    # operator_config "type" key, which BrowserRPA does not consume.
+    browser_config["browser_type"] = "edge"
+    browser_config["debugger_address"] = f"127.0.0.1:{int(cdp_port)}"
+    return browser_config
 
 
 def main() -> int:
@@ -433,8 +537,24 @@ def main() -> int:
         if not str(args.operator or "").strip():
             raise ValueError("--operator is required for review decisions")
         if args.mode == "approve":
+            if not args.draft_inspection:
+                raise ValueError("--draft-inspection is required for approve")
+            inspection = json.loads(Path(args.draft_inspection).read_text(encoding="utf-8-sig"))
+            account_key = str(((payload.get("shop") or {}).get("account_key") or "")).strip()
+            binding = resolve_executor_binding(account_key)
+            try:
+                inspection_binding = validate_independent_inspection(
+                    payload,
+                    inspection,
+                    expected_cdp_port=binding.cdp_port,
+                )
+            except ListingReviewError as exc:
+                raise ValueError(str(exc)) from exc
             event = "review_approved"
-            evidence = {"approved_by": args.operator}
+            evidence = {
+                "approved_by": args.operator,
+                "inspection_binding": inspection_binding,
+            }
         else:
             event = "review_rejected"
             evidence = {"rejected_by": args.operator}
@@ -445,6 +565,28 @@ def main() -> int:
         _write_result(updated, args.output)
         return 0
 
+    if args.mode == "submit":
+        if not args.draft_inspection:
+            raise ValueError("--draft-inspection is required for submit")
+        inspection = json.loads(Path(args.draft_inspection).read_text(encoding="utf-8-sig"))
+        account_key = str(((payload.get("shop") or {}).get("account_key") or "")).strip()
+        binding = resolve_executor_binding(account_key)
+        try:
+            submit_inspection_binding = validate_independent_inspection(
+                payload,
+                inspection,
+                expected_cdp_port=binding.cdp_port,
+            )
+        except ListingReviewError as exc:
+            raise ValueError(str(exc)) from exc
+        approved_binding = dict(
+            ((payload.get("workflow") or {}).get("last_event_evidence") or {}).get(
+                "inspection_binding"
+            )
+            or {}
+        )
+        if submit_inspection_binding != approved_binding:
+            raise ValueError("submit inspection artifact does not match recorded approval")
     assert_execution_allowed(payload, args.mode)
     execution_payload = build_execution_payload(
         payload,
@@ -469,7 +611,11 @@ def main() -> int:
             "excluded_album_values"
         ]
     repository = _load_listing_audit_repository(args.shared_runtime_root)
-    repository.upsert_task(payload)
+    is_scheduled_claim = bool(
+        str(((payload.get("schedule") or {}).get("claim_owner") or "")).strip()
+    )
+    if not is_scheduled_claim:
+        repository.register_execution_payload(payload)
 
     from browser_rpa import BrowserRPA, PublishValidationError
 
@@ -478,7 +624,6 @@ def main() -> int:
     system_config = load_json_with_local_override(config_dir / "systems" / "1688_direct.json")
     operator_config = load_json_with_local_override(config_dir / "operator_config.json")
     category_config = load_json_with_local_override(config_dir / "furniture_categories.json")
-    browser = BrowserRPA(operator_config.get("browser", {}), PROJECT_ROOT)
     app_config = resolve_stop_sale_app_config(args.shared_runtime_root)
     saga_repository = OperationSagaRepository(app_config)
     saga_contract = saga_repository.check_contract()
@@ -489,9 +634,13 @@ def main() -> int:
         )
     task_id = str(payload.get("task_id") or "").strip()
     account_key = str(((payload.get("shop") or {}).get("account_key") or "")).strip()
-    operation_key = build_operation_key("listing", account_key, task_id)
+    operation_key = _listing_operation_key(payload, args.mode)
     build_sha = resolve_build_sha(PROJECT_ROOT.parent)
     binding = resolve_executor_binding(account_key)
+    browser = BrowserRPA(
+        _build_listing_browser_config(operator_config, cdp_port=binding.cdp_port),
+        PROJECT_ROOT,
+    )
     with ExitStack() as stack:
         stack.enter_context(_build_listing_account_lock(args, payload))
         runtime_guard = stack.enter_context(
@@ -509,43 +658,56 @@ def main() -> int:
         )
         browser.set_runtime_action_guard(runtime_guard.assert_active)
         runtime_guard.register_owned_browser_closer(browser.close)
-        saga_repository.prepare(
-            SagaOperation(
-                operation_key=operation_key,
-                run_id=task_id,
-                task_type="listing",
-                account_key=account_key,
-                business_key=task_id,
-                payload={
-                    "task_id": task_id,
-                    "mode": args.mode,
-                    "shop_name": str(((payload.get("shop") or {}).get("shop_name") or "")),
-                    "company_sku": str(((payload.get("source") or {}).get("company_sku") or "")),
-                },
-            ),
+        repository.assert_execution_payload_current(payload)
+        saga_operation = SagaOperation(
+            operation_key=operation_key,
+            run_id=task_id,
+            task_type="listing_submit" if args.mode == "submit" else "listing_draft",
+            account_key=account_key,
+            business_key=task_id,
+            payload={
+                "task_id": task_id,
+                "mode": args.mode,
+                "shop_name": str(((payload.get("shop") or {}).get("shop_name") or "")),
+                "company_sku": str(((payload.get("source") or {}).get("company_sku") or "")),
+            },
+        )
+        terminal_payload = _prepare_listing_saga(
+            saga_repository,
+            saga_operation,
+            payload=payload,
             owner_token=runtime_guard.owner_token,
             account_fencing_token=runtime_guard.account_fencing_token,
             browser_slot_key=runtime_guard.browser_slot_key,
             browser_slot_fencing_token=runtime_guard.browser_slot_fencing_token,
         )
+        if terminal_payload is not None:
+            updated = terminal_payload
+            repository.upsert_task(updated)
+            _write_result(updated, args.output)
+            return 0
         execution_id = repository.start_execution(task_id=task_id, mode=args.mode)
         try:
-            browser.open()
-            if not args.skip_login:
-                # Bounded automatic login first (one password login + slider RPA
-                # via the shared 1688 runtime CLI); fail closed on risk control,
-                # fall back to the configured interactive flow on other errors.
-                shop_name_for_login = str(((payload.get("shop") or {}).get("shop_name") or "")).strip()
-                try:
-                    ensure_1688_authenticated_session(
-                        args.shared_runtime_root,
-                        account_key,
-                        shop_name_for_login,
+            owns_account_runtime = _open_authenticated_listing_browser(
+                browser,
+                shared_runtime_root=args.shared_runtime_root,
+                account_key=account_key,
+                shop_name=str(((payload.get("shop") or {}).get("shop_name") or "")).strip(),
+                system_config=system_config,
+                skip_login=args.skip_login,
+            )
+            if owns_account_runtime:
+                if not binding.browser_profile_dir:
+                    raise OfflineLoginRequiredError(
+                        f"Account browser profile directory is missing: account_key={account_key}."
                     )
-                except (OfflineRiskControlError, OfflineStoreMismatchError):
-                    raise
-                except OfflineLoginRequiredError:
-                    browser.run_system_workflow(system_config, {})
+                stack.callback(
+                    stop_owned_1688_account_runtime,
+                    args.shared_runtime_root,
+                    account_key,
+                    binding.browser_profile_dir,
+                    binding.cdp_port,
+                )
             updated, _context = execute_browser_task(
                 execution_payload,
                 mode=args.mode,

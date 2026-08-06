@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 from pathlib import Path
 import sys
@@ -59,7 +60,39 @@ class FakeBrowser:
         raise TimeoutException("runtime unavailable")
 
 
+@contextmanager
+def fake_account_browser_session(**kwargs):
+    browser = kwargs["browser_class"]({}, Path.cwd())
+    browser.open()
+    try:
+        yield (
+            browser,
+            SimpleNamespace(cdp_port=9306),
+            SimpleNamespace(account_key="muke_lixiang", shop_name="木刻理想"),
+        )
+    finally:
+        browser.close()
+
+
 class InspectSavedDraftTests(unittest.TestCase):
+    def test_inspection_draft_id_must_match_unique_payload_draft(self) -> None:
+        payload = {
+            "workflow": {
+                "pending_draft_id": "draft-1",
+                "draft": {"draft_id": "draft-1"},
+            }
+        }
+        self.assertEqual(
+            inspector._resolve_inspection_draft_id(payload, "draft-1"),
+            "draft-1",
+        )
+        with self.assertRaisesRegex(ValueError, "must match"):
+            inspector._resolve_inspection_draft_id(payload, "draft-2")
+
+    def test_inspection_requires_one_existing_payload_draft(self) -> None:
+        with self.assertRaisesRegex(ValueError, "found 0"):
+            inspector._resolve_inspection_draft_id({"workflow": {}}, "draft-1")
+
     def test_expected_main_image_count_caps_at_four(self) -> None:
         self.assertEqual(
             inspector._expected_main_image_count(
@@ -96,6 +129,36 @@ class InspectSavedDraftTests(unittest.TestCase):
                 expected_code="essxsfh",
             )
         )
+
+    def test_nonpersistent_contract_field_is_explicitly_marked_for_submit_reapply(self) -> None:
+        checks, outcomes = inspector._classify_field_outcomes(
+            {
+                "title": True,
+                "delivery_service": False,
+            },
+            submit_reapply_fields={"delivery_service"},
+            submit_reapply_contract_sha256="a" * 64,
+        )
+
+        self.assertEqual(checks, {"title": True, "delivery_service": True})
+        self.assertEqual(outcomes["title"], {"status": "persisted"})
+        self.assertEqual(
+            outcomes["delivery_service"],
+            {
+                "status": "submit_reapply_required",
+                "contract_sha256": "a" * 64,
+            },
+        )
+
+    def test_missing_field_outside_reapply_contract_remains_failed(self) -> None:
+        checks, outcomes = inspector._classify_field_outcomes(
+            {"main_image_count": False},
+            submit_reapply_fields={"delivery_service"},
+            submit_reapply_contract_sha256="a" * 64,
+        )
+
+        self.assertFalse(checks["main_image_count"])
+        self.assertEqual(outcomes["main_image_count"], {"status": "failed"})
 
     def test_boot_network_probe_fails_closed_when_cdp_is_unavailable(self) -> None:
         browser = SimpleNamespace(driver=FakeDriver())
@@ -187,6 +250,10 @@ class InspectSavedDraftTests(unittest.TestCase):
                 json.dumps(
                     {
                         "task_id": "task-1",
+                        "shop": {
+                            "account_key": "muke_lixiang",
+                            "shop_name": "木刻理想",
+                        },
                         "workflow": {"draft": {"draft_id": "draft-1"}},
                         "images": {"detail_urls": []},
                         "product": {"selected_title": "title"},
@@ -201,6 +268,11 @@ class InspectSavedDraftTests(unittest.TestCase):
 
             with (
                 patch.object(inspector, "BrowserRPA", FakeBrowser),
+                patch.object(
+                    inspector,
+                    "open_account_bound_listing_browser",
+                    side_effect=fake_account_browser_session,
+                ),
                 patch.object(inspector, "load_json_with_local_override", return_value={"browser": {}}),
                 patch.object(
                     inspector,
@@ -238,6 +310,10 @@ class InspectSavedDraftTests(unittest.TestCase):
                 json.dumps(
                     {
                         "task_id": "task-1",
+                        "shop": {
+                            "account_key": "muke_lixiang",
+                            "shop_name": "木刻理想",
+                        },
                         "workflow": {"draft": {"draft_id": "draft-1"}},
                         "images": {"detail_urls": []},
                         "product": {
@@ -260,6 +336,11 @@ class InspectSavedDraftTests(unittest.TestCase):
 
             with (
                 patch.object(inspector, "SkuOfflineBrowser", FakeBrowser),
+                patch.object(
+                    inspector,
+                    "open_account_bound_listing_browser",
+                    side_effect=fake_account_browser_session,
+                ),
                 patch.object(inspector, "load_json_with_local_override", return_value={"browser": {}}),
                 patch.object(inspector, "_open_draft_from_management", return_value=management_entry),
                 patch.object(

@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 import sys
 import unittest
+from unittest.mock import patch
 
 
 SCRIPT_ROOT = Path(__file__).resolve().parents[1] / "scripts"
@@ -12,10 +13,18 @@ if str(SCRIPT_ROOT) not in sys.path:
 
 from run_1688_listing_task import (  # noqa: E402
     _apply_draft_rebind,
+    _build_listing_browser_config,
     _known_historical_draft_ids,
+    _listing_operation_key,
+    _open_authenticated_listing_browser,
     _record_controlled_saga_failure,
 )
 from auto_listing import ListingContractError  # noqa: E402
+from listing_review import ListingReviewError  # noqa: E402
+from exceptions import (  # noqa: E402
+    OfflineLoginRequiredError,
+    OfflineRiskControlError,
+)
 
 
 def _args(mode: str = "draft", draft_id: str = "") -> argparse.Namespace:
@@ -62,6 +71,33 @@ class KnownHistoricalDraftIdTests(unittest.TestCase):
             {"event": "draft_saved", "evidence": {}},
         ]
         self.assertEqual(_known_historical_draft_ids(payload), set())
+
+    def test_collects_pending_draft_id_for_explicit_daily_rebind(self) -> None:
+        payload = _payload_with_history(pending_draft_id="draft-pending")
+        self.assertEqual(_known_historical_draft_ids(payload), {"draft-pending"})
+
+    def test_listing_operation_key_separates_submit_from_draft(self) -> None:
+        payload = _payload_with_history(current_draft_id="draft-current")
+        payload["shop"] = {"account_key": "muke_lixiang"}
+        self.assertNotEqual(
+            _listing_operation_key(payload, "draft"),
+            _listing_operation_key(payload, "submit"),
+        )
+
+    def test_listing_operation_key_requires_unique_existing_draft_for_draft(self) -> None:
+        payload = _payload_with_history()
+        payload["shop"] = {"account_key": "muke_lixiang"}
+        with self.assertRaisesRegex(ListingReviewError, "found 0"):
+            _listing_operation_key(payload, "draft")
+
+    def test_listing_operation_key_rejects_ambiguous_existing_drafts(self) -> None:
+        payload = _payload_with_history(
+            current_draft_id="draft-current",
+            pending_draft_id="draft-pending",
+        )
+        payload["shop"] = {"account_key": "muke_lixiang"}
+        with self.assertRaisesRegex(ListingReviewError, "found 2"):
+            _listing_operation_key(payload, "draft")
 
 
 class ApplyDraftRebindTests(unittest.TestCase):
@@ -113,19 +149,19 @@ class ApplyDraftRebindTests(unittest.TestCase):
         with self.assertRaises(ListingContractError):
             _apply_draft_rebind(_args(), payload, dict(payload))
 
-    def test_authorized_rebuild_may_create_new_draft(self) -> None:
+    def test_authorized_rebuild_fails_closed_without_existing_draft(self) -> None:
         payload = _payload_with_history(
             current_draft_id="",
             event_draft_ids=["draft-deleted"],
             last_event="authorized_draft_rebuild_resumed",
         )
-        execution = _apply_draft_rebind(_args(), payload, dict(payload))
-        self.assertNotIn("pending_draft_id", execution["workflow"])
+        with self.assertRaisesRegex(ListingContractError, "new 1688 draft creation is disabled"):
+            _apply_draft_rebind(_args(), payload, dict(payload))
 
-    def test_brand_new_task_may_create_new_draft(self) -> None:
+    def test_brand_new_task_fails_closed_without_existing_draft(self) -> None:
         payload = _payload_with_history()
-        execution = _apply_draft_rebind(_args(), payload, dict(payload))
-        self.assertNotIn("pending_draft_id", execution["workflow"])
+        with self.assertRaisesRegex(ListingContractError, "new 1688 draft creation is disabled"):
+            _apply_draft_rebind(_args(), payload, dict(payload))
 
 
 class _RecordingSagaRepository:
@@ -166,6 +202,135 @@ class RecordControlledSagaFailureTests(unittest.TestCase):
             exc=ValueError("controlled failure"),
         )
         self.assertTrue(note.startswith("saga_record_failed=RuntimeError"))
+
+
+class _FakeBrowser:
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+
+    def open(self) -> None:
+        self.events.append("browser_open")
+
+    def run_system_workflow(self, _config: dict, _context: dict) -> None:
+        self.events.append("interactive_login")
+
+
+class OpenAuthenticatedListingBrowserTests(unittest.TestCase):
+    def test_starts_authenticated_runtime_before_browser_attach(self) -> None:
+        events: list[str] = []
+        browser = _FakeBrowser(events)
+
+        def login(*_args, **kwargs) -> dict:
+            events.append("shared_login")
+            self.assertTrue(kwargs["keep_browser_open"])
+            self.assertTrue(kwargs["allow_unconfirmed_identity"])
+            return {"status": "success", "browser_runtime_preserved": True}
+
+        with patch("run_1688_listing_task.ensure_1688_authenticated_session", side_effect=login):
+            owns_runtime = _open_authenticated_listing_browser(
+                browser,
+                shared_runtime_root="runtime",
+                account_key="muke_lixiang",
+                shop_name="木刻理想",
+                system_config={},
+                skip_login=False,
+            )
+
+        self.assertEqual(events, ["shared_login", "browser_open"])
+        self.assertTrue(owns_runtime)
+
+    def test_login_required_fails_closed_without_interactive_fallback(self) -> None:
+        events: list[str] = []
+        browser = _FakeBrowser(events)
+        with patch(
+            "run_1688_listing_task.ensure_1688_authenticated_session",
+            side_effect=OfflineLoginRequiredError("login required"),
+        ):
+            with self.assertRaises(OfflineLoginRequiredError):
+                _open_authenticated_listing_browser(
+                    browser,
+                    shared_runtime_root="runtime",
+                    account_key="muke_lixiang",
+                    shop_name="木刻理想",
+                    system_config={"login": {}},
+                    skip_login=False,
+                )
+
+        self.assertEqual(events, [])
+
+    def test_identity_unconfirmed_session_can_attach_without_manual_prompt(self) -> None:
+        events: list[str] = []
+        browser = _FakeBrowser(events)
+        with patch(
+            "run_1688_listing_task.ensure_1688_authenticated_session",
+            return_value={
+                "status": "identity_unconfirmed",
+                "browser_runtime_preserved": True,
+            },
+        ):
+            owns_runtime = _open_authenticated_listing_browser(
+                browser,
+                shared_runtime_root="runtime",
+                account_key="muke_lixiang",
+                shop_name="木刻理想",
+                system_config={"login": {"mode": "manual"}},
+                skip_login=False,
+            )
+
+        self.assertEqual(events, ["browser_open"])
+        self.assertTrue(owns_runtime)
+
+    def test_risk_control_fails_before_browser_attach(self) -> None:
+        events: list[str] = []
+        browser = _FakeBrowser(events)
+        with patch(
+            "run_1688_listing_task.ensure_1688_authenticated_session",
+            side_effect=OfflineRiskControlError("risk control"),
+        ):
+            with self.assertRaises(OfflineRiskControlError):
+                _open_authenticated_listing_browser(
+                    browser,
+                    shared_runtime_root="runtime",
+                    account_key="muke_lixiang",
+                    shop_name="木刻理想",
+                    system_config={},
+                    skip_login=False,
+                )
+
+        self.assertEqual(events, [])
+
+
+class BuildListingBrowserConfigTests(unittest.TestCase):
+    def test_uses_the_account_binding_cdp_port(self) -> None:
+        operator_config = {
+            "browser": {
+                "debugger_address": "127.0.0.1:9222",
+                "headless": False,
+            }
+        }
+
+        result = _build_listing_browser_config(operator_config, cdp_port=9317)
+
+        self.assertEqual(result["debugger_address"], "127.0.0.1:9317")
+        self.assertEqual(result["browser_type"], "edge")
+        self.assertFalse(result["headless"])
+        self.assertEqual(
+            operator_config["browser"]["debugger_address"],
+            "127.0.0.1:9222",
+        )
+
+    def test_forces_edge_for_the_account_runtime(self) -> None:
+        result = _build_listing_browser_config(
+            {"browser": {"type": "chrome", "browser_type": "chrome"}},
+            cdp_port=9306,
+        )
+
+        self.assertEqual(result["browser_type"], "edge")
+        self.assertEqual(result["debugger_address"], "127.0.0.1:9306")
+
+    def test_rejects_invalid_cdp_port(self) -> None:
+        with self.assertRaisesRegex(ValueError, "cdp_port must be positive"):
+            _build_listing_browser_config({}, cdp_port=0)
 
 
 if __name__ == "__main__":

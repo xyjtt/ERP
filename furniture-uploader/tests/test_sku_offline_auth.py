@@ -3,8 +3,10 @@ from __future__ import annotations
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -20,6 +22,7 @@ from exceptions import (  # noqa: E402
 from sku_offline_auth import (  # noqa: E402
     ensure_1688_authenticated_session,
     extract_login_failure_diagnostic,
+    stop_owned_1688_account_runtime,
 )
 
 
@@ -59,11 +62,38 @@ class SkuOfflineAuthTests(unittest.TestCase):
         self.assertIn("--auto-solve-slider", command)
         self.assertEqual(command[command.index("--slider-max-attempts") + 1], "4")
         self.assertIn("--verify-account-identity", command)
+        self.assertNotIn("--keep-browser-open", command)
         self.assertNotIn("username", " ".join(command).lower())
         self.assertNotIn("password", " ".join(command).lower())
         self.assertEqual(result["status"], "success")
         self.assertNotIn("stdout", result)
         self.assertEqual(captured["kwargs"]["timeout"], 300)
+
+    def test_listing_handoff_keeps_browser_and_accepts_unconfirmed_identity(self) -> None:
+        captured: dict = {}
+
+        def runner(command, **_kwargs):
+            captured["command"] = list(command)
+            return subprocess.CompletedProcess(
+                command,
+                4,
+                stdout='LOGIN_IDENTITY_RESULT:{"status":"identity_unconfirmed"}',
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_root = self.create_runtime(Path(temp_dir))
+            result = ensure_1688_authenticated_session(
+                runtime_root,
+                "gonglai",
+                "常州工莱家具",
+                command_runner=runner,
+                keep_browser_open=True,
+                allow_unconfirmed_identity=True,
+            )
+
+        self.assertEqual(result["status"], "identity_unconfirmed")
+        self.assertTrue(result["browser_runtime_preserved"])
+        self.assertIn("--keep-browser-open", captured["command"])
 
     def test_falls_back_to_current_python_when_runtime_venv_is_missing(self) -> None:
         captured: dict = {}
@@ -210,6 +240,50 @@ class SkuOfflineAuthTests(unittest.TestCase):
                     timeout_seconds=12,
                     command_runner=runner,
                 )
+
+    def test_runtime_handoff_cleanup_stops_only_the_bound_account_edge(self) -> None:
+        captured: dict = {}
+
+        class FakeSpec:
+            def __init__(self, **kwargs):
+                captured["spec"] = kwargs
+
+        class FakeRuntime:
+            def __init__(self, spec):
+                captured["runtime_spec"] = spec
+
+            def stop_owned(self) -> bool:
+                captured["stopped"] = True
+                return True
+
+        src_package = types.ModuleType("src")
+        src_package.__path__ = []
+        runtime_package = types.ModuleType("src.runtime")
+        runtime_package.__path__ = []
+        edge_module = types.ModuleType("src.runtime.edge_worker")
+        edge_module.AccountEdgeRuntime = FakeRuntime
+        edge_module.AccountEdgeSpec = FakeSpec
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            sys.modules,
+            {
+                "src": src_package,
+                "src.runtime": runtime_package,
+                "src.runtime.edge_worker": edge_module,
+            },
+        ):
+            profile_dir = Path(temp_dir) / "profile"
+            stop_owned_1688_account_runtime(
+                temp_dir,
+                "muke_lixiang",
+                profile_dir,
+                9306,
+            )
+
+        self.assertTrue(captured["stopped"])
+        self.assertEqual(captured["spec"]["account_key"], "muke_lixiang")
+        self.assertEqual(captured["spec"]["user_data_dir"], profile_dir.resolve())
+        self.assertEqual(captured["spec"]["cdp_port"], 9306)
 
 
 if __name__ == "__main__":

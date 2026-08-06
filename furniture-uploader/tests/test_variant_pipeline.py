@@ -182,6 +182,54 @@ class VariantPipelineTests(unittest.TestCase):
         self.assertEqual(variants[0].width_cm, "60")
         self.assertEqual(variants[0].height_cm, "70")
 
+    def test_product_record_preserves_reviewed_submit_reapply_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "variants.json"
+            path.write_text(
+                """
+                [
+                  {
+                    "variant_id": "V1-REAPPLY",
+                    "source_product_id": "SKU-1",
+                    "platform": "1688",
+                    "shop_name": "test-shop",
+                    "title": "test-title",
+                    "price_value": "299",
+                    "platform_category": "bedside_table",
+                    "submit_reapply_required_fields": ["delivery_service", "send_address"],
+                    "submit_reapply_evidence": {
+                      "fields": {
+                        "delivery_service": {"requested_ids": [365841]},
+                        "send_address": {"expected_value": "35281125"}
+                      }
+                    },
+                    "submit_reapply_contract_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                  }
+                ]
+                """,
+                encoding="utf-8",
+            )
+            products = build_products_from_variants(
+                load_release_variants(path),
+                image_client=None,
+                project_root=temp_dir,
+            )
+
+        self.assertEqual(
+            products[0].raw["submit_reapply_required_fields"],
+            ["delivery_service", "send_address"],
+        )
+        self.assertEqual(
+            products[0].raw["submit_reapply_evidence"]["fields"]["send_address"][
+                "expected_value"
+            ],
+            "35281125",
+        )
+        self.assertEqual(
+            products[0].raw["submit_reapply_contract_sha256"],
+            "a" * 64,
+        )
+
     def test_load_release_variants_prefers_explicit_dimensions(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "variants.json"
