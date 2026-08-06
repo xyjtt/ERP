@@ -26,7 +26,14 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("failed_retryable", "failed_terminal"),
         required=True,
     )
-    parser.add_argument("--expected-error-code", default="")
+    parser.add_argument("--expected-error-code", required=True)
+    parser.add_argument("--expected-run-id", required=True)
+    parser.add_argument("--expected-attempt-count", required=True, type=int)
+    parser.add_argument(
+        "--expected-saga-state",
+        choices=("failed_retryable", "failed_terminal"),
+        required=True,
+    )
     parser.add_argument("--reason", required=True)
     parser.add_argument("--shared-runtime-root", default=os.getenv("SCRIPT_1688_ROOT", "D:/script_1688"))
     parser.add_argument("--yes", action="store_true")
@@ -39,13 +46,29 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         raise ValueError("operation_key must be a 64-character lowercase SHA-256 value")
     repository = OperationSagaRepository(resolve_stop_sale_app_config(args.shared_runtime_root))
     before = repository.get_outbox_state(operation_key)
+    expected = {
+        "status": str(args.expected_status),
+        "last_error_code": str(args.expected_error_code or "").strip(),
+        "run_id": str(args.expected_run_id or "").strip(),
+        "attempt_count": int(args.expected_attempt_count),
+        "saga_state": str(args.expected_saga_state),
+    }
+    changed = [name for name, value in expected.items() if before.get(name) != value]
+    if changed:
+        raise RuntimeError("outbox_preview_precondition_changed:" + ",".join(changed))
+    reason = str(args.reason or "").strip()
+    if not reason:
+        raise ValueError("--reason must not be empty")
     if not args.yes:
-        return {"status": "preview", "before": before}
+        return {"status": "preview", "before": before, "expected": expected}
     result = repository.requeue_outbox(
         operation_key,
         expected_status=args.expected_status,
-        expected_error_code=str(args.expected_error_code or "").strip(),
-        reason=str(args.reason or "").strip(),
+        expected_error_code=expected["last_error_code"],
+        expected_run_id=expected["run_id"],
+        expected_attempt_count=expected["attempt_count"],
+        expected_saga_state=expected["saga_state"],
+        reason=reason,
     )
     return {"status": "applied", "before": before, "result": result}
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -39,8 +40,9 @@ TOPICS = {
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Process durable 1688 Jushuitan outbox rows")
     parser.add_argument("--action", choices=tuple(TOPICS), required=True)
-    parser.add_argument("--run-id", default="")
-    parser.add_argument("--limit", type=int, default=100)
+    parser.add_argument("--run-id", required=True)
+    parser.add_argument("--approved-operation-keys-file", required=True)
+    parser.add_argument("--approved-operation-keys-sha256", required=True)
     parser.add_argument("--yes", action="store_true")
     parser.add_argument("--shared-runtime-root", default=os.getenv("SCRIPT_1688_ROOT", "D:/script_1688"))
     parser.add_argument("--jushuitan-root", default=str(ERP_ROOT / "jushuitan-sku-offline-batch"))
@@ -53,6 +55,46 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--handoff-out", default="")
     parser.add_argument("--results-dir", default="")
     return parser
+
+
+def load_approved_operation_keys(
+    path: Path,
+    expected_sha256: str,
+    run_id: str,
+) -> list[str]:
+    if not path.is_file():
+        raise FileNotFoundError(f"Approved operation-key file does not exist: {path}")
+    raw = path.read_bytes()
+    observed_sha256 = hashlib.sha256(raw).hexdigest()
+    if len(expected_sha256) != 64 or any(char not in "0123456789abcdef" for char in expected_sha256):
+        raise ValueError("--approved-operation-keys-sha256 must be a lowercase SHA-256 value")
+    if observed_sha256 != expected_sha256:
+        raise RuntimeError("Approved operation-key file SHA-256 does not match")
+
+    keys: list[str]
+    if path.suffix.lower() == ".jsonl":
+        records = load_jsonl_records(path)
+        keys = [
+            str(record.get("operation_key") or record.get("task_id") or "").strip().lower()
+            for record in records
+        ]
+    else:
+        payload = json.loads(raw.decode("utf-8-sig"))
+        if not isinstance(payload, dict) or int(payload.get("version") or 0) != 1:
+            raise RuntimeError("Approved operation-key JSON must be a version 1 object")
+        if str(payload.get("run_id") or "").strip() != run_id:
+            raise RuntimeError("Approved operation-key run_id does not match")
+        raw_keys = payload.get("operation_keys")
+        if not isinstance(raw_keys, list):
+            raise RuntimeError("Approved operation-key JSON is missing operation_keys")
+        keys = [str(key or "").strip().lower() for key in raw_keys]
+    if not keys:
+        raise RuntimeError("Approved operation-key scope is empty")
+    if len(set(keys)) != len(keys):
+        raise RuntimeError("Approved operation-key scope contains duplicates")
+    if any(len(key) != 64 or any(char not in "0123456789abcdef" for char in key) for key in keys):
+        raise RuntimeError("Approved operation-key scope contains an invalid key")
+    return sorted(keys)
 
 
 def build_node_command(
@@ -154,8 +196,13 @@ def run(
 ) -> dict[str, Any]:
     if not args.yes:
         raise ValueError("Outbox execute requires --yes")
-    if args.limit <= 0 or args.timeout_seconds <= 0 or args.claim_seconds <= 0:
-        raise ValueError("limit and timeout values must be positive")
+    if args.timeout_seconds <= 0 or args.claim_seconds <= 0:
+        raise ValueError("timeout values must be positive")
+    approved_keys = load_approved_operation_keys(
+        Path(args.approved_operation_keys_file).resolve(),
+        str(args.approved_operation_keys_sha256 or "").strip(),
+        str(args.run_id or "").strip(),
+    )
     jushuitan_root = Path(args.jushuitan_root).resolve()
     if not (jushuitan_root / "package.json").exists():
         raise FileNotFoundError(f"Jushuitan project not found: {jushuitan_root}")
@@ -179,15 +226,16 @@ def run(
         wait_timeout_seconds=args.lease_wait_seconds,
         poll_interval_seconds=args.lease_poll_seconds,
     ) as lease_guard:
-        items = repository.claim_outbox(
+        items = repository.claim_outbox_exact(
             claim_owner=worker_id,
-            run_id=str(args.run_id or "").strip(),
+            run_id=str(args.run_id).strip(),
             topic=TOPICS[args.action],
-            limit=args.limit,
+            operation_keys=approved_keys,
             claim_seconds=args.claim_seconds,
         )
-        if not items:
-            return {"status": "empty", "claimed_count": 0, "counts": {}}
+        claimed_keys = {item.operation_key for item in items}
+        if claimed_keys != set(approved_keys) or len(items) != len(approved_keys):
+            raise RuntimeError("Claimed Outbox scope does not match approved operation_keys")
         worker_run_id = str(args.run_id or f"outbox_{items[0].outbox_id}").strip()
         work_dir = PROJECT_ROOT / "logs" / "sku_offline" / "outbox" / worker_run_id
         handoff_path = (

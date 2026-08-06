@@ -1,11 +1,14 @@
 # DIRECT 1688 Progress
 
-## 2026-08-04 Managed Update (Manual Combination Replacement Skip)
+## 2026-08-05 Managed Update (Stop-Sale Recovery Code Complete)
 
-- 新增业务规则：`可替换商品编码（新）=运营自行组合替换` 的 SKU 直接跳过，异常原因固定为 `组合货号`。
-- 规则同时覆盖正式数据源 preview、`sku_offline_main.py` 替换入口和 `run_1688_sku_replace_pipeline.py`；正常替换任务继续执行，其他非法新货号继续拒绝。
-- 全跳过批次在任何租约、Saga、浏览器和聚水潭动作之前结束，输出 `status=business_skipped` 和逐行结构化明细。
-- 本地定向测试 `61/61`、全仓库测试 `599/599` 通过；执行机部署和真实批次复核尚未执行。
+- 中断日批 Manager 现在有正式 fail-closed 收口入口：校验锁归属、死 PID、child run 范围和终态后，先写 Summary，再二次校验锁快照，最后释放锁。
+- P0 child 发现误判已修复：普通 pipeline log 不再进入 child 集合；明确的预审资源拒绝作为 orphan 证据写入 Manager Summary，未知日志仍失败关闭。
+- 新恢复清单工具从原始输入和 child reports 逐条分类 `missing`、`technical`、`excluded`，只把前两类写入定向恢复 CSV，不会重跑业务终态或已完成的聚水潭项。
+- 聚水潭 Outbox 已补齐逐项结果保留、精确 `already_cleared` 证据和单条 fenced CAS 重排；不允许把失败批次中的成功项重新归零，也不允许批量重排历史 11 条。
+- 本地开发验收已通过：Python `616/616`；定向 `19/19`；扩展下架 `76/76`；TypeScript `26/26`、`check`、`build`；`compileall`、PowerShell 解析和差异检查通过。
+- 当前节点不是生产完成：`daily_20260804_130814_970163` 仍须在执行机按操作手册完成收口，再重新生成清单核对此前 52 个 missing、7 个 technical 和历史 11 条 Outbox。禁止手删锁或广泛补跑。
+- 正式执行顺序见 `docs/operations/2026-08-05_interrupted_stop_sale_recovery.md`。Crawler 是否仍在后台运行不构成本开发、提交或部署的统一前置条件；只在同账号租约或浏览器资源实际冲突时等待对应任务自然结束。
 
 ## 2026-07-28 Managed Update (Automatic Login Identity Gate)
 
@@ -336,3 +339,16 @@
 - Root cause from the R7 failure context: edit-page `imageList` only materializes persisted entries (length 1), so writes to slots 1-3 could not land; the picker fallback's empty-slot opener does not exist on an occupied edit page.
 - Bridge upload now extends missing slots with placeholders and detects landing by new remote URL (any slot), recording slot mismatches.
 - 4 updated/new bridge tests; full listing regression `588/588`; doctor `status: ok`.
+
+## 2026-08-04 Stop-Sale System Prompt Handling
+
+- Development now classifies explicit submit-blocking platform text such as `毛重必须为数字` as `system_prompt` / `系统提示`.
+- The affected product ID/SKU is recorded as failed and skipped; execution continues with the next item in the same store.
+- This category is non-retryable and does not stop the store. It is not counted as an offline success and does not create a Jushuitan handoff.
+- Targeted behavior tests and the related stop-sale suite pass `126/126`. Executor deployment and a real hidden-validation Canary remain pending.
+# 2026-08-05 下架恢复安全补强
+
+- 中断 Manager 锁改为 owner/token 不可误删的 Windows 原子释放。
+- 59 项恢复范围必须精确匹配批准的 52 missing + 7 technical 身份集合和哈希。
+- 聚水潭已清除判断改为四列精确匹配，Outbox 改为批准 operation_key 集合原子领取。
+- 当前仅完成开发侧修复；执行机部署和生产恢复仍未执行。

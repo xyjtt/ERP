@@ -1,11 +1,20 @@
 # Project Memory
 
-## 2026-08-04 Managed Update (Combination SKU Business Skip)
+## 2026-08-05 Managed Update (Interrupted Daily Manager Recovery)
 
-- `可替换商品编码（新）` 规范化后等于 `运营自行组合替换` 时，不再按非法 SKU 处理，而是业务跳过，异常原因为 `组合货号`，结构化编码为 `combination_sku`。
-- 数据源 preview 将该类行写入独立 `business_skipped` CSV/JSON，不进入可执行 CSV，也不计入 rejected 数据异常；其他非 SKU 占位值仍按格式错误拒绝。
-- 正式替换流水线和直接执行入口均有二次拦截；全为组合货号时返回 `business_skipped` 成功终态，不申请租约、不创建审计运行或 Saga、不启动浏览器、不触发聚水潭。
-- 本地定向回归 `61/61`、全仓库回归 `599/599` 通过；尚未部署执行机，生产替换仍需等待当前业务任务自然排空并按既有 Canary 门禁验收。
+- 安全复核补强：Manager 锁释放改为 Windows 独占句柄内复核 cycle/run/token 指纹并标记删除；恢复清单必须与批准的 52 missing + 7 technical 四字段身份集合和双 SHA-256 完全一致，否则只产诊断。
+- Child scope 只接受正式 pipeline Summary/report 证据；仅含 `run_id + reason=higher_priority_browser_write` 且无 Summary/数据库行的日志记录为 `pre_audit_evidence` orphan，不伪造 child。未知日志继续阻塞收口。
+- 聚水潭 `already_cleared` 只接受表头映射后的店铺、商品 ID、线上 SKU、平台店铺商品编码四列精确匹配或精确筛选后的显式零行；`ABC1` 不匹配 `ABC10`。
+- Outbox Worker 必须按带 SHA-256 的批准 `operation_key` 集合事务领取，完整集合不一致则回滚；日常下架/替换 handoff 同样作为本批次批准集合。
+- 以上仍是开发变更，未部署或执行生产恢复。
+
+- 新增正式中断收口工具 `scripts/recover_interrupted_stop_sale_daily_manager.py`。它只在管理器锁的 `cycle/manager_run_id/token` 匹配、锁 PID 已死亡、artifact 与数据库 child run 范围完全一致、所有 child run 已终态且 Summary 与审计一致时继续。
+- 收口顺序固定为：原子写入管理器 `summary.json`，再次读取并校验完整锁快照和 fencing/token 证据，然后才释放管理器锁。二次校验漂移时保留锁并标记 `blocked_lock_revalidation`，禁止手删锁。
+- 新增 `scripts/build_interrupted_stop_sale_recovery_manifest.py`，仅接受已完成收口且 `lock_removed=true` 的管理器 Summary；按原始 Preview CSV 和 child reports 精确生成 `missing.csv`、`technical.csv`、`recovery.csv` 与 `manifest.json`。
+- 恢复清单排除业务终态、1688 与聚水潭已完成项；登录、风控、身份和页面技术异常单独归入 `technical`，缺少任何 1688 执行证据的项归入 `missing`。缺失不得伪装为 0 或成功。
+- Saga/Outbox 已兼容移植 `bfc3c6d`：逐项保留同批次中已验证成功结果；只有精确查询零行或目标链接已不存在时才记 `already_cleared`；单条重排使用 operation/status/error/attempt/run/saga 的锁内 CAS，禁止批量重排。
+- 当前仅完成开发验收。生产批次 `daily_20260804_130814_970163` 尚未收口；此前观察到的 52 个未执行、7 个技术失败和历史 11 条 Outbox 尚未通过新工具在生产重新核对或处理。
+- 开发验证：Python 全量 `616/616`，恢复与 Saga/Outbox 定向 `19/19`，扩展下架集合 `76/76`；聚水潭 TypeScript `26/26`、`check`、`build` 通过；Python `compileall`、PowerShell 解析与 `git diff --check` 通过。生产部署、Credential Manager、真实页面、数据库和浏览器验收仍待独立执行。
 
 ## 2026-07-28 Managed Update (Bounded Slider Login Recovery)
 
@@ -381,3 +390,10 @@
 - The bridge upload is now slot-adaptive: `_ensure_primary_picture_bridge_slot` extends `imageList` with placeholder entries before writing; landing detection waits for a NEW remote URL anywhere in the list (robust to the component ignoring the requested slot index) and records `main_image_bridge_slot_mismatches` diagnostics.
 - The pre-save repair from the previous round automatically inherits the adaptive upload.
 - Local validation: listing `588/588`; doctor `status: ok`.
+
+## 2026-08-04 SKU 下架隐藏校验分类
+
+- 1688 编辑页可能在 SKU 已切换为下架后，通过隐藏校验阻止提交，例如 `毛重必须为数字`。这类结果不是下架成功，也不是整店安全故障。
+- 提交未产生平台请求且能读取到明确平台提示时，执行器记录 `error_category=system_prompt`，并把平台原文写入 `page_error_text` 和 `system_prompt`。
+- `system_prompt` 不重试、不停止整店；当前商品 ID/SKU 记录失败后继续下一商品。唯一在线 SKU 的专用分类仍优先于通用系统提示。
+- 本地相关回归 `126/126` 通过；执行机部署和真实 Canary 仍需单独验证，不能用本地测试代替生产验收。

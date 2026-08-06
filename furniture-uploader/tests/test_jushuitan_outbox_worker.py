@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import hashlib
 import json
 import sys
 import tempfile
@@ -18,6 +19,7 @@ from operation_saga import OutboxItem
 from run_1688_jushuitan_outbox_worker import (
     build_node_command,
     finish_claimed_items,
+    load_approved_operation_keys,
     write_claimed_handoff,
 )
 
@@ -85,6 +87,43 @@ class JushuitanOutboxWorkerTests(unittest.TestCase):
         self.assertIn("sync:1688", command)
         self.assertIn("--yes", command)
         self.assertIn("--no-notify", command)
+
+    def test_jsonl_approval_requires_exact_hash_and_unique_operation_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "approved.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        json.dumps({"operation_key": "b" * 64}),
+                        json.dumps({"task_id": "a" * 64}),
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            self.assertEqual(
+                load_approved_operation_keys(path, digest, "run-1"),
+                ["a" * 64, "b" * 64],
+            )
+            with self.assertRaisesRegex(RuntimeError, "SHA-256"):
+                load_approved_operation_keys(path, "0" * 64, "run-1")
+
+    def test_json_approval_requires_matching_run_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "approved.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "run_id": "run-2",
+                        "operation_keys": ["a" * 64],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            with self.assertRaisesRegex(RuntimeError, "run_id"):
+                load_approved_operation_keys(path, digest, "run-1")
 
 
 if __name__ == "__main__":

@@ -337,6 +337,125 @@ class OperationSagaRepository:
             for row in rows
         ]
 
+    def claim_outbox_exact(
+        self,
+        *,
+        claim_owner: str,
+        run_id: str,
+        topic: str,
+        operation_keys: Iterable[str],
+        claim_seconds: int = 1800,
+    ) -> list[OutboxItem]:
+        approved_keys = sorted({str(key or "").strip().lower() for key in operation_keys})
+        if not approved_keys:
+            raise ValueError("Exact Outbox claim requires at least one operation_key")
+        if any(
+            len(key) != 64 or any(char not in "0123456789abcdef" for char in key)
+            for key in approved_keys
+        ):
+            raise ValueError("Exact Outbox claim requires lowercase SHA-256 operation_keys")
+        if not str(run_id or "").strip() or not str(topic or "").strip():
+            raise ValueError("Exact Outbox claim requires run_id and topic")
+
+        outbox = self._table("ali1688_operation_outbox")
+        saga = self._table("ali1688_operation_saga")
+        claim_token = uuid.uuid4().hex
+        with self._connect(self.config) as connection:
+            cursor = connection.cursor()
+            try:
+                cursor.execute(
+                    "CREATE TABLE #approved_operation_keys "
+                    "(operation_key CHAR(64) NOT NULL PRIMARY KEY)"
+                )
+                cursor.executemany(
+                    "INSERT INTO #approved_operation_keys (operation_key) VALUES (?)",
+                    [(key,) for key in approved_keys],
+                )
+                validation_rows = cursor.execute(
+                    f"""
+                    SELECT approved.operation_key,
+                           CASE WHEN outbox_row.outbox_id IS NULL THEN 0 ELSE 1 END AS exists_flag,
+                           ISNULL(outbox_row.status, ''), ISNULL(outbox_row.topic, ''),
+                           ISNULL(saga_row.run_id, ''),
+                           CASE WHEN outbox_row.status IN ('pending', 'failed_retryable')
+                                  AND outbox_row.available_at <= SYSUTCDATETIME()
+                                  AND (outbox_row.claim_until IS NULL
+                                       OR outbox_row.claim_until < SYSUTCDATETIME())
+                                THEN 1 ELSE 0 END AS eligible_flag
+                      FROM #approved_operation_keys AS approved
+                      LEFT JOIN {outbox} AS outbox_row WITH (UPDLOCK, HOLDLOCK)
+                        ON outbox_row.operation_key = approved.operation_key
+                      LEFT JOIN {saga} AS saga_row WITH (UPDLOCK, HOLDLOCK)
+                        ON saga_row.operation_key = approved.operation_key
+                     ORDER BY approved.operation_key
+                    """
+                ).fetchall()
+                observed_keys = {str(row[0]) for row in validation_rows}
+                if observed_keys != set(approved_keys) or len(validation_rows) != len(approved_keys):
+                    raise SagaReconcileRequiredError("outbox_approved_scope_query_mismatch")
+                invalid = [
+                    str(row[0])
+                    for row in validation_rows
+                    if int(row[1]) != 1
+                    or str(row[3]) != topic
+                    or str(row[4]) != run_id
+                    or int(row[5]) != 1
+                ]
+                if invalid:
+                    raise SagaReconcileRequiredError(
+                        "outbox_approved_scope_not_claimable:" + ",".join(invalid)
+                    )
+
+                rows = cursor.execute(
+                    f"""
+                    UPDATE outbox_row
+                       SET status = 'claimed', claim_owner = ?, claim_token = ?,
+                           claim_until = DATEADD(SECOND, ?, SYSUTCDATETIME()),
+                           attempt_count = attempt_count + 1,
+                           updated_at = SYSUTCDATETIME()
+                    OUTPUT inserted.outbox_id, inserted.operation_key, inserted.topic,
+                           inserted.payload_json, inserted.attempt_count, inserted.claim_token
+                      FROM {outbox} AS outbox_row
+                      JOIN #approved_operation_keys AS approved
+                        ON approved.operation_key = outbox_row.operation_key
+                      JOIN {saga} AS saga_row
+                        ON saga_row.operation_key = outbox_row.operation_key
+                     WHERE outbox_row.status IN ('pending', 'failed_retryable')
+                       AND outbox_row.available_at <= SYSUTCDATETIME()
+                       AND (outbox_row.claim_until IS NULL
+                            OR outbox_row.claim_until < SYSUTCDATETIME())
+                       AND outbox_row.topic = ?
+                       AND saga_row.run_id = ?
+                    """,
+                    (
+                        claim_owner[:100],
+                        claim_token,
+                        max(1, int(claim_seconds)),
+                        topic,
+                        run_id,
+                    ),
+                ).fetchall()
+                claimed_keys = {str(row[1]) for row in rows}
+                if claimed_keys != set(approved_keys) or len(rows) != len(approved_keys):
+                    raise SagaFencingError("outbox_exact_claim_compare_and_set_failed")
+                connection.commit()
+            except Exception:
+                rollback = getattr(connection, "rollback", None)
+                if callable(rollback):
+                    rollback()
+                raise
+        return [
+            OutboxItem(
+                outbox_id=int(row[0]),
+                operation_key=str(row[1]),
+                topic=str(row[2]),
+                payload=json.loads(str(row[3])),
+                attempt_count=int(row[4]),
+                claim_token=str(row[5]),
+            )
+            for row in rows
+        ]
+
     def finish_outbox(
         self,
         item: OutboxItem,
@@ -432,11 +551,20 @@ class OperationSagaRepository:
         operation_key: str,
         *,
         expected_status: str,
-        expected_error_code: str = "",
+        expected_error_code: str,
+        expected_run_id: str,
+        expected_attempt_count: int,
+        expected_saga_state: str,
         reason: str,
     ) -> dict[str, Any]:
         if expected_status not in {"failed_retryable", "failed_terminal"}:
             raise ValueError("Only failed Outbox rows may be requeued")
+        if expected_saga_state not in {"failed_retryable", "failed_terminal"}:
+            raise ValueError("Only failed Saga rows may be requeued")
+        if expected_attempt_count < 0:
+            raise ValueError("Expected Outbox attempt_count must be non-negative")
+        if not expected_error_code or not expected_run_id or not str(reason or "").strip():
+            raise ValueError("Controlled requeue requires exact error, run, and reason values")
         outbox = self._table("ali1688_operation_outbox")
         saga = self._table("ali1688_operation_saga")
         with self._connect(self.config) as connection:
@@ -456,17 +584,25 @@ class OperationSagaRepository:
             if row is None:
                 raise SagaReconcileRequiredError("outbox_operation_missing")
             current_status = str(row[1] or "")
+            current_attempt_count = int(row[2] or 0)
             current_error_code = str(row[3] or "")
             saga_state = str(row[5] or "")
+            current_run_id = str(row[6] or "")
             if current_status != expected_status:
                 raise SagaReconcileRequiredError(
                     f"outbox_status_changed:{current_status}"
                 )
-            if expected_error_code and current_error_code != expected_error_code:
+            if current_error_code != expected_error_code:
                 raise SagaReconcileRequiredError(
                     f"outbox_error_changed:{current_error_code}"
                 )
-            if saga_state not in {"failed_retryable", "failed_terminal"}:
+            if current_attempt_count != expected_attempt_count:
+                raise SagaReconcileRequiredError(
+                    f"outbox_attempt_count_changed:{current_attempt_count}"
+                )
+            if current_run_id != expected_run_id:
+                raise SagaReconcileRequiredError(f"saga_run_id_changed:{current_run_id}")
+            if saga_state != expected_saga_state:
                 raise SagaReconcileRequiredError(f"saga_state_changed:{saga_state}")
             cursor.execute(
                 f"""
@@ -475,9 +611,16 @@ class OperationSagaRepository:
                        claim_until = NULL, available_at = SYSUTCDATETIME(),
                        completed_at = NULL, last_error_code = 'controlled_requeue',
                        last_error_summary = ?, updated_at = SYSUTCDATETIME()
-                 WHERE operation_key = ? AND status = ?
+                 WHERE operation_key = ? AND status = ? AND attempt_count = ?
+                   AND ISNULL(last_error_code, '') = ?
                 """,
-                (reason[:2000], operation_key, expected_status),
+                (
+                    str(reason).strip()[:2000],
+                    operation_key,
+                    expected_status,
+                    expected_attempt_count,
+                    expected_error_code,
+                ),
             )
             if cursor.rowcount != 1:
                 raise SagaFencingError("outbox_requeue_compare_and_set_failed")
@@ -487,9 +630,9 @@ class OperationSagaRepository:
                    SET state = 'failed_retryable', jushuitan_status = 'failed_retryable',
                        error_code = 'controlled_requeue', error_summary = ?,
                        finished_at = NULL, updated_at = SYSUTCDATETIME()
-                 WHERE operation_key = ? AND state = ?
+                 WHERE operation_key = ? AND state = ? AND run_id = ?
                 """,
-                (reason[:2000], operation_key, saga_state),
+                (str(reason).strip()[:2000], operation_key, saga_state, expected_run_id),
             )
             if cursor.rowcount != 1:
                 raise SagaFencingError("saga_requeue_compare_and_set_failed")
@@ -498,6 +641,163 @@ class OperationSagaRepository:
             "operation_key": operation_key,
             "previous_status": current_status,
             "previous_error_code": current_error_code,
+            "previous_attempt_count": current_attempt_count,
+            "run_id": current_run_id,
             "status": "failed_retryable",
-            "reason": reason,
+            "reason": str(reason).strip(),
+        }
+
+    def terminalize_outbox(
+        self,
+        operation_key: str,
+        *,
+        expected_status: str,
+        expected_error_code: str,
+        expected_run_id: str,
+        expected_attempt_count: int,
+        expected_saga_state: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        """CAS a verified Jushuitan task absence to a terminal outcome.
+
+        This operation is intentionally narrower than ``finish_outbox`` and
+        ``requeue_outbox``.  It is for a previously observed, exact
+        ``task_not_found`` result only; it must never turn a changed row into a
+        terminal state based on a stale recovery report.
+        """
+        normalized_key = str(operation_key or "").strip().lower()
+        if len(normalized_key) != 64 or any(
+            char not in "0123456789abcdef" for char in normalized_key
+        ):
+            raise ValueError("operation_key must be a 64-character lowercase SHA-256 value")
+        if expected_status != "failed_retryable":
+            raise ValueError("Only failed_retryable Outbox rows may be terminalized")
+        if expected_error_code != "task_not_found":
+            raise ValueError("Only task_not_found rows may be terminalized")
+        if expected_saga_state not in {"failed_retryable", "jushuitan_pending"}:
+            raise ValueError("Unsupported Saga state for task_not_found terminalization")
+        if expected_attempt_count < 0:
+            raise ValueError("Expected Outbox attempt_count must be non-negative")
+        normalized_run_id = str(expected_run_id or "").strip()
+        normalized_reason = str(reason or "").strip()
+        if not normalized_run_id or not normalized_reason:
+            raise ValueError("Terminalization requires exact run_id and non-empty reason")
+
+        outbox = self._table("ali1688_operation_outbox")
+        saga = self._table("ali1688_operation_saga")
+        with self._connect(self.config) as connection:
+            cursor = connection.cursor()
+            try:
+                row = cursor.execute(
+                    f"""
+                    SELECT outbox_row.outbox_id, outbox_row.status,
+                           outbox_row.attempt_count, outbox_row.last_error_code,
+                           outbox_row.last_error_summary,
+                           saga_row.state, saga_row.run_id
+                      FROM {outbox} AS outbox_row WITH (UPDLOCK, HOLDLOCK)
+                      JOIN {saga} AS saga_row WITH (UPDLOCK, HOLDLOCK)
+                        ON saga_row.operation_key = outbox_row.operation_key
+                     WHERE outbox_row.operation_key = ?
+                    """,
+                    (normalized_key,),
+                ).fetchone()
+                if row is None:
+                    raise SagaReconcileRequiredError("outbox_operation_missing")
+
+                current_status = str(row[1] or "")
+                current_attempt_count = int(row[2] or 0)
+                current_error_code = str(row[3] or "")
+                current_error_summary = str(row[4] or "").strip()
+                current_saga_state = str(row[5] or "")
+                current_run_id = str(row[6] or "")
+                if current_status != expected_status:
+                    raise SagaReconcileRequiredError(
+                        f"outbox_status_changed:{current_status}"
+                    )
+                if current_error_code != expected_error_code:
+                    raise SagaReconcileRequiredError(
+                        f"outbox_error_changed:{current_error_code}"
+                    )
+                if current_attempt_count != expected_attempt_count:
+                    raise SagaReconcileRequiredError(
+                        f"outbox_attempt_count_changed:{current_attempt_count}"
+                    )
+                if current_run_id != normalized_run_id:
+                    raise SagaReconcileRequiredError(
+                        f"saga_run_id_changed:{current_run_id}"
+                    )
+                if current_saga_state != expected_saga_state:
+                    raise SagaReconcileRequiredError(
+                        f"saga_state_changed:{current_saga_state}"
+                    )
+
+                terminal_summary = normalized_reason[:2000]
+                if current_error_summary:
+                    suffix = f" | terminalized: {normalized_reason}"
+                    terminal_summary = (current_error_summary + suffix)[:2000]
+
+                cursor.execute(
+                    f"""
+                    UPDATE {outbox}
+                       SET status = 'failed_terminal',
+                           claim_owner = NULL, claim_token = NULL, claim_until = NULL,
+                           last_error_code = ?, last_error_summary = ?,
+                           completed_at = SYSUTCDATETIME(),
+                           updated_at = SYSUTCDATETIME()
+                     WHERE operation_key = ?
+                       AND status = ?
+                       AND attempt_count = ?
+                       AND ISNULL(last_error_code, '') = ?
+                    """,
+                    (
+                        expected_error_code,
+                        terminal_summary,
+                        normalized_key,
+                        expected_status,
+                        expected_attempt_count,
+                        expected_error_code,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise SagaFencingError("outbox_terminalize_compare_and_set_failed")
+
+                cursor.execute(
+                    f"""
+                    UPDATE {saga}
+                       SET state = 'failed_terminal',
+                           jushuitan_status = 'failed_terminal',
+                           error_code = ?, error_summary = ?,
+                           finished_at = SYSUTCDATETIME(),
+                           updated_at = SYSUTCDATETIME()
+                     WHERE operation_key = ?
+                       AND state = ?
+                       AND run_id = ?
+                    """,
+                    (
+                        expected_error_code,
+                        terminal_summary,
+                        normalized_key,
+                        expected_saga_state,
+                        normalized_run_id,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise SagaFencingError("saga_terminalize_compare_and_set_failed")
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+
+        return {
+            "operation_key": normalized_key,
+            "previous_status": current_status,
+            "previous_error_code": current_error_code,
+            "previous_error_summary": current_error_summary,
+            "previous_attempt_count": current_attempt_count,
+            "previous_saga_state": current_saga_state,
+            "run_id": current_run_id,
+            "status": "failed_terminal",
+            "error_code": expected_error_code,
+            "error_summary": terminal_summary,
+            "reason": normalized_reason,
         }

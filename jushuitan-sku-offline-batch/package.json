@@ -7,7 +7,7 @@
     "build": "tsc -p tsconfig.json",
     "start": "tsx src/index.ts",
     "check": "tsc -p tsconfig.json --noEmit",
-    "test": "tsx --test tests/**/*.test.ts",
+    "test": "node run-tests.mjs",
     "cleanup:1688": "tsx src/1688-link-cleanup-cli.ts",
     "sync:1688": "tsx src/1688-link-sync-cli.ts",
     "probe:product": "tsx src/probe-product-page.ts"

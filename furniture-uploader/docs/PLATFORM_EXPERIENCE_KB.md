@@ -1,11 +1,14 @@
 # Platform Experience Knowledge Base
 
-## 2026-08-04 Combination SKU Business Rule
+## 2026-08-05 Interrupted Manager and Jushuitan Recovery Findings
 
-- BI 字段 `可替换商品编码（新）` 中的固定值 `运营自行组合替换` 是运营指令，不是 1688 SKU，也不是脏数据。
-- 规范化匹配需先去除前后空格；命中后写 `skip_reason_code=combination_sku`、`exception_reason=组合货号`，并保留店铺、商品 ID、线上 SKU、平台店铺商品编码和源行号。
-- 该类行不得进入 1688 可执行 CSV、聚水潭 handoff、共享租约、审计运行或 Saga。混合批次只执行其余合法映射；全跳过批次返回 `business_skipped`。
-- 不要把其他中文占位值一并放宽；除精确值 `运营自行组合替换` 外，非 SKU 新货号仍按 `invalid_replacement_sku_format` 拒绝。
+- Manager 进程退出和计划任务变为 Ready 都不是日批收口证据。必须同时核对管理器锁、锁 PID、Manager run id、child run 范围、数据库终态和 child Summary。
+- Manager 生成的每次尝试日志不是 child 身份真源。只有正式 pipeline Summary/report 才参与 child scope；`higher_priority_browser_write` 预审拒绝在确认无 Summary、无数据库行后记录为 orphan，其他未知日志必须阻塞。
+- 释放孤儿 Manager 锁之前必须先持久化可审计 Summary，再重新读取完整锁快照。只校验文件仍存在或 token 字符串不足以防止新 owner 接管；任何快照漂移都应保留锁并失败关闭。
+- 恢复范围必须从原始 Preview CSV 与 child reports 做四字段身份匹配。未执行、技术失败、业务终态、1688 已完成和聚水潭已完成不能混为一个“失败列表”。
+- 聚水潭搜索零行只有在商品 ID、线上 SKU 输入值精确回读且页面明确显示零行时，才能证明目标链接已不存在。存在同店铺/商品/SKU 的 sibling 行但目标平台编码不存在，也可形成 `already_cleared` 证据；普通 `task_not_found` 仍失败关闭。
+- Outbox 重排必须是一条 operation 的 compare-and-swap，至少绑定旧 status、error code、attempt count、run id 和 Saga state。批量 UPDATE 或先读取后无条件写入会覆盖并发恢复结果。
+- 批次子进程返回非零时，Outbox Worker 仍应逐项保留报告中已验证成功的 operation；不能把同批次所有 claim 一律回退为失败。
 
 ## 2026-07-28 Bounded Slider and Identity Findings
 
@@ -270,3 +273,15 @@
 - A required 1688 specification must be checked for exact persisted text after refresh; non-empty alone is insufficient.
 - Direct Chinese input plus Tab is valid for color, but review must compare the committed value with the payload.
 - For CTG028601N1416V01, expected persisted values are color `胡桃色` and size `48/40/50`.
+
+## 2026-08-04 Live Finding: Hidden Validation Before SKU Offline Submit
+
+- The 1688 edit page can show an offline switch as selected while a hidden product-attribute validation still prevents the save request. Observed example: `毛重必须为数字` for attribute `p-1957`.
+- A visible switch state is not proof of persistence. When no submit request is emitted, collect assist and hidden validation text before classifying the result.
+- Preserve explicit platform text as `system_prompt`; fail and skip only the current product ID/SKU, then continue the store batch.
+- Do not retry the same unchanged product, stop the store, create a Jushuitan handoff, or report the SKU as successfully offline.
+- Keep dedicated business classifications, such as `sole_sku_requires_product_offline`, ahead of the generic system-prompt classification.
+# 2026-08-05 聚水潭已清除判定
+
+- 不能用整行文本 `includes` 判断店铺、商品、SKU 或平台编码，前缀值会产生误匹配。
+- 必须按表头解析四个结构化列并逐列规范化等值比较。目标不存在只能由精确 sibling 行或精确筛选回读后的显式零行证明，缺列时失败关闭。

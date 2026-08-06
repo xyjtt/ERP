@@ -1,10 +1,12 @@
 # Project Evolution
 
-## 2026-08-04 Combination SKU Classification Evolution
+## 2026-08-05 Interrupted Stop-Sale Recovery Becomes Evidence-Driven
 
-- `运营自行组合替换` 从“非法替换货号”调整为明确业务终态 `combination_sku`，中文异常原因为 `组合货号`。
-- 数据模型从 accepted/rejected 两类扩展为 executable/business-skipped/rejected 三类，避免把运营主动组合货号误报为数据质量异常。
-- 业务跳过必须在共享租约、审计运行、Saga、浏览器和聚水潭之前完成；正常非法值仍 fail closed。
+- 中断日批不再通过人工删除 Manager 锁恢复。恢复工具必须证明锁归属、owner PID 已死亡、child run 集合完整且全部终态，并采用“先 Summary、后二次锁校验、最后释放”的顺序。
+- Child 集合从“文件名中出现 run id”演进为“正式 Summary/report 与数据库审计交叉证明”。审计前被高优先级写操作拒绝的日志只能作为 orphan 证据，不能替代 child run。
+- 补跑范围不再从日志数量或人工猜测生成。原始 Preview CSV 是范围真源，Manager Summary 限定 child run，逐项报告决定 `missing/technical/excluded`；只有 `missing` 和 `technical` 可进入定向恢复清单。
+- 聚水潭恢复从“重跑失败批次”改为 Saga/Outbox 单 operation fenced 恢复。已验证成功和 `already_cleared` 结果保留，状态或 fencing 证据漂移时 CAS 拒绝修改。
+- 该演进只完成开发验收，不改变 `daily_20260804_130814_970163` 的生产状态，也不授权手删锁、批量重排、广泛重跑或绕过 Credential Manager。
 
 ## 2026-07-28 Login Recovery Evolution
 
@@ -148,3 +150,13 @@
 - The listing source lifecycle check moved from an executor artifact into a version-controlled read-only script.
 - SQL Server driver selection now follows the installed-driver preference used by the rest of the project.
 - Source eligibility remains a fail-closed browser prerequisite and is kept separate from draft, submission, and business acceptance.
+
+## 2026-08-04 Stop-Sale Hidden Validation Isolation
+
+- Explicit 1688 submit validation text is now a first-class `system_prompt` outcome instead of the ambiguous `submit_blocked_before_request` fallback.
+- A system prompt fails only the current product ID/SKU, preserves the original platform message, and allows the remaining store batch to continue.
+- Retry governance, daily-manager classification, Chinese reporting, and regression coverage were updated together; related tests pass `126/126`.
+# 2026-08-05 中断恢复从数量核对升级为身份集合门禁
+
+- 恢复授权不再依赖人工观察数量或 `run_id + limit`，改为文件 SHA-256、四字段身份集合 SHA-256 和 operation_key 精确集合。
+- 文件锁释放、恢复清单生成和 Outbox 领取均 fail closed，任何并发或证据漂移都保留现状并停止。

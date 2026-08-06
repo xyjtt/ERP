@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -119,12 +120,13 @@ def resolve_edge_driver_path(
     if cached_driver:
         return cached_driver
 
-    try:
-        return EdgeChromiumDriverManager().install()
-    except Exception:
-        if not version:
-            raise
+    if version:
+        # webdriver-manager resolves the newest Edge driver, which can be one
+        # major version ahead of the browser installed on long-running Windows
+        # executors. An attached CDP session requires a matching driver build.
         return download_edge_driver(version)
+
+    return EdgeChromiumDriverManager().install()
 
 
 def detect_edge_version(
@@ -144,6 +146,9 @@ def detect_edge_version_from_installation(browser_binary_path: str = "") -> str:
     install_roots: list[Path] = []
     binary_path = Path(str(browser_binary_path).strip())
     if binary_path.name:
+        executable_version = detect_windows_executable_version(binary_path)
+        if executable_version:
+            return executable_version
         direct_version = parse_version(binary_path.parent.name)
         if direct_version:
             return direct_version
@@ -165,12 +170,37 @@ def detect_edge_version_from_installation(browser_binary_path: str = "") -> str:
         if resolved_root in seen or not install_root.is_dir():
             continue
         seen.add(resolved_root)
+        executable_version = detect_windows_executable_version(install_root / "msedge.exe")
+        if executable_version:
+            return executable_version
         for candidate in install_root.iterdir():
             version = parse_version(candidate.name)
             if version and candidate.is_dir() and (candidate / "msedge.exe").is_file():
                 versions.append(version)
 
     return max(versions, key=version_key, default="")
+
+
+def detect_windows_executable_version(executable_path: Path) -> str:
+    if os.name != "nt" or not executable_path.is_file():
+        return ""
+    escaped_path = str(executable_path).replace("'", "''")
+    command = f"(Get-Item -LiteralPath '{escaped_path}').VersionInfo.ProductVersion"
+    try:
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-Command", command],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if result.returncode != 0:
+        return ""
+    return parse_version(str(result.stdout or "").strip().splitlines()[-1]) if result.stdout.strip() else ""
 
 
 def find_compatible_cached_edge_driver(

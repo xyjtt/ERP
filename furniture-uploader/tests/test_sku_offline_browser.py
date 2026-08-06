@@ -198,6 +198,30 @@ class SkuOfflineBrowserTests(unittest.TestCase):
         self.assertEqual(management_query["q"], [""])
         self.assertEqual(management_query["filterOfferId"], [""])
 
+    def test_stop_sale_config_uses_external_executor_profiles(self) -> None:
+        config = json.loads(
+            (PROJECT_ROOT / "config" / "systems" / "1688_sku_offline.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        bindings = config["execution"]["store_accounts"]
+
+        self.assertEqual(
+            {
+                binding["account_key"]: binding["browser_profile_dir"]
+                for binding in bindings
+            },
+            {
+                account_key: f"C:/ProgramData/YYDD/1688-crawler/profiles/{account_key}"
+                for account_key in (
+                    "muke_lixiang",
+                    "guangzhou_wolai",
+                    "gonglai",
+                    "lechang",
+                )
+            },
+        )
+
     def test_management_url_normalizes_to_unfiltered_all_tab(self) -> None:
         normalized = SkuOfflineBrowser._normalize_management_all_tab_url(
             "https://work.1688.com/?_path_=sellerPro/offer&tab=onsale&q=123&filterOfferId=123"
@@ -1501,6 +1525,45 @@ class SkuOfflineBrowserTests(unittest.TestCase):
                 "配送服务为必填项"
             )
         )
+
+    def test_submit_validation_records_platform_message_as_system_prompt(self) -> None:
+        browser = SkuOfflineBrowser({}, PROJECT_ROOT)
+        browser.driver = FakeSuccessDriver()
+        submit_element = FakeClickableElement()
+        browser._resolve_selector = lambda selector, context: selector  # type: ignore[method-assign]
+        browser._selector_is_configured = lambda selector: True  # type: ignore[method-assign]
+        browser._check_publish_error_state = lambda *args, **kwargs: None  # type: ignore[method-assign]
+        browser._prepare_pre_submit_backfill = lambda config, context: None  # type: ignore[method-assign]
+        browser._raise_if_inline_validation_present = lambda context, stage_name: None  # type: ignore[method-assign]
+        browser._ensure_target_sku_still_offline = lambda selectors, context: None  # type: ignore[method-assign]
+        browser._install_offline_submit_trace = lambda: None  # type: ignore[method-assign]
+        browser._wait_for_element = lambda selector, clickable=False: submit_element  # type: ignore[method-assign]
+        browser._click_submit_element = lambda element, context: None  # type: ignore[method-assign]
+        browser._dispatch_submit_button_click = lambda selector, context: None  # type: ignore[method-assign]
+        browser._click_optional_confirm_button = lambda selector: None  # type: ignore[method-assign]
+        browser._pause = lambda seconds: None  # type: ignore[method-assign]
+        browser._wait_for_success = lambda config, context: False  # type: ignore[method-assign]
+        browser._assert_offline_submit_trace = lambda context: False  # type: ignore[method-assign]
+        browser._retry_submit_via_trace = lambda context: {"ok": False, "reason": "missing_submit_trace"}  # type: ignore[method-assign]
+        browser._probe_persisted_offline_after_trace_miss = lambda selectors, context: False  # type: ignore[method-assign]
+        browser._collect_submit_block_diagnostics = lambda selector: {  # type: ignore[method-assign]
+            "assist_messages": [],
+            "validation_nodes": [{"text": "毛重必须为数字"}],
+        }
+        context: dict[str, object] = {}
+
+        with self.assertRaises(PublishSubmitError):
+            browser._submit_changes(
+                {"submit_button": {"by": "id", "value": "submitFormButton"}},
+                {"enabled": True},
+                {},
+                {},
+                context,
+            )
+
+        self.assertEqual(context["page_error_category"], "system_prompt")
+        self.assertEqual(context["page_error_text"], "毛重必须为数字")
+        self.assertEqual(context["system_prompt"], "毛重必须为数字")
 
     def test_trace_miss_probe_resets_document_and_reactivates_sales_section(self) -> None:
         browser = SkuOfflineBrowser({}, PROJECT_ROOT)

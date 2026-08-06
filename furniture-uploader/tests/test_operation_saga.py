@@ -114,6 +114,7 @@ class _FakeConnection:
     def __init__(self, cursor: _FakeCursor) -> None:
         self._cursor = cursor
         self.commits = 0
+        self.rollbacks = 0
 
     def __enter__(self):
         return self
@@ -126,6 +127,9 @@ class _FakeConnection:
 
     def commit(self):
         self.commits += 1
+
+    def rollback(self):
+        self.rollbacks += 1
 
 
 class _FakeConfig:
@@ -180,6 +184,9 @@ class OperationSagaOutboxRequeueTests(unittest.TestCase):
             "a" * 64,
             expected_status="failed_terminal",
             expected_error_code="task_not_found",
+            expected_run_id="run-1",
+            expected_attempt_count=3,
+            expected_saga_state="failed_terminal",
             reason="verified target absence classifier deployed",
         )
         self.assertEqual(result["status"], "failed_retryable")
@@ -187,3 +194,213 @@ class OperationSagaOutboxRequeueTests(unittest.TestCase):
         updates = [sql for sql, _ in cursor.executed if "UPDATE" in sql]
         self.assertEqual(len(updates), 2)
         self.assertTrue(all("WHERE operation_key = ?" in sql for sql in updates))
+        self.assertIn("attempt_count = ?", updates[0])
+        self.assertIn("run_id = ?", updates[1])
+
+
+class _TerminalizeCursor:
+    def __init__(self, *, row=None, update_rowcounts=(1, 1)) -> None:
+        self._row = row or (
+            7,
+            "failed_retryable",
+            3,
+            "task_not_found",
+            "No exact row matched store/product/SKU/platform code",
+            "jushuitan_pending",
+            "run-1",
+        )
+        self._update_rowcounts = list(update_rowcounts)
+        self.executed: list[tuple] = []
+        self._update_index = 0
+        self.rowcount = -1
+
+    def execute(self, sql, params=None):
+        self.executed.append((sql, params))
+        if "UPDATE" in sql:
+            self.rowcount = self._update_rowcounts[self._update_index]
+            self._update_index += 1
+        return self
+
+    def fetchone(self):
+        return self._row
+
+
+class OperationSagaTaskNotFoundTerminalizeTests(unittest.TestCase):
+    def _repository(self, cursor: _TerminalizeCursor):
+        return OperationSagaRepository(
+            _FakeConfig(),
+            connect=lambda _config: _FakeConnection(cursor),
+        )
+
+    def test_terminalize_preserves_task_not_found_and_updates_both_rows(self) -> None:
+        cursor = _TerminalizeCursor()
+        connection = _FakeConnection(cursor)
+        repository = OperationSagaRepository(
+            _FakeConfig(), connect=lambda _config: connection
+        )
+
+        result = repository.terminalize_outbox(
+            "a" * 64,
+            expected_status="failed_retryable",
+            expected_error_code="task_not_found",
+            expected_run_id="run-1",
+            expected_attempt_count=3,
+            expected_saga_state="jushuitan_pending",
+            reason="历史精确查询确认无匹配任务",
+        )
+
+        self.assertEqual(result["status"], "failed_terminal")
+        self.assertEqual(result["error_code"], "task_not_found")
+        self.assertIn("No exact row matched", result["error_summary"])
+        self.assertIn("terminalized:", result["error_summary"])
+        self.assertEqual(connection.commits, 1)
+        self.assertEqual(connection.rollbacks, 0)
+        updates = [sql for sql, _ in cursor.executed if "UPDATE" in sql]
+        self.assertEqual(len(updates), 2)
+        self.assertIn("status = 'failed_terminal'", updates[0])
+        self.assertIn("claim_owner = NULL", updates[0])
+        self.assertIn("completed_at = SYSUTCDATETIME()", updates[0])
+        self.assertIn("attempt_count = ?", updates[0])
+        self.assertIn("ISNULL(last_error_code, '') = ?", updates[0])
+        self.assertIn("jushuitan_status = 'failed_terminal'", updates[1])
+        self.assertIn("finished_at = SYSUTCDATETIME()", updates[1])
+        self.assertIn("state = ?", updates[1])
+        self.assertIn("run_id = ?", updates[1])
+
+    def test_terminalize_rejects_state_drift_and_rolls_back(self) -> None:
+        cursor = _TerminalizeCursor(
+            row=(
+                7,
+                "failed_retryable",
+                4,
+                "task_not_found",
+                "No exact row matched store/product/SKU/platform code",
+                "failed_terminal",
+                "run-1",
+            )
+        )
+        connection = _FakeConnection(cursor)
+        repository = OperationSagaRepository(
+            _FakeConfig(), connect=lambda _config: connection
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "attempt_count_changed:4"):
+            repository.terminalize_outbox(
+                "a" * 64,
+                expected_status="failed_retryable",
+                expected_error_code="task_not_found",
+                expected_run_id="run-1",
+                expected_attempt_count=3,
+                expected_saga_state="jushuitan_pending",
+                reason="approved historical terminalization",
+            )
+
+        self.assertEqual(connection.commits, 0)
+        self.assertEqual(connection.rollbacks, 1)
+
+    def test_terminalize_rejects_already_terminal_input(self) -> None:
+        cursor = _TerminalizeCursor()
+        repository = self._repository(cursor)
+
+        with self.assertRaisesRegex(ValueError, "Only failed_retryable"):
+            repository.terminalize_outbox(
+                "a" * 64,
+                expected_status="failed_terminal",
+                expected_error_code="task_not_found",
+                expected_run_id="run-1",
+                expected_attempt_count=3,
+                expected_saga_state="jushuitan_pending",
+                reason="approved historical terminalization",
+            )
+        self.assertFalse(any("UPDATE" in sql for sql, _ in cursor.executed))
+
+    def test_terminalize_rolls_back_when_saga_cas_is_not_exactly_one(self) -> None:
+        cursor = _TerminalizeCursor(update_rowcounts=(1, 0))
+        connection = _FakeConnection(cursor)
+        repository = OperationSagaRepository(
+            _FakeConfig(), connect=lambda _config: connection
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "saga_terminalize"):
+            repository.terminalize_outbox(
+                "a" * 64,
+                expected_status="failed_retryable",
+                expected_error_code="task_not_found",
+                expected_run_id="run-1",
+                expected_attempt_count=3,
+                expected_saga_state="jushuitan_pending",
+                reason="approved historical terminalization",
+            )
+
+        self.assertEqual(connection.commits, 0)
+        self.assertEqual(connection.rollbacks, 1)
+
+
+
+class _ExactClaimCursor:
+    def __init__(self, keys: list[str], *, invalid_key: str = "") -> None:
+        self.keys = keys
+        self.invalid_key = invalid_key
+        self.stage = ""
+        self.executed: list[tuple] = []
+
+    def execute(self, sql, params=None):
+        self.executed.append((sql, params))
+        if "SELECT approved.operation_key" in sql:
+            self.stage = "validate"
+        elif "UPDATE outbox_row" in sql:
+            self.stage = "claim"
+        return self
+
+    def executemany(self, sql, params):
+        self.executed.append((sql, list(params)))
+        return self
+
+    def fetchall(self):
+        if self.stage == "validate":
+            return [
+                (key, 1, "failed_retryable", "jushuitan.cleanup_1688_link", "run-1", 0 if key == self.invalid_key else 1)
+                for key in self.keys
+            ]
+        if self.stage == "claim":
+            return [
+                (index + 1, key, "jushuitan.cleanup_1688_link", "{}", 2, "c" * 32)
+                for index, key in enumerate(self.keys)
+            ]
+        return []
+
+
+class OperationSagaExactClaimTests(unittest.TestCase):
+    def test_exact_claim_commits_only_the_approved_set(self) -> None:
+        keys = ["a" * 64, "b" * 64]
+        cursor = _ExactClaimCursor(keys)
+        connection = _FakeConnection(cursor)  # type: ignore[arg-type]
+        repository = OperationSagaRepository(_FakeConfig(), connect=lambda _config: connection)
+
+        items = repository.claim_outbox_exact(
+            claim_owner="worker-1",
+            run_id="run-1",
+            topic="jushuitan.cleanup_1688_link",
+            operation_keys=keys,
+        )
+
+        self.assertEqual({item.operation_key for item in items}, set(keys))
+        self.assertEqual(connection.commits, 1)
+        self.assertEqual(connection.rollbacks, 0)
+
+    def test_exact_claim_rolls_back_when_any_approved_key_is_not_claimable(self) -> None:
+        keys = ["a" * 64, "b" * 64]
+        cursor = _ExactClaimCursor(keys, invalid_key=keys[1])
+        connection = _FakeConnection(cursor)  # type: ignore[arg-type]
+        repository = OperationSagaRepository(_FakeConfig(), connect=lambda _config: connection)
+
+        with self.assertRaisesRegex(RuntimeError, "not_claimable"):
+            repository.claim_outbox_exact(
+                claim_owner="worker-1",
+                run_id="run-1",
+                topic="jushuitan.cleanup_1688_link",
+                operation_keys=keys,
+            )
+
+        self.assertEqual(connection.commits, 0)
+        self.assertEqual(connection.rollbacks, 1)

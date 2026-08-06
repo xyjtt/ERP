@@ -111,23 +111,25 @@ class Run1688StopSalePipelineTests(unittest.TestCase):
 
     def test_commands_share_deterministic_run_id(self) -> None:
         args = self.build_args()
-        handoff = Path("D:/audit/handoff.jsonl")
-        command_1688 = build_1688_command(args, handoff)
-        command_jst = build_jushuitan_command(
-            args,
-            handoff,
-            Path("D:/jst"),
-            Path("D:/audit/jst-results"),
-        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            handoff = Path(temp_dir) / "handoff.jsonl"
+            handoff.write_text(json.dumps({"operation_key": "a" * 64}), encoding="utf-8")
+            command_1688 = build_1688_command(args, handoff)
+            command_jst = build_jushuitan_command(
+                args,
+                handoff,
+                Path("D:/jst"),
+                Path("D:/audit/jst-results"),
+            )
 
-        self.assertEqual(command_1688[command_1688.index("--run-id") + 1], args.run_id)
-        self.assertEqual(command_jst[command_jst.index("--run-id") + 1], args.run_id)
-        self.assertIn("--yes", command_1688)
-        self.assertIn("--yes", command_jst)
-        self.assertEqual(
-            command_1688[command_1688.index("--shared-runtime-root") + 1],
-            str(Path(args.shared_runtime_root).resolve()),
-        )
+            self.assertEqual(command_1688[command_1688.index("--run-id") + 1], args.run_id)
+            self.assertEqual(command_jst[command_jst.index("--run-id") + 1], args.run_id)
+            self.assertIn("--yes", command_1688)
+            self.assertIn("--yes", command_jst)
+            self.assertEqual(
+                command_1688[command_1688.index("--shared-runtime-root") + 1],
+                str(Path(args.shared_runtime_root).resolve()),
+            )
 
     def test_jushuitan_cleanup_environment_supplies_shared_config_requirements(self) -> None:
         handoff = Path("D:/audit/handoff.jsonl")
@@ -520,7 +522,7 @@ class Run1688StopSalePipelineTests(unittest.TestCase):
             with patch(
                 "run_1688_stop_sale_pipeline.run_stage_command",
                 return_value=SimpleNamespace(returncode=0),
-            ):
+            ) as run_stage:
                 return_code = run_pipeline(
                     args,
                     run_id=args.run_id,
@@ -533,6 +535,9 @@ class Run1688StopSalePipelineTests(unittest.TestCase):
             )
 
         self.assertEqual(return_code, 0)
+        self.assertEqual(run_stage.call_count, 1)
+        self.assertEqual(run_stage.call_args.kwargs["stage"], "1688")
+        self.assertIsNone(summary["jushuitan_return_code"])
         self.assertIsNone(summary["audit_database"])
         self.assertIsNone(summary["audit_status"])
 
