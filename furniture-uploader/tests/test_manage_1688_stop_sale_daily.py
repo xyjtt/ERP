@@ -52,6 +52,27 @@ class Manage1688StopSaleDailyTests(unittest.TestCase):
         self.assertIn('"-SourceTable",', source)
         self.assertIn('"-SourceDriver",', source)
 
+    def test_scheduled_task_uses_s4u_with_interactive_runex_fallback(self) -> None:
+        source = (SCRIPTS_ROOT / "manage_1688_stop_sale_daily_task.ps1").read_text(
+            encoding="utf-8-sig"
+        )
+
+        self.assertIn(
+            '[string]$LauncherTaskName = "YYDD-1688-Stop-Sale-Daily-Launcher"',
+            source,
+        )
+        self.assertIn('"start", "launch", "stop"', source)
+        self.assertIn('-LogonType S4U', source)
+        self.assertIn('if ($logonType -eq "S4U")', source)
+        self.assertIn('Start-ScheduledTask -TaskName $TaskName', source)
+        self.assertIn('launch_mode = "s4u"', source)
+        self.assertIn('launch_mode = "interactive_runex"', source)
+        self.assertIn('New-Object -ComObject "Schedule.Service"', source)
+        self.assertIn('$registeredTask.RunEx($null, 4, $session, $null)', source)
+        self.assertIn('-UserId "SYSTEM" -LogonType ServiceAccount', source)
+        self.assertIn('On-demand fallback for the guarded Administrator S4U stop-sale task', source)
+        self.assertNotIn('New-ScheduledTaskPrincipal `\n            -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) `\n            -LogonType Interactive', source)
+
     @staticmethod
     def write_store_csv(path: Path, rows: list[tuple[str, str, str]]) -> None:
         content = "store_name,product_id,online_sku\n" + "".join(
