@@ -30,10 +30,13 @@ ACTIVE_CRAWLER_STATUSES = (
     "persisted",
     "validating",
 )
-SNAPSHOT_VERSION = 3
+SNAPSHOT_VERSION = 4
 STOP_SALE_TASK_TYPE = "stop_sale"
 RECOVERABLE_RESOURCE_TYPES = frozenset(("account", "browser_slot"))
 MAX_BROWSER_SLOT_NUMBER = 3
+RECOVERY_MODE_REQUEST_AND_RESOURCES = "request_and_resources"
+RECOVERY_MODE_REQUEST_ONLY = "request_only"
+RECOVERY_MODE_INVALID_RESOURCE_SET = "invalid_resource_set"
 RECOVERY_PROCEDURES = (
     "usp_ali1688_runtime_lease_recover_expired",
     "usp_ali1688_runtime_request_recover_expired",
@@ -165,6 +168,19 @@ def _resource_key_matches_scope(
     return slot_number.isdigit() and 1 <= int(slot_number) <= MAX_BROWSER_SLOT_NUMBER
 
 
+def _recovery_mode(resources: list[Mapping[str, Any]]) -> str:
+    if not resources:
+        return RECOVERY_MODE_REQUEST_ONLY
+    resource_types = [str(row.get("resource_type") or "").strip() for row in resources]
+    if (
+        len(resource_types) == 2
+        and resource_types.count("account") == 1
+        and resource_types.count("browser_slot") == 1
+    ):
+        return RECOVERY_MODE_REQUEST_AND_RESOURCES
+    return RECOVERY_MODE_INVALID_RESOURCE_SET
+
+
 def _snapshot_fingerprint(snapshot: Mapping[str, Any]) -> str:
     request = dict(snapshot.get("request") or {})
     resources = [
@@ -183,6 +199,7 @@ def _snapshot_fingerprint(snapshot: Mapping[str, Any]) -> str:
         "run_id": snapshot.get("run_id"),
         "request_key": snapshot.get("request_key"),
         "task_type": snapshot.get("task_type"),
+        "recovery_mode": snapshot.get("recovery_mode"),
         "request": {
             key: request.get(key)
             for key in REQUIRED_REQUEST_FIELDS
@@ -225,6 +242,8 @@ def _eligibility(
     reasons: list[str] = []
     request = dict(snapshot.get("request") or {})
     resources = [dict(row) for row in snapshot.get("resources", [])]
+    declared_recovery_mode = str(snapshot.get("recovery_mode") or "").strip()
+    derived_recovery_mode = _recovery_mode(resources)
     server_now = _parse_datetime(snapshot.get("server_now"))
     if server_now is None:
         reasons.append("server_now_missing")
@@ -242,6 +261,8 @@ def _eligibility(
         reasons.append("request_not_active")
     if request and request.get("completed_at") is not None:
         reasons.append("request_already_completed")
+    if request and not str(request.get("owner_token") or "").strip():
+        reasons.append("request_owner_token_missing")
     if request and not _same_text(request.get("hostname"), expected_hostname):
         reasons.append("request_hostname_mismatch")
     if request:
@@ -254,18 +275,16 @@ def _eligibility(
         elif process_checker(pid):
             reasons.append("request_owner_pid_is_alive")
 
-    if not resources:
-        reasons.append("target_resources_missing")
     resource_types = {str(row.get("resource_type") or "") for row in resources}
-    if "account" not in resource_types:
-        reasons.append("account_lease_missing")
-    if "browser_slot" not in resource_types:
-        reasons.append("browser_slot_lease_missing")
+    if declared_recovery_mode != derived_recovery_mode:
+        reasons.append("recovery_mode_mismatch")
+    if derived_recovery_mode == RECOVERY_MODE_INVALID_RESOURCE_SET:
+        reasons.append("target_resource_set_incomplete")
     if resource_types - RECOVERABLE_RESOURCE_TYPES:
         reasons.append("unknown_resource_type")
-    if sum(row.get("resource_type") == "account" for row in resources) != 1:
+    if resources and sum(row.get("resource_type") == "account" for row in resources) != 1:
         reasons.append("account_lease_count_invalid")
-    if sum(row.get("resource_type") == "browser_slot" for row in resources) != 1:
+    if resources and sum(row.get("resource_type") == "browser_slot" for row in resources) != 1:
         reasons.append("browser_slot_lease_count_invalid")
     request_owner = str(request.get("owner_token") or "")
     request_run = str(request.get("run_id") or "")
@@ -358,9 +377,18 @@ class RuntimeRecoveryRepository:
                        fencing_token, task_type, run_id, hostname, pid, profile_ref,
                        heartbeat_at, expires_at, updated_at
                 FROM app.ali1688_runtime_lease
-                WHERE account_key = ? OR run_id = ?
+                WHERE owner_token IS NOT NULL
+                  AND
+                  (
+                      account_key = ? OR run_id = ? OR owner_token =
+                      (
+                          SELECT owner_token
+                          FROM app.ali1688_runtime_request
+                          WHERE request_key = ?
+                      )
+                  )
                 """,
-                (account_key, run_id),
+                (account_key, run_id, request_key),
             )
             account_leases = _fetch_rows(
                 cursor,
@@ -437,6 +465,7 @@ class RuntimeRecoveryRepository:
             "run_id": run_id,
             "request_key": request_key,
             "task_type": STOP_SALE_TASK_TYPE,
+            "recovery_mode": _recovery_mode(target_resources),
             "request": request,
             "resources": target_resources,
             "foreign_account_requests": foreign_requests,
@@ -465,18 +494,125 @@ class RuntimeRecoveryRepository:
         self,
         *,
         resources: list[Mapping[str, Any]],
+        account_key: str,
+        run_id: str,
         request_key: str,
         expected_owner_token: str,
+        expected_owner_pid: int,
         new_owner_token: str,
         hostname: str,
         pid: int,
         actor: str,
     ) -> list[dict[str, Any]]:
-        """Recover all resources and the request in one caller transaction."""
+        """Recover optional resources and the request in one caller transaction."""
+        mode = _recovery_mode(resources)
+        if mode == RECOVERY_MODE_INVALID_RESOURCE_SET:
+            raise RecoveryGateError("runtime recovery resource set is incomplete")
         with self._connect(self.config) as connection:
             cursor = connection.cursor()
             actions: list[dict[str, Any]] = []
             try:
+                cursor.execute(
+                    """
+                    SELECT COUNT_BIG(*)
+                    FROM app.ali1688_runtime_request WITH (UPDLOCK, HOLDLOCK)
+                    WHERE request_key = ? AND account_key = ? AND task_type = N'stop_sale'
+                      AND run_id = ? AND owner_token = ? AND hostname = ? AND pid = ?
+                      AND status IN (N'waiting', N'acquiring', N'running')
+                      AND completed_at IS NULL AND expires_at <= SYSUTCDATETIME()
+                    """,
+                    (
+                        request_key,
+                        account_key,
+                        run_id,
+                        expected_owner_token,
+                        hostname,
+                        int(expected_owner_pid),
+                    ),
+                )
+                request_identity_row = cursor.fetchone()
+                if request_identity_row is None:
+                    raise RecoveryGateError("request identity recovery gate returned no row")
+                request_identity_count = int(request_identity_row[0] or 0)
+                actions.append(
+                    {
+                        "action": "verify_request_identity",
+                        "request_key": request_key,
+                        "status": "passed" if request_identity_count == 1 else "blocked",
+                        "matching_row_count": request_identity_count,
+                    }
+                )
+                if request_identity_count != 1:
+                    raise RecoveryGateError(
+                        f"request identity recovery gate failed: count={request_identity_count}"
+                    )
+
+                cursor.execute(
+                    """
+                    SELECT
+                        (
+                            SELECT COUNT_BIG(*)
+                            FROM app.ali1688_runtime_request WITH (UPDLOCK, HOLDLOCK)
+                            WHERE account_key = ? AND request_key <> ?
+                              AND status IN (N'waiting', N'acquiring', N'running')
+                              AND completed_at IS NULL
+                        ) AS foreign_request_count,
+                        (
+                            SELECT COUNT_BIG(*)
+                            FROM app.crawler_task WITH (UPDLOCK, HOLDLOCK)
+                            WHERE account_key = ? AND status IN (?, ?, ?, ?, ?)
+                        ) AS active_crawler_task_count,
+                        (
+                            SELECT COUNT_BIG(*)
+                            FROM app.crawler_task_attempt AS attempt WITH (UPDLOCK, HOLDLOCK)
+                            INNER JOIN app.crawler_task AS task WITH (HOLDLOCK)
+                                ON task.id = attempt.task_db_id
+                            WHERE task.account_key = ?
+                              AND attempt.status IN (?, ?, ?, ?, ?)
+                        ) AS active_crawler_attempt_count,
+                        (
+                            SELECT COUNT_BIG(*)
+                            FROM app.ali1688_stop_sale_run WITH (UPDLOCK, HOLDLOCK)
+                            WHERE run_id = ? AND status = N'running' AND finished_at IS NULL
+                        ) AS active_stop_sale_run_count
+                    """,
+                    (
+                        account_key,
+                        request_key,
+                        account_key,
+                        *ACTIVE_CRAWLER_STATUSES,
+                        account_key,
+                        *ACTIVE_CRAWLER_STATUSES,
+                        run_id,
+                    ),
+                )
+                active_work_row = cursor.fetchone()
+                if active_work_row is None:
+                    raise RecoveryGateError("active work recovery gate returned no row")
+                active_work_counts = {
+                    "foreign_request_count": int(active_work_row[0] or 0),
+                    "active_crawler_task_count": int(active_work_row[1] or 0),
+                    "active_crawler_attempt_count": int(active_work_row[2] or 0),
+                    "active_stop_sale_run_count": int(active_work_row[3] or 0),
+                }
+                active_work_total = sum(active_work_counts.values())
+                actions.append(
+                    {
+                        "action": "verify_active_work_absent",
+                        **active_work_counts,
+                        "status": "passed" if active_work_total == 0 else "blocked",
+                    }
+                )
+                if active_work_total != 0:
+                    raise RecoveryGateError(
+                        "active work recovery gate failed: "
+                        + ",".join(
+                            f"{name}={value}"
+                            for name, value in active_work_counts.items()
+                            if value
+                        )
+                    )
+
                 for row in resources:
                     cursor.execute(
                         "EXEC app.usp_ali1688_runtime_lease_recover_expired ?, ?, ?, ?, ?, ?, ?;",
@@ -509,6 +645,36 @@ class RuntimeRecoveryRepository:
                         )
 
                 cursor.execute(
+                    """
+                    SELECT COUNT_BIG(*)
+                    FROM app.ali1688_runtime_lease WITH (UPDLOCK, HOLDLOCK)
+                    WHERE owner_token IS NOT NULL
+                      AND
+                      (
+                          account_key = ? OR run_id = ? OR owner_token = ?
+                          OR (resource_type = N'account' AND resource_key = ?)
+                      )
+                    """,
+                    (account_key, run_id, expected_owner_token, account_key),
+                )
+                related_lease_count_row = cursor.fetchone()
+                if related_lease_count_row is None:
+                    raise RecoveryGateError("related lease recovery gate returned no row")
+                related_lease_count = int(related_lease_count_row[0] or 0)
+                actions.append(
+                    {
+                        "action": "verify_related_leases_absent",
+                        "recovery_mode": mode,
+                        "related_lease_count": related_lease_count,
+                        "status": "passed" if related_lease_count == 0 else "blocked",
+                    }
+                )
+                if related_lease_count != 0:
+                    raise RecoveryGateError(
+                        f"related lease recovery gate failed: count={related_lease_count}"
+                    )
+
+                cursor.execute(
                     "EXEC app.usp_ali1688_runtime_request_recover_expired ?, ?, ?, ?, ?, ?, ?, ?;",
                     (
                         request_key,
@@ -517,7 +683,7 @@ class RuntimeRecoveryRepository:
                         hostname,
                         int(pid),
                         actor,
-                        "stop_sale_recovery_pid_dead_no_active_work",
+                        f"stop_sale_{mode}_recovery_pid_dead_no_active_work",
                         120,
                     ),
                 )
@@ -551,6 +717,59 @@ class RuntimeRecoveryRepository:
                     raise RecoveryGateError(
                         f"recovered request completion failed: {completion_status}"
                     )
+
+                cursor.execute(
+                    """
+                    SELECT
+                        (
+                            SELECT COUNT_BIG(*)
+                            FROM app.ali1688_runtime_request WITH (UPDLOCK, HOLDLOCK)
+                            WHERE request_key = ? AND account_key = ? AND task_type = N'stop_sale'
+                              AND run_id = ? AND owner_token = ? AND status = N'cancelled'
+                              AND completed_at IS NOT NULL
+                        ) AS terminal_request_count,
+                        (
+                            SELECT COUNT_BIG(*)
+                            FROM app.ali1688_runtime_lease WITH (UPDLOCK, HOLDLOCK)
+                            WHERE owner_token IS NOT NULL
+                              AND
+                              (
+                                  account_key = ? OR run_id = ? OR owner_token = ?
+                                  OR (resource_type = N'account' AND resource_key = ?)
+                              )
+                        ) AS related_lease_count
+                    """,
+                    (
+                        request_key,
+                        account_key,
+                        run_id,
+                        new_owner_token,
+                        account_key,
+                        run_id,
+                        expected_owner_token,
+                        account_key,
+                    ),
+                )
+                post_state_row = cursor.fetchone()
+                if post_state_row is None:
+                    raise RecoveryGateError("transactional post-state gate returned no row")
+                terminal_request_count = int(post_state_row[0] or 0)
+                post_related_lease_count = int(post_state_row[1] or 0)
+                post_state_ok = terminal_request_count == 1 and post_related_lease_count == 0
+                actions.append(
+                    {
+                        "action": "verify_transactional_post_state",
+                        "terminal_request_count": terminal_request_count,
+                        "related_lease_count": post_related_lease_count,
+                        "status": "passed" if post_state_ok else "blocked",
+                    }
+                )
+                if not post_state_ok:
+                    raise RecoveryGateError(
+                        "transactional post-state gate failed: "
+                        f"terminal_request_count={terminal_request_count},"
+                        f"related_lease_count={post_related_lease_count}"
+                    )
                 connection.commit()
             except BaseException:
                 try:
@@ -560,18 +779,46 @@ class RuntimeRecoveryRepository:
                 raise
         return actions
 
-    def query_post_state(self, *, account_key: str, run_id: str, request_key: str) -> dict[str, Any]:
+    def query_post_state(
+        self,
+        *,
+        account_key: str,
+        run_id: str,
+        request_key: str,
+        previous_owner_token: str,
+    ) -> dict[str, Any]:
         with self._connect(self.config) as connection:
             cursor = connection.cursor()
             request = _fetch_rows(
                 cursor,
-                "SELECT request_key, status, owner_token, run_id, completed_at FROM app.ali1688_runtime_request WHERE request_key = ?",
+                """
+                SELECT request_key, account_key, task_type, status, owner_token,
+                       run_id, completed_at
+                FROM app.ali1688_runtime_request
+                WHERE request_key = ?
+                """,
                 (request_key,),
             )
             leases = _fetch_rows(
                 cursor,
-                "SELECT resource_type, resource_key, owner_token, run_id FROM app.ali1688_runtime_lease WHERE run_id = ? OR (resource_type = 'account' AND resource_key = ? AND owner_token IS NOT NULL)",
-                (run_id, account_key),
+                """
+                SELECT resource_type, resource_key, account_key, owner_token, run_id
+                FROM app.ali1688_runtime_lease
+                WHERE owner_token IS NOT NULL
+                  AND
+                  (
+                      account_key = ? OR run_id = ?
+                      OR (resource_type = N'account' AND resource_key = ?)
+                      OR owner_token =
+                      (
+                          SELECT owner_token
+                          FROM app.ali1688_runtime_request
+                          WHERE request_key = ?
+                      )
+                      OR owner_token = ?
+                  )
+                """,
+                (account_key, run_id, account_key, request_key, previous_owner_token),
             )
         return {"request": request, "leases": leases}
 
@@ -586,6 +833,12 @@ def validate_snapshot(snapshot: Mapping[str, Any]) -> None:
             raise RecoveryGateError(f"snapshot {field} is missing")
     if snapshot.get("task_type") != STOP_SALE_TASK_TYPE:
         raise RecoveryGateError("snapshot task_type is not stop_sale")
+    resources = list(snapshot.get("resources") or [])
+    recovery_mode = str(snapshot.get("recovery_mode") or "").strip()
+    if recovery_mode != _recovery_mode(resources):
+        raise RecoveryGateError("snapshot recovery_mode does not match resources")
+    if recovery_mode == RECOVERY_MODE_INVALID_RESOURCE_SET:
+        raise RecoveryGateError("snapshot resource set is incomplete")
     if not snapshot.get("eligibility", {}).get("eligible"):
         raise RecoveryGateError("snapshot was not eligible for recovery")
     request = dict(snapshot.get("request") or {})
@@ -602,9 +855,6 @@ def validate_snapshot(snapshot: Mapping[str, Any]) -> None:
         raise RecoveryGateError("snapshot request task_type is not stop_sale")
     if request.get("owner_token") in (None, ""):
         raise RecoveryGateError("snapshot request owner_token is missing")
-    resources = list(snapshot.get("resources") or [])
-    if not resources:
-        raise RecoveryGateError("snapshot resources are empty")
     for index, row in enumerate(resources):
         missing = [field for field in REQUIRED_RESOURCE_FIELDS if field not in row]
         if missing:
@@ -681,8 +931,11 @@ def apply_snapshot(
         raise RecoveryGateError("repository lacks atomic runtime recovery contract")
     actions = repository.recover_expired_runtime(
         resources=resources,
+        account_key=str(snapshot["account_key"]),
+        run_id=str(snapshot["run_id"]),
         request_key=str(snapshot["request_key"]),
         expected_owner_token=old_owner,
+        expected_owner_pid=int(snapshot["request"]["pid"]),
         new_owner_token=new_owner,
         hostname=hostname,
         pid=os.getpid(),
@@ -692,6 +945,7 @@ def apply_snapshot(
         account_key=str(snapshot["account_key"]),
         run_id=str(snapshot["run_id"]),
         request_key=str(snapshot["request_key"]),
+        previous_owner_token=old_owner,
     )
     request_rows = list(post_state.get("request") or [])
     if len(request_rows) != 1:
@@ -701,23 +955,25 @@ def apply_snapshot(
         raise RecoveryGateError("post recovery request_key mismatch")
     if request_row.get("run_id") != snapshot["run_id"]:
         raise RecoveryGateError("post recovery run_id mismatch")
+    if request_row.get("account_key") != snapshot["account_key"]:
+        raise RecoveryGateError("post recovery account_key mismatch")
+    if request_row.get("task_type") != STOP_SALE_TASK_TYPE:
+        raise RecoveryGateError("post recovery request task_type mismatch")
     if request_row.get("owner_token") != new_owner:
         raise RecoveryGateError("post recovery owner_token mismatch")
     if request_row.get("status") != "cancelled":
         raise RecoveryGateError("post recovery request is not cancelled")
     if request_row.get("completed_at") is None:
         raise RecoveryGateError("post recovery request is missing completed_at")
-    if any(
-        str(row.get("run_id") or "") == str(snapshot["run_id"])
-        for row in list(post_state.get("leases") or [])
-    ):
-        raise RecoveryGateError("post recovery still has a lease for the target run")
+    if list(post_state.get("leases") or []):
+        raise RecoveryGateError("post recovery still has a related runtime lease")
     return {
         "artifact_type": "stop_sale_runtime_recovery_apply",
         "snapshot_fingerprint": snapshot["fingerprint"],
         "account_key": snapshot["account_key"],
         "run_id": snapshot["run_id"],
         "request_key": snapshot["request_key"],
+        "recovery_mode": snapshot["recovery_mode"],
         "old_owner_token": old_owner,
         "actions": actions,
         "post_state": post_state,

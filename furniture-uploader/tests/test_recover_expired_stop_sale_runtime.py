@@ -17,6 +17,7 @@ if str(SCRIPTS_ROOT) not in sys.path:
 
 from recover_expired_stop_sale_runtime import (  # noqa: E402
     RECOVERY_PROCEDURES,
+    RECOVERY_MODE_REQUEST_ONLY,
     RecoveryGateError,
     RuntimeRecoveryRepository,
     SNAPSHOT_VERSION,
@@ -43,6 +44,7 @@ def snapshot_template() -> dict:
         "run_id": "stop_sale_system_prompt_canary_20260806",
         "request_key": "stop_sale:stop_sale_system_prompt_canary_20260806:muke_lixiang",
         "task_type": STOP_SALE_TASK_TYPE,
+        "recovery_mode": "request_and_resources",
         "request": {
             "request_key": "stop_sale:stop_sale_system_prompt_canary_20260806:muke_lixiang",
             "account_key": "muke_lixiang",
@@ -118,6 +120,8 @@ class FakeRepository:
         return {
             "request": [{
                 "request_key": self.snapshot["request_key"],
+                "account_key": self.snapshot["account_key"],
+                "task_type": STOP_SALE_TASK_TYPE,
                 "status": "cancelled",
                 "owner_token": self.new_owner_token,
                 "run_id": self.snapshot["run_id"],
@@ -128,19 +132,20 @@ class FakeRepository:
 
 
 class FakeCursor:
-    def __init__(self, statuses: list[str]) -> None:
+    def __init__(self, statuses: list[object]) -> None:
         self.statuses = iter(statuses)
         self.executions: list[tuple[str, tuple[object, ...]]] = []
 
     def execute(self, sql: str, params: tuple[object, ...]) -> None:
         self.executions.append((sql, params))
 
-    def fetchone(self) -> tuple[str]:
-        return (next(self.statuses),)
+    def fetchone(self) -> tuple[object, ...]:
+        result = next(self.statuses)
+        return result if isinstance(result, tuple) else (result,)
 
 
 class FakeConnection:
-    def __init__(self, statuses: list[str]) -> None:
+    def __init__(self, statuses: list[object]) -> None:
         self._cursor = FakeCursor(statuses)
         self.commit_count = 0
         self.rollback_count = 0
@@ -181,6 +186,49 @@ class RecoverExpiredStopSaleRuntimeTests(unittest.TestCase):
         )
         self.assertFalse(eligible)
         self.assertIn("request_owner_pid_is_alive", reasons)
+
+    def test_dead_owner_with_all_resources_missing_is_request_only_eligible(self) -> None:
+        snapshot = snapshot_template()
+        snapshot["resources"] = []
+        snapshot["recovery_mode"] = RECOVERY_MODE_REQUEST_ONLY
+        eligible, reasons = _eligibility(
+            snapshot,
+            expected_hostname="PC-20210622ARIU",
+            process_checker=lambda _pid: False,
+        )
+        self.assertTrue(eligible)
+        self.assertEqual(reasons, [])
+
+    def test_partial_resource_loss_is_not_eligible(self) -> None:
+        snapshot = snapshot_template()
+        snapshot["resources"] = snapshot["resources"][:1]
+        snapshot["recovery_mode"] = "invalid_resource_set"
+        eligible, reasons = _eligibility(
+            snapshot,
+            expected_hostname="PC-20210622ARIU",
+            process_checker=lambda _pid: False,
+        )
+        self.assertFalse(eligible)
+        self.assertIn("target_resource_set_incomplete", reasons)
+
+    def test_request_only_with_foreign_same_account_lease_is_not_eligible(self) -> None:
+        snapshot = snapshot_template()
+        snapshot["resources"] = []
+        snapshot["recovery_mode"] = RECOVERY_MODE_REQUEST_ONLY
+        snapshot["foreign_runtime_leases"] = [{
+            "resource_type": "browser_slot",
+            "resource_key": "PC-20210622ARIU:3",
+            "account_key": "muke_lixiang",
+            "owner_token": "c" * 32,
+            "run_id": "other-run",
+        }]
+        eligible, reasons = _eligibility(
+            snapshot,
+            expected_hostname="PC-20210622ARIU",
+            process_checker=lambda _pid: False,
+        )
+        self.assertFalse(eligible)
+        self.assertIn("foreign_runtime_lease_present", reasons)
 
     def test_non_positive_owner_pid_blocks_recovery(self) -> None:
         snapshot = snapshot_template()
@@ -262,6 +310,29 @@ class RecoverExpiredStopSaleRuntimeTests(unittest.TestCase):
         )
         self.assertEqual(result["post_state"]["request"][0]["status"], "cancelled")
 
+    def test_apply_request_only_uses_request_cas_and_completion(self) -> None:
+        snapshot = snapshot_template()
+        snapshot["resources"] = []
+        snapshot["recovery_mode"] = RECOVERY_MODE_REQUEST_ONLY
+        snapshot["fingerprint"] = _snapshot_fingerprint(snapshot)
+        repository = FakeRepository(snapshot)
+        result = apply_snapshot(
+            snapshot,
+            repository,  # type: ignore[arg-type]
+            hostname="PC-20210622ARIU",
+            process_checker=lambda _pid: False,
+            yes=True,
+        )
+        self.assertEqual(
+            repository.calls,
+            [
+                ("atomic", []),
+                ("request", snapshot["request_key"]),
+                ("complete", snapshot["request_key"]),
+            ],
+        )
+        self.assertEqual(result["recovery_mode"], RECOVERY_MODE_REQUEST_ONLY)
+
     def test_wrong_task_type_is_not_eligible(self) -> None:
         snapshot = snapshot_template()
         snapshot["request"]["task_type"] = "listing"
@@ -294,6 +365,9 @@ class RecoverExpiredStopSaleRuntimeTests(unittest.TestCase):
         changed = copy.deepcopy(snapshot)
         changed["pid_live"] = {"13128": True}
         self.assertNotEqual(fingerprint, _snapshot_fingerprint(changed))
+        changed = copy.deepcopy(snapshot)
+        changed["recovery_mode"] = RECOVERY_MODE_REQUEST_ONLY
+        self.assertNotEqual(fingerprint, _snapshot_fingerprint(changed))
 
     def test_validate_snapshot_rejects_cross_account_resource(self) -> None:
         snapshot = snapshot_template()
@@ -322,15 +396,27 @@ class RecoverExpiredStopSaleRuntimeTests(unittest.TestCase):
 
     def test_atomic_recovery_commits_once_after_all_cas_steps(self) -> None:
         snapshot = snapshot_template()
-        connection = FakeConnection(["recovered", "recovered", "recovered", "completed"])
+        connection = FakeConnection([
+            "1",
+            (0, 0, 0, 0),
+            "recovered",
+            "recovered",
+            "0",
+            "recovered",
+            "completed",
+            (1, 0),
+        ])
         repository = RuntimeRecoveryRepository(
             object(), connect=lambda _config: connection
         )
 
         actions = repository.recover_expired_runtime(
             resources=snapshot["resources"],
+            account_key=snapshot["account_key"],
+            run_id=snapshot["run_id"],
             request_key=snapshot["request_key"],
             expected_owner_token=snapshot["request"]["owner_token"],
+            expected_owner_pid=snapshot["request"]["pid"],
             new_owner_token="b" * 32,
             hostname=snapshot["hostname"],
             pid=24680,
@@ -339,21 +425,128 @@ class RecoverExpiredStopSaleRuntimeTests(unittest.TestCase):
 
         self.assertEqual(connection.commit_count, 1)
         self.assertEqual(connection.rollback_count, 0)
-        self.assertEqual(len(connection._cursor.executions), 4)
-        self.assertEqual(actions[-1]["status"], "completed")
+        self.assertEqual(len(connection._cursor.executions), 8)
+        self.assertEqual(actions[-1]["action"], "verify_transactional_post_state")
+        self.assertEqual(actions[-1]["status"], "passed")
 
-    def test_atomic_recovery_rolls_back_when_request_recovery_fails(self) -> None:
+    def test_request_only_recovery_checks_related_leases_in_same_transaction(self) -> None:
         snapshot = snapshot_template()
-        connection = FakeConnection(["recovered", "recovered", "owner_mismatch"])
+        connection = FakeConnection([
+            1,
+            (0, 0, 0, 0),
+            0,
+            "recovered",
+            "completed",
+            (1, 0),
+        ])
         repository = RuntimeRecoveryRepository(
             object(), connect=lambda _config: connection
         )
 
-        with self.assertRaisesRegex(RecoveryGateError, "request recovery failed"):
+        actions = repository.recover_expired_runtime(
+            resources=[],
+            account_key=snapshot["account_key"],
+            run_id=snapshot["run_id"],
+            request_key=snapshot["request_key"],
+            expected_owner_token=snapshot["request"]["owner_token"],
+            expected_owner_pid=snapshot["request"]["pid"],
+            new_owner_token="b" * 32,
+            hostname=snapshot["hostname"],
+            pid=24680,
+            actor="test",
+        )
+
+        self.assertEqual(connection.commit_count, 1)
+        self.assertEqual(connection.rollback_count, 0)
+        self.assertEqual(len(connection._cursor.executions), 6)
+        self.assertEqual(actions[0]["action"], "verify_request_identity")
+        self.assertEqual(actions[1]["action"], "verify_active_work_absent")
+        self.assertEqual(actions[2]["action"], "verify_related_leases_absent")
+        self.assertEqual(actions[2]["recovery_mode"], RECOVERY_MODE_REQUEST_ONLY)
+        executed_sql = [sql for sql, _params in connection._cursor.executions]
+        self.assertFalse(any("lease_recover_expired" in sql for sql in executed_sql))
+        self.assertTrue(any("request_recover_expired" in sql for sql in executed_sql))
+        self.assertTrue(any("request_complete" in sql for sql in executed_sql))
+
+    def test_request_only_recovery_rolls_back_when_terminal_request_is_not_exact(self) -> None:
+        snapshot = snapshot_template()
+        connection = FakeConnection([
+            1,
+            (0, 0, 0, 0),
+            0,
+            "recovered",
+            "completed",
+            (0, 0),
+        ])
+        repository = RuntimeRecoveryRepository(
+            object(), connect=lambda _config: connection
+        )
+
+        with self.assertRaisesRegex(RecoveryGateError, "transactional post-state gate"):
             repository.recover_expired_runtime(
-                resources=snapshot["resources"],
+                resources=[],
+                account_key=snapshot["account_key"],
+                run_id=snapshot["run_id"],
                 request_key=snapshot["request_key"],
                 expected_owner_token=snapshot["request"]["owner_token"],
+                expected_owner_pid=snapshot["request"]["pid"],
+                new_owner_token="b" * 32,
+                hostname=snapshot["hostname"],
+                pid=24680,
+                actor="test",
+            )
+
+        self.assertEqual(connection.commit_count, 0)
+        self.assertEqual(connection.rollback_count, 1)
+        self.assertEqual(len(connection._cursor.executions), 6)
+
+    def test_request_only_recovery_rolls_back_when_post_state_lease_exists(self) -> None:
+        snapshot = snapshot_template()
+        connection = FakeConnection([
+            1,
+            (0, 0, 0, 0),
+            0,
+            "recovered",
+            "completed",
+            (1, 1),
+        ])
+        repository = RuntimeRecoveryRepository(
+            object(), connect=lambda _config: connection
+        )
+
+        with self.assertRaisesRegex(RecoveryGateError, "related_lease_count=1"):
+            repository.recover_expired_runtime(
+                resources=[],
+                account_key=snapshot["account_key"],
+                run_id=snapshot["run_id"],
+                request_key=snapshot["request_key"],
+                expected_owner_token=snapshot["request"]["owner_token"],
+                expected_owner_pid=snapshot["request"]["pid"],
+                new_owner_token="b" * 32,
+                hostname=snapshot["hostname"],
+                pid=24680,
+                actor="test",
+            )
+
+        self.assertEqual(connection.commit_count, 0)
+        self.assertEqual(connection.rollback_count, 1)
+        self.assertEqual(len(connection._cursor.executions), 6)
+
+    def test_request_only_recovery_rolls_back_when_related_lease_appears(self) -> None:
+        snapshot = snapshot_template()
+        connection = FakeConnection([1, (0, 0, 0, 0), 1])
+        repository = RuntimeRecoveryRepository(
+            object(), connect=lambda _config: connection
+        )
+
+        with self.assertRaisesRegex(RecoveryGateError, "related lease recovery gate"):
+            repository.recover_expired_runtime(
+                resources=[],
+                account_key=snapshot["account_key"],
+                run_id=snapshot["run_id"],
+                request_key=snapshot["request_key"],
+                expected_owner_token=snapshot["request"]["owner_token"],
+                expected_owner_pid=snapshot["request"]["pid"],
                 new_owner_token="b" * 32,
                 hostname=snapshot["hostname"],
                 pid=24680,
@@ -364,6 +557,88 @@ class RecoverExpiredStopSaleRuntimeTests(unittest.TestCase):
         self.assertEqual(connection.rollback_count, 1)
         self.assertEqual(len(connection._cursor.executions), 3)
 
+    def test_request_only_recovery_rolls_back_when_active_work_appears(self) -> None:
+        snapshot = snapshot_template()
+        connection = FakeConnection([1, (1, 0, 0, 0)])
+        repository = RuntimeRecoveryRepository(
+            object(), connect=lambda _config: connection
+        )
+
+        with self.assertRaisesRegex(RecoveryGateError, "active work recovery gate"):
+            repository.recover_expired_runtime(
+                resources=[],
+                account_key=snapshot["account_key"],
+                run_id=snapshot["run_id"],
+                request_key=snapshot["request_key"],
+                expected_owner_token=snapshot["request"]["owner_token"],
+                expected_owner_pid=snapshot["request"]["pid"],
+                new_owner_token="b" * 32,
+                hostname=snapshot["hostname"],
+                pid=24680,
+                actor="test",
+            )
+
+        self.assertEqual(connection.commit_count, 0)
+        self.assertEqual(connection.rollback_count, 1)
+        self.assertEqual(len(connection._cursor.executions), 2)
+
+    def test_request_only_recovery_rolls_back_when_request_identity_drifted(self) -> None:
+        snapshot = snapshot_template()
+        connection = FakeConnection([0])
+        repository = RuntimeRecoveryRepository(
+            object(), connect=lambda _config: connection
+        )
+
+        with self.assertRaisesRegex(RecoveryGateError, "request identity recovery gate"):
+            repository.recover_expired_runtime(
+                resources=[],
+                account_key=snapshot["account_key"],
+                run_id=snapshot["run_id"],
+                request_key=snapshot["request_key"],
+                expected_owner_token=snapshot["request"]["owner_token"],
+                expected_owner_pid=snapshot["request"]["pid"],
+                new_owner_token="b" * 32,
+                hostname=snapshot["hostname"],
+                pid=24680,
+                actor="test",
+            )
+
+        self.assertEqual(connection.commit_count, 0)
+        self.assertEqual(connection.rollback_count, 1)
+        self.assertEqual(len(connection._cursor.executions), 1)
+
+    def test_atomic_recovery_rolls_back_when_request_recovery_fails(self) -> None:
+        snapshot = snapshot_template()
+        connection = FakeConnection([
+            "1",
+            (0, 0, 0, 0),
+            "recovered",
+            "recovered",
+            "0",
+            "owner_mismatch",
+        ])
+        repository = RuntimeRecoveryRepository(
+            object(), connect=lambda _config: connection
+        )
+
+        with self.assertRaisesRegex(RecoveryGateError, "request recovery failed"):
+            repository.recover_expired_runtime(
+                resources=snapshot["resources"],
+                account_key=snapshot["account_key"],
+                run_id=snapshot["run_id"],
+                request_key=snapshot["request_key"],
+                expected_owner_token=snapshot["request"]["owner_token"],
+                expected_owner_pid=snapshot["request"]["pid"],
+                new_owner_token="b" * 32,
+                hostname=snapshot["hostname"],
+                pid=24680,
+                actor="test",
+            )
+
+        self.assertEqual(connection.commit_count, 0)
+        self.assertEqual(connection.rollback_count, 1)
+        self.assertEqual(len(connection._cursor.executions), 6)
+
     def test_apply_rejects_incomplete_post_state(self) -> None:
         snapshot = snapshot_template()
         snapshot["fingerprint"] = _snapshot_fingerprint(snapshot)
@@ -371,6 +646,8 @@ class RecoverExpiredStopSaleRuntimeTests(unittest.TestCase):
         repository.query_post_state = lambda **_kwargs: {
             "request": [{
                 "request_key": snapshot["request_key"],
+                "account_key": snapshot["account_key"],
+                "task_type": STOP_SALE_TASK_TYPE,
                 "status": "cancelled",
                 "owner_token": repository.new_owner_token,
                 "run_id": snapshot["run_id"],

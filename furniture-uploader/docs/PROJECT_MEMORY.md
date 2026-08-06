@@ -415,8 +415,8 @@
 ## 2026-08-07 下架过期运行时精确恢复工具
 
 - 新增 `scripts/recover_expired_stop_sale_runtime.py`，仅用于一个明确的 `account_key + run_id + request_key` 的过期 Stop-Sale owner 恢复；它不是清锁、批量解租约或重跑入口。
-- Preview 以正常隔离级别核对请求、账号租约、浏览器槽位、PID、TTL、同账号 Crawler task 与 attempt、目标 Stop-Sale run、正式恢复存储过程和外来 owner，并将完整范围写入带 SHA-256 指纹的版本 3 快照。
-- Apply 必须复用一份自身已经 `eligible=true` 的原快照、显式 `--yes`，并重新读取完全相同的 fresh 指纹；指纹覆盖资格结论和 PID 存活证据。CLI hostname 必须等于本机，PID 必须为正数，账号与 `hostname:1..3` 槽位、`task_type=stop_sale`、owner、run、PID 或 fencing 任一不一致都 fail closed。被阻塞的旧 Preview 不能等待条件变化后直接 Apply，必须重新生成通过的 Preview。
-- 浏览器槽位、账号租约、request owner 接管和 request `cancelled` 终态按正式“先槽位、后账号”释放顺序，在一个数据库事务内通过正式 CAS 存储过程完成；任一步不返回精确成功状态即整体回滚，随后还要验证 request 终态和目标 run 无残留租约。
-- 最终本地验证：下架/替换聚焦回归 `543 passed, 7 subtests passed`；恢复工具 `19 passed`；隐藏校验 `1 passed`；`combination_sku` `4 passed`；`compileall` 通过。
+- Preview 以正常隔离级别核对请求、账号租约、浏览器槽位、PID、TTL、同账号 Crawler task 与 attempt、目标 Stop-Sale run、正式恢复存储过程和外来 owner，并将完整范围写入带 SHA-256 指纹的版本 4 快照。快照显式区分 `request_and_resources` 与 `request_only`；只有目标资源全部缺失且没有任何相关租约时才允许后者，部分缺失保持阻塞。
+- Apply 必须复用一份自身已经 `eligible=true` 的原快照、显式 `--yes`，并重新读取完全相同的 fresh 指纹；指纹覆盖资格结论、PID 存活证据和 `recovery_mode`。CLI hostname 必须等于本机，PID 必须为正数，完整资源模式下账号与 `hostname:1..3` 槽位、`task_type=stop_sale`、owner、run、PID 或 fencing 任一不一致都 fail closed；request-only 模式必须证明目标资源集合为空且相关租约为零。被阻塞的旧 Preview 不能等待条件变化后直接 Apply，必须重新生成通过的 Preview。
+- 浏览器槽位、账号租约、request owner 接管和 request `cancelled` 终态按正式“先槽位、后账号”释放顺序，在一个数据库事务内通过正式 CAS 存储过程完成；request-only 路径不调用租约恢复过程，但在 request CAS 前以锁定查询确认目标账号、run 和 owner 相关租约为零，并在提交前再次锁定验证 request 已 `cancelled`、`completed_at` 非空且相关租约仍为零。任一步不返回精确成功状态或后态不符即整体回滚，提交后再独立读取复核。
+- 最终本地验证：完整 `furniture-uploader` 回归 `734/734`；C 线下架/替换聚焦回归 `324/324`；恢复工具 `29/29`；毛重系统提示与 `combination_sku` 精确回归 `6/6`（`2 + 4`）；`compileall` 与 `git diff --check` 通过。
 - 本次只完成本地实现、文档和自动化验证；未连接生产数据库，未确认执行机存储过程、实时租约或浏览器状态，也未执行 Preview/Apply。生产使用前仍需单独 fresh Preview 和受控审批。
