@@ -138,6 +138,24 @@ class _FakeConfig:
 
 
 class RecordAli1688ResultIdempotencyTests(unittest.TestCase):
+    def test_failed_terminal_result_sets_finished_at(self) -> None:
+        cursor = _FakeCursor(rowcount=1, current=None)
+        connection = _FakeConnection(cursor)
+        repository = OperationSagaRepository(
+            _FakeConfig(),
+            connect=lambda _config: connection,
+        )
+        repository.record_ali1688_result(
+            operation_key="k" * 64,
+            account_fencing_token=19,
+            status="failed",
+            error_code="automation_error",
+            error_summary="executor stopped",
+        )
+        update_sql = cursor.executed[0][0]
+        self.assertIn("IN ('completed', 'failed_terminal')", update_sql)
+        self.assertEqual(connection.commits, 1)
+
     def test_completed_state_replay_is_noop_despite_new_fencing(self) -> None:
         cursor = _FakeCursor(rowcount=0, current=("completed", 15))
         connection = _FakeConnection(cursor)

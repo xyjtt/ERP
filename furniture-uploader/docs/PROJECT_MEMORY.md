@@ -397,3 +397,10 @@
 - 提交未产生平台请求且能读取到明确平台提示时，执行器记录 `error_category=system_prompt`，并把平台原文写入 `page_error_text` 和 `system_prompt`。
 - `system_prompt` 不重试、不停止整店；当前商品 ID/SKU 记录失败后继续下一商品。唯一在线 SKU 的专用分类仍优先于通用系统提示。
 - 本地相关回归 `126/126` 通过；执行机部署和真实 Canary 仍需单独验证，不能用本地测试代替生产验收。
+
+## 2026-08-06 下架中断恢复审计收口
+
+- 中断恢复不能只结束 Run 和删除文件锁；对应 Item 必须从 `pending` 转为技术失败，Saga 必须从 `prepared` 转为 `failed_terminal` 并写入 `finished_at`。
+- 恢复按 `run_id + operation_key + account_fencing_token` 做 CAS，并要求 Outbox 为零；1688 未成功时不创建聚水潭任务。
+- 已完成一次旧版恢复的 Run 可以在校验原恢复 summary、原因和锁路径后幂等补齐 Item/Saga，不重复通知或页面操作。
+- C 线聚焦回归为 `151 passed, 2 subtests passed`；真实毛重系统提示仍必须由独立页面 Canary 验收。

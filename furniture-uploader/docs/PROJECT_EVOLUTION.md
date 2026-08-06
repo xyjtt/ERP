@@ -160,3 +160,9 @@
 
 - 恢复授权不再依赖人工观察数量或 `run_id + limit`，改为文件 SHA-256、四字段身份集合 SHA-256 和 operation_key 精确集合。
 - 文件锁释放、恢复清单生成和 Outbox 领取均 fail closed，任何并发或证据漂移都保留现状并停止。
+
+## 2026-08-06 中断恢复扩展到 Item/Saga 终态
+
+- 旧恢复流程只结束 Run 并释放锁，可能遗留 `Item=pending`、`Saga=prepared`。
+- 新流程在同一受控恢复中把精确 Item 标为技术失败，并把 Saga 标为 `failed_terminal`；`finished_at` 对失败终态同样必填。
+- 1688 未完成时禁止创建 Outbox，聚水潭阶段明确为不适用，而不是成功或待处理。

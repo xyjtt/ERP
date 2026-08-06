@@ -346,6 +346,13 @@
 - The affected product ID/SKU is recorded as failed and skipped; execution continues with the next item in the same store.
 - This category is non-retryable and does not stop the store. It is not counted as an offline success and does not create a Jushuitan handoff.
 - Targeted behavior tests and the related stop-sale suite pass `126/126`. Executor deployment and a real hidden-validation Canary remain pending.
+
+## 2026-08-06 Interrupted Stop-Sale Recovery Closure
+
+- Recovery now terminalizes the exact pending Item and prepared Saga together with the failed Run; a failed 1688 action creates no Jushuitan Outbox.
+- CAS scope includes run ID, operation key, and account fencing token. A changed identity, terminal state, or unexpected Outbox fails closed.
+- Legacy partial recovery can be rerun idempotently only when its persisted recovery summary proves the same reason and exact removed lock.
+- Focused C-line regression: `151 passed, 2 subtests passed`. Real hidden-validation Canary remains a separate production acceptance step.
 # 2026-08-05 下架恢复安全补强
 
 - 中断 Manager 锁改为 owner/token 不可误删的 Windows 原子释放。

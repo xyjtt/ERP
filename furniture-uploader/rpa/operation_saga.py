@@ -377,7 +377,11 @@ class OperationSagaRepository:
                     jushuitan_status = CASE WHEN ? = 1 THEN 'pending' ELSE jushuitan_status END,
                     evidence_json = ?, error_code = ?, error_summary = ?,
                     ali1688_finished_at = SYSUTCDATETIME(),
-                    finished_at = CASE WHEN ? = 'completed' THEN SYSUTCDATETIME() ELSE finished_at END,
+                    finished_at = CASE
+                        WHEN ? IN ('completed', 'failed_terminal')
+                        THEN COALESCE(finished_at, SYSUTCDATETIME())
+                        ELSE finished_at
+                    END,
                     updated_at = SYSUTCDATETIME()
                 WHERE operation_key = ?
                   AND account_fencing_token = ?

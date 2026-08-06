@@ -285,3 +285,9 @@
 
 - 不能用整行文本 `includes` 判断店铺、商品、SKU 或平台编码，前缀值会产生误匹配。
 - 必须按表头解析四个结构化列并逐列规范化等值比较。目标不存在只能由精确 sibling 行或精确筛选回读后的显式零行证明，缺列时失败关闭。
+
+## 2026-08-06 中断恢复不能只清运行锁
+
+- `Run=failed` 和文件锁消失不代表下架审计已闭环；必须同时检查 Item、Saga 和 Outbox。
+- 对浏览器进程中断，Item 记录 `automation_error`，Saga 记录 `failed_terminal/interrupted_executor_process`，且两者都保留原始中断原因。
+- 只有 1688 成功或已下架才允许产生聚水潭 Outbox；技术失败的正确终态是无 Outbox，并在证据中明确 `not_created_ali1688_failed`。

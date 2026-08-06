@@ -74,30 +74,263 @@ def _query_run_state(repository: StopSaleAuditRepository, run_id: str) -> dict[s
     run_table = repository._table("ali1688_stop_sale_run")
     with connect_app_database(repository.config) as connection:
         row = connection.cursor().execute(
-            f"SELECT status, finished_at FROM {run_table} WHERE run_id = ?", (run_id,)
+            f"""
+            SELECT status, finished_at, error_message, summary_path, notification_sent
+            FROM {run_table}
+            WHERE run_id = ?
+            """,
+            (run_id,),
         ).fetchone()
     if row is None:
         raise RuntimeError(f"Stop-sale audit run was not found: {run_id}")
-    return {"status": str(row[0] or ""), "finished_at": row[1]}
+    return {
+        "status": str(row[0] or ""),
+        "finished_at": row[1],
+        "error_message": str(row[2] or ""),
+        "summary_path": str(row[3] or ""),
+        "notification_sent": bool(row[4]),
+    }
+
+
+def _load_completed_recovery_summary(
+    run_state: dict[str, Any],
+    *,
+    run_id: str,
+    reason: str,
+    lock_path: Path,
+) -> tuple[dict[str, Any], Path]:
+    if run_state["status"] != "failed" or run_state["finished_at"] is None:
+        raise RuntimeError(
+            f"Stop-sale audit run is not recoverable: status={run_state['status']!r}, "
+            f"finished_at={run_state['finished_at']!r}"
+        )
+    if run_state["error_message"] != reason:
+        raise RuntimeError("Completed recovery error message does not match the requested reason.")
+    summary_path = Path(run_state["summary_path"]).resolve()
+    if not summary_path.is_file():
+        raise RuntimeError(f"Completed recovery summary does not exist: {summary_path}")
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    if str(summary.get("run_id") or "") != run_id:
+        raise RuntimeError("Completed recovery summary run_id does not match.")
+    if str(summary.get("error_message") or "") != reason:
+        raise RuntimeError("Completed recovery summary reason does not match.")
+    if not bool(summary.get("lock_removed")):
+        raise RuntimeError("Completed recovery summary does not prove lock removal.")
+    if Path(str(summary.get("shared_lock_path") or "")).resolve() != lock_path:
+        raise RuntimeError("Completed recovery summary lock path does not match.")
+    return summary, summary_path
+
+
+def _reconcile_interrupted_audit(
+    repository: StopSaleAuditRepository,
+    *,
+    run_id: str,
+    reason: str,
+) -> dict[str, Any]:
+    item_table = repository._table("ali1688_stop_sale_item")
+    run_table = repository._table("ali1688_stop_sale_run")
+    saga_table = repository._table("ali1688_operation_saga")
+    outbox_table = repository._table("ali1688_operation_outbox")
+    evidence = {
+        "recovery": "interrupted_executor_process",
+        "run_id": run_id,
+        "reason": reason,
+    }
+    with connect_app_database(repository.config) as connection:
+        cursor = connection.cursor()
+        rows = cursor.execute(
+            f"""
+            SELECT item.id, item.task_key, item.offline_status, item.attempts,
+                   item.error_category, item.error_message,
+                   saga.operation_key, saga.run_id, saga.task_type, saga.account_key,
+                   saga.state, saga.ali1688_status,
+                   saga.account_fencing_token, saga.evidence_json,
+                   saga.error_code, saga.error_summary,
+                   (SELECT COUNT_BIG(1) FROM {outbox_table} AS outbox_row
+                     WHERE outbox_row.operation_key = item.task_key) AS outbox_count
+            FROM {item_table} AS item WITH (UPDLOCK, HOLDLOCK)
+            LEFT JOIN {saga_table} AS saga WITH (UPDLOCK, HOLDLOCK)
+              ON saga.operation_key = item.task_key
+            WHERE item.run_id = ?
+            ORDER BY item.id
+            """,
+            (run_id,),
+        ).fetchall()
+        item_updates = 0
+        saga_updates = 0
+        for row in rows:
+            item_id = int(row[0])
+            operation_key = str(row[1] or "")
+            offline_status = str(row[2] or "")
+            error_category = str(row[4] or "")
+            error_message = str(row[5] or "")
+            saga_operation_key = str(row[6] or "")
+            saga_run_id = str(row[7] or "")
+            saga_task_type = str(row[8] or "")
+            saga_state = str(row[10] or "")
+            account_fencing_token = int(row[12] or 0)
+            saga_evidence = str(row[13] or "")
+            saga_error_code = str(row[14] or "")
+            saga_error_summary = str(row[15] or "")
+            outbox_count = int(row[16] or 0)
+            if not operation_key or saga_operation_key != operation_key:
+                raise RuntimeError(f"Interrupted recovery Saga is missing or mismatched: item_id={item_id}")
+            if saga_run_id != run_id or saga_task_type != "stop_sale":
+                raise RuntimeError(
+                    f"Interrupted recovery Saga ownership changed: operation_key={operation_key}"
+                )
+            if outbox_count:
+                raise RuntimeError(
+                    f"Interrupted recovery unexpectedly has an Outbox row: operation_key={operation_key}"
+                )
+            if offline_status not in {"pending", "failed"}:
+                raise RuntimeError(
+                    f"Interrupted recovery item has unexpected status: item_id={item_id}, "
+                    f"status={offline_status!r}"
+                )
+            if offline_status == "failed" and (
+                error_category != "automation_error" or error_message != reason
+            ):
+                raise RuntimeError(f"Interrupted recovery item terminal evidence changed: item_id={item_id}")
+            if saga_state not in {"prepared", "failed_terminal"}:
+                raise RuntimeError(
+                    f"Interrupted recovery Saga has unexpected state: operation_key={operation_key}, "
+                    f"state={saga_state!r}"
+                )
+            if saga_state == "failed_terminal" and (
+                saga_error_code != "interrupted_executor_process" or saga_error_summary != reason
+            ):
+                raise RuntimeError(
+                    f"Interrupted recovery Saga terminal evidence changed: operation_key={operation_key}"
+                )
+            if offline_status == "pending":
+                cursor.execute(
+                    f"""
+                    UPDATE {item_table}
+                    SET offline_status = 'failed',
+                        attempts = CASE WHEN ISNULL(attempts, 0) < 1 THEN 1 ELSE attempts END,
+                        error_category = 'automation_error', error_message = ?,
+                        updated_at = SYSUTCDATETIME()
+                    WHERE id = ? AND run_id = ? AND offline_status = 'pending'
+                    """,
+                    (reason, item_id, run_id),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError(f"Interrupted recovery item CAS failed: item_id={item_id}")
+                item_updates += 1
+            if saga_state == "prepared":
+                try:
+                    current_evidence = json.loads(saga_evidence) if saga_evidence else {}
+                except json.JSONDecodeError:
+                    current_evidence = {"previous_evidence_raw": saga_evidence}
+                current_evidence["interrupted_recovery"] = evidence
+                cursor.execute(
+                    f"""
+                    UPDATE {saga_table}
+                    SET state = 'failed_terminal', ali1688_status = 'failed',
+                        evidence_json = ?, error_code = 'interrupted_executor_process',
+                        error_summary = ?,
+                        ali1688_finished_at = COALESCE(ali1688_finished_at, SYSUTCDATETIME()),
+                        finished_at = COALESCE(finished_at, SYSUTCDATETIME()),
+                        updated_at = SYSUTCDATETIME()
+                    WHERE operation_key = ? AND run_id = ?
+                      AND account_fencing_token = ? AND state = 'prepared'
+                    """,
+                    (
+                        json.dumps(current_evidence, ensure_ascii=False, default=str),
+                        reason,
+                        operation_key,
+                        run_id,
+                        account_fencing_token,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError(
+                        f"Interrupted recovery Saga CAS failed: operation_key={operation_key}"
+                    )
+                saga_updates += 1
+        counts = cursor.execute(
+            f"""
+            SELECT
+                COUNT(DISTINCT CASE WHEN offline_status = 'success' THEN offline_task_key END),
+                COUNT(DISTINCT CASE WHEN offline_status = 'already_offline' THEN offline_task_key END),
+                COUNT(DISTINCT CASE WHEN offline_status = 'failed' THEN offline_task_key END),
+                COUNT(DISTINCT CASE WHEN offline_status = 'not_attempted' THEN offline_task_key END),
+                SUM(CASE WHEN jushuitan_status = 'success' THEN 1 ELSE 0 END),
+                SUM(CASE WHEN jushuitan_status = 'already_cleared' THEN 1 ELSE 0 END),
+                SUM(CASE WHEN jushuitan_status = 'failed' THEN 1 ELSE 0 END)
+            FROM {item_table}
+            WHERE run_id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+        count_values = [int(value or 0) for value in counts]
+        cursor.execute(
+            f"""
+            UPDATE {run_table}
+            SET offline_success_count = ?, offline_already_count = ?,
+                offline_failed_count = ?, not_attempted_count = ?,
+                jushuitan_success_count = ?, jushuitan_already_count = ?,
+                jushuitan_failed_count = ?, updated_at = SYSUTCDATETIME()
+            WHERE run_id = ?
+            """,
+            (*count_values, run_id),
+        )
+        if cursor.rowcount != 1:
+            raise RuntimeError("Interrupted recovery run count refresh failed.")
+        connection.commit()
+    return {
+        "item_count": len(rows),
+        "item_terminalized_count": item_updates,
+        "saga_terminalized_count": saga_updates,
+        "outbox_count": 0,
+        "jushuitan_action": "not_created_ali1688_failed",
+    }
 
 
 def recover(args: argparse.Namespace) -> dict[str, Any]:
     if not args.yes:
         raise ValueError("Recovery requires --yes")
     run_id = str(args.run_id).strip()
-    reason = str(args.reason).strip()
+    reason = str(args.reason).strip()[:2000]
+    if not reason:
+        raise ValueError("Recovery reason is required")
     lock_path = Path(args.shared_lock_path).resolve()
-    lock_payload = _load_owned_interrupted_lock(lock_path, run_id)
 
     repository = StopSaleAuditRepository(
         resolve_stop_sale_app_config(Path(args.shared_runtime_root).resolve())
     )
     run_state = _query_run_state(repository, run_id)
+    if not lock_path.exists():
+        summary, summary_path = _load_completed_recovery_summary(
+            run_state,
+            run_id=run_id,
+            reason=reason,
+            lock_path=lock_path,
+        )
+        summary["audit_reconciliation"] = _reconcile_interrupted_audit(
+            repository,
+            run_id=run_id,
+            reason=reason,
+        )
+        summary["audit_reconciled_at"] = datetime.now().isoformat(timespec="seconds")
+        summary_path.write_text(
+            json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+        return summary
+
+    lock_payload = _load_owned_interrupted_lock(lock_path, run_id)
     if run_state["status"] != "running" or run_state["finished_at"] is not None:
         raise RuntimeError(
             f"Stop-sale audit run is not recoverable: status={run_state['status']!r}, "
             f"finished_at={run_state['finished_at']!r}"
         )
+
+    audit_reconciliation = _reconcile_interrupted_audit(
+        repository,
+        run_id=run_id,
+        reason=reason,
+    )
 
     credentials = hydrate_dingtalk_credentials(Path(args.shared_runtime_root).resolve())
     notification_sent = False
@@ -128,6 +361,7 @@ def recover(args: argparse.Namespace) -> dict[str, Any]:
         "lock_owner_pid": int(lock_payload.get("pid") or 0),
         "recovered_at": datetime.now().isoformat(timespec="seconds"),
     }
+    summary["audit_reconciliation"] = audit_reconciliation
     summary_path.write_text(
         json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
