@@ -172,3 +172,11 @@
 - 旧恢复流程只结束 Run 并释放锁，可能遗留 `Item=pending`、`Saga=prepared`。
 - 新流程在同一受控恢复中把精确 Item 标为技术失败，并把 Saga 标为 `failed_terminal`；`finished_at` 对失败终态同样必填。
 - 1688 未完成时禁止创建 Outbox，聚水潭阶段明确为不适用，而不是成功或待处理。
+
+## 2026-08-07 Runtime Recovery Moves From Manual Lock Handling To Exact CAS
+
+- Expired Stop-Sale runtime cleanup is no longer modeled as deleting a lock or directly updating lease rows. Recovery is an explicit Preview/Apply workflow over one request identity and its exact account/browser resources.
+- A versioned, fingerprinted snapshot is now the handoff contract, including eligibility and PID-liveness evidence. Apply must reproduce the same fresh snapshot and use official fencing-aware stored procedures inside one transaction, releasing browser slot before account lease.
+- The recovery owner is immediately completed as `cancelled` after the stale owner is reconciled; post-state checks prove the request terminal and the target run free of leases.
+- This architecture preserves same-account exclusion and browser capacity while allowing unrelated queued Crawler work to remain outside the recovery gate.
+- Local contract verification passed `543` focused Stop-Sale/replacement tests plus `7` subtests and `19` dedicated recovery tests; production runtime state remains deliberately unverified in this code-only closeout.

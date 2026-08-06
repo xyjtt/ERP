@@ -411,3 +411,12 @@
 - 恢复按 `run_id + operation_key + account_fencing_token` 做 CAS，并要求 Outbox 为零；1688 未成功时不创建聚水潭任务。
 - 已完成一次旧版恢复的 Run 可以在校验原恢复 summary、原因和锁路径后幂等补齐 Item/Saga，不重复通知或页面操作。
 - C 线聚焦回归为 `151 passed, 2 subtests passed`；真实毛重系统提示仍必须由独立页面 Canary 验收。
+
+## 2026-08-07 下架过期运行时精确恢复工具
+
+- 新增 `scripts/recover_expired_stop_sale_runtime.py`，仅用于一个明确的 `account_key + run_id + request_key` 的过期 Stop-Sale owner 恢复；它不是清锁、批量解租约或重跑入口。
+- Preview 以正常隔离级别核对请求、账号租约、浏览器槽位、PID、TTL、同账号 Crawler task 与 attempt、目标 Stop-Sale run、正式恢复存储过程和外来 owner，并将完整范围写入带 SHA-256 指纹的版本 3 快照。
+- Apply 必须复用一份自身已经 `eligible=true` 的原快照、显式 `--yes`，并重新读取完全相同的 fresh 指纹；指纹覆盖资格结论和 PID 存活证据。CLI hostname 必须等于本机，PID 必须为正数，账号与 `hostname:1..3` 槽位、`task_type=stop_sale`、owner、run、PID 或 fencing 任一不一致都 fail closed。被阻塞的旧 Preview 不能等待条件变化后直接 Apply，必须重新生成通过的 Preview。
+- 浏览器槽位、账号租约、request owner 接管和 request `cancelled` 终态按正式“先槽位、后账号”释放顺序，在一个数据库事务内通过正式 CAS 存储过程完成；任一步不返回精确成功状态即整体回滚，随后还要验证 request 终态和目标 run 无残留租约。
+- 最终本地验证：下架/替换聚焦回归 `543 passed, 7 subtests passed`；恢复工具 `19 passed`；隐藏校验 `1 passed`；`combination_sku` `4 passed`；`compileall` 通过。
+- 本次只完成本地实现、文档和自动化验证；未连接生产数据库，未确认执行机存储过程、实时租约或浏览器状态，也未执行 Preview/Apply。生产使用前仍需单独 fresh Preview 和受控审批。

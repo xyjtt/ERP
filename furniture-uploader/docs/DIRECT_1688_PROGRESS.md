@@ -365,3 +365,12 @@
 - 59 项恢复范围必须精确匹配批准的 52 missing + 7 technical 身份集合和哈希。
 - 聚水潭已清除判断改为四列精确匹配，Outbox 改为批准 operation_key 集合原子领取。
 - 当前仅完成开发侧修复；执行机部署和生产恢复仍未执行。
+
+## 2026-08-07 Stop-Sale Runtime Recovery Closeout
+
+- Added `scripts/recover_expired_stop_sale_runtime.py` for exact-scope recovery of one expired Stop-Sale runtime owner. Scope is fixed by `account_key`, `run_id`, `request_key`, host, account lease, and one of browser slots 1-3.
+- Preview requires a positive owner PID and the actual local hostname, uses the normal database isolation level, produces a fingerprinted version 3 snapshot, and blocks on a live PID, unexpired TTL, an active same-account Crawler task or attempt, the target Stop-Sale run still being active, foreign requests/leases, identity drift, or missing official recovery procedures.
+- Apply requires a saved snapshot that was already `eligible=true` plus `--yes`; eligibility and PID liveness are fingerprinted. It repeats the live snapshot check, recovers browser slot before account lease, then recovers and completes the request atomically through official CAS procedures. A blocked old Preview cannot be reused after conditions change; any partial result rolls back.
+- Post-apply verification requires the new owner, `status=cancelled`, a populated `completed_at`, and no lease for the target run. Configuration failures also produce a structured `blocked` artifact instead of an unstructured traceback.
+- Final local validation: Stop-Sale/replacement focus `543 passed, 7 subtests passed`; recovery utility `19 passed`; hidden validation `1 passed`; `combination_sku` `4 passed`; `compileall` passed.
+- This development closeout does not claim executor or production acceptance. No production database, lock, task, browser, Preview, or Apply was touched in this change.
