@@ -302,8 +302,8 @@
 ## 2026-08-07 过期 Stop-Sale 运行时恢复经验
 
 - 不要凭文件锁消失、任务计划状态或单次 SQL 快照判断 owner 已死亡。恢复只能在记录 hostname 与真实本机一致且 PID 为正数时进行，并用正常隔离级别同时核对数据库服务器时间、request/lease TTL、精确 PID、同账号 Crawler task/attempt、目标 Stop-Sale run 和外来 owner；安全门禁不得使用 `NOLOCK` 脏读。
-- 恢复快照必须覆盖 `account_key`、`run_id`、`request_key`、`task_type`、owner、PID、PID 存活证据、资格结论、fencing、资源键和正式存储过程集合；只有 Preview 当时已经 `eligible=true` 才能 Apply，Apply 前还要重新计算完全一致的指纹。旧 Preview 当时被阻塞时，即使条件后来变化也必须重新 Preview，不能复用。
+- 恢复快照必须覆盖 `account_key`、`run_id`、`request_key`、`task_type`、owner、PID、PID 存活证据、资格结论、`recovery_mode`、fencing、资源键和正式存储过程集合；只有 Preview 当时已经 `eligible=true` 才能 Apply，Apply 前还要重新计算完全一致的指纹。资源全部缺失时只有 `request_only` 模式可用，部分资源缺失或未知资源必须阻塞。旧版本 3 Preview 当时被阻塞时，即使条件后来变化也必须重新生成版本 4 Preview，不能复用。
 - 可恢复资源只允许目标账号租约和当前主机 `hostname:1..3` 的单一浏览器槽位。`jushuitan`、未知资源、跨账号资源或额外租约必须停止，不能顺手释放。
-- 多资源恢复必须先释放浏览器槽位、再释放账号租约，并与 request 接管/完成放在同一事务中执行。仅依赖逐条存储过程各自成功会留下部分释放窗口；调用方需统一 commit/rollback，并在提交后检查 request `cancelled/completed_at` 和目标 run 的残留租约。
+- 完整资源恢复必须先释放浏览器槽位、再释放账号租约，并与 request 接管/完成放在同一事务中执行。`request_only` 不调用租约恢复过程，但必须在 request CAS 前以锁定查询确认目标账号、run、owner 相关租约为零；提交前还要在同一事务内再次验证 request 已 `cancelled`、`completed_at` 非空且相关租约为零。仅依赖逐条存储过程各自成功会留下部分释放窗口；任一后态不符必须整体回滚，提交后再做独立读取复核。
 - 凭据或配置不可用同样是可审计阻塞，应输出结构化 `blocked` artifact，不能只留下 traceback。工具验证不等于真实页面、执行机或生产数据库验收。
-- 本地复用契约由 `19` 个恢复工具测试覆盖；下架/替换相关回归为 `543 passed, 7 subtests passed`，但生产 Apply 仍必须以实时快照为准。
+- 本地复用契约由 `29/29` 个恢复工具测试覆盖；本轮 C 线下架/替换聚焦回归为 `324/324`，完整 `furniture-uploader` 回归为 `734/734`；毛重系统提示与 `combination_sku` 精确契约为 `6/6`（`2 + 4`）。生产 Preview、Apply 和真实页面 Canary 仍必须以执行机实时证据为准。
