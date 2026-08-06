@@ -169,6 +169,25 @@ def _compact_saga_state(state: dict[str, Any]) -> dict[str, Any]:
     return {name: state.get(name) for name in fields}
 
 
+def _classify_missing_listing_outbox(saga: dict[str, Any]) -> dict[str, Any]:
+    task_type = str(saga.get("task_type") or "").strip().lower()
+    state = str(saga.get("state") or "").strip().lower()
+    if task_type in {"listing_draft", "listing_submit"} and state in {
+        "completed",
+        "failed_terminal",
+    }:
+        return {
+            "status": "not_required",
+            "required": False,
+            "reason": "listing_operation_has_no_downstream_outbox_topic",
+        }
+    return {
+        "status": "missing",
+        "required": True,
+        "reason": "outbox_operation_missing",
+    }
+
+
 def _read_saga_phase(
     repository: OperationSagaRepository,
     *,
@@ -184,10 +203,12 @@ def _read_saga_phase(
         mode=mode,
     )
     result: dict[str, Any] = {"operation_key": operation_key}
+    saga: dict[str, Any] | None = None
     try:
+        saga = _compact_saga_state(repository.get_saga_state(operation_key))
         result["saga"] = {
             "status": "found",
-            **_compact_saga_state(repository.get_saga_state(operation_key)),
+            **saga,
         }
     except SagaReconcileRequiredError as exc:
         result["saga"] = {"status": "missing", "reason": str(exc)}
@@ -197,7 +218,10 @@ def _read_saga_phase(
             **repository.get_outbox_state(operation_key),
         }
     except SagaReconcileRequiredError as exc:
-        result["outbox"] = {"status": "missing", "reason": str(exc)}
+        if saga is not None and str(exc) == "outbox_operation_missing":
+            result["outbox"] = _classify_missing_listing_outbox(saga)
+        else:
+            result["outbox"] = {"status": "missing", "required": True, "reason": str(exc)}
     return result
 
 

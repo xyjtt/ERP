@@ -83,6 +83,10 @@ class FakeAuditRepository:
 
 
 class FakeSagaRepository:
+    def __init__(self, *, state: str = "completed", task_type: str = "listing_submit") -> None:
+        self.state = state
+        self.task_type = task_type
+
     def check_contract(self):
         return {"database": "JSReportReplica", "schema": "app", "ready": True}
 
@@ -90,10 +94,10 @@ class FakeSagaRepository:
         return {
             "operation_key": operation_key,
             "run_id": "run-1",
-            "task_type": "listing-submit",
+            "task_type": self.task_type,
             "account_key": "muke_lixiang",
             "business_key": "1688-listing-SKU-1",
-            "state": "completed",
+            "state": self.state,
             "error_code": None,
             "error_summary": None,
             "prepared_at": None,
@@ -219,8 +223,9 @@ class ListingDailyManagerTests(unittest.TestCase):
             self.assertEqual(runtime["items"][0]["phases"]["submit"]["saga"]["status"], "found")
             self.assertEqual(
                 runtime["items"][0]["phases"]["submit"]["outbox"]["status"],
-                "missing",
+                "not_required",
             )
+            self.assertFalse(runtime["items"][0]["phases"]["submit"]["outbox"]["required"])
             task_payload = json.loads(Path(summary["items"][0]["input_path"]).read_text(encoding="utf-8"))
             self.assertEqual(task_payload["shop"]["account_key"], "muke_lixiang")
             self.assertEqual(task_payload["shop"]["shop_name"], "木刻理想")
@@ -240,6 +245,25 @@ class ListingDailyManagerTests(unittest.TestCase):
             self.assertEqual(return_code, 0)
             self.assertEqual(summary["counts"], {"duplicate_existing": 1})
             self.assertEqual(source.read_skus, [])
+
+    def test_pending_downstream_saga_missing_outbox_stays_blocked(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.write_candidate(root, self.payload())
+            source = FakeSourceReader({"SKU-1": [self.source_row()]})
+            return_code, summary = run_daily(
+                self.args(root),
+                source_reader_factory=lambda _args: source,
+                audit_repository_factory=lambda _args: FakeAuditRepository(),
+                saga_repository_factory=lambda _args: FakeSagaRepository(state="jushuitan_pending"),
+            )
+
+            self.assertEqual(return_code, 0)
+            runtime = json.loads(Path(summary["runtime_artifact_path"]).read_text(encoding="utf-8"))
+            outbox = runtime["items"][0]["phases"]["submit"]["outbox"]
+            self.assertEqual(outbox["status"], "missing")
+            self.assertTrue(outbox["required"])
+            self.assertEqual(outbox["reason"], "outbox_operation_missing")
 
     def test_source_ineligible_is_explicit_not_numeric_zero(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
