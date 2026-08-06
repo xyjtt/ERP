@@ -28,6 +28,7 @@ if str(RPA_ROOT) not in sys.path:
 
 from auto_listing import STATE_DRAFT_PENDING, STATE_DRAFT_PENDING_REVIEW, validate_listing_payload
 from listing_audit import ListingAuditRepository, build_listing_task_record
+from operation_saga import OperationSagaRepository, SagaReconcileRequiredError
 from query_1688_listing_source import (
     DEFAULT_CREDENTIAL_REF,
     DEFAULT_DATABASE,
@@ -38,7 +39,7 @@ from query_1688_listing_source import (
     source_gate_passed,
 )
 from stop_sale_audit import resolve_stop_sale_app_config
-from listing_review import require_unique_existing_draft_id
+from listing_review import build_listing_operation_key, require_unique_existing_draft_id
 
 
 DAILY_TASK_NAME = "YYDD-1688-Listing-Daily"
@@ -144,6 +145,106 @@ def build_source_reader(args: argparse.Namespace) -> ListingSourceReader:
 
 def build_audit_repository(args: argparse.Namespace) -> ListingAuditRepository:
     return ListingAuditRepository(resolve_stop_sale_app_config(args.shared_runtime_root))
+
+
+def build_saga_repository(args: argparse.Namespace) -> OperationSagaRepository:
+    return OperationSagaRepository(resolve_stop_sale_app_config(args.shared_runtime_root))
+
+
+def _compact_saga_state(state: dict[str, Any]) -> dict[str, Any]:
+    fields = (
+        "operation_key",
+        "run_id",
+        "task_type",
+        "account_key",
+        "business_key",
+        "state",
+        "error_code",
+        "error_summary",
+        "prepared_at",
+        "ali1688_finished_at",
+        "finished_at",
+        "updated_at",
+    )
+    return {name: state.get(name) for name in fields}
+
+
+def _read_saga_phase(
+    repository: OperationSagaRepository,
+    *,
+    account_key: str,
+    task_id: str,
+    draft_id: str,
+    mode: str,
+) -> dict[str, Any]:
+    operation_key = build_listing_operation_key(
+        account_key=account_key,
+        task_id=task_id,
+        draft_id=draft_id,
+        mode=mode,
+    )
+    result: dict[str, Any] = {"operation_key": operation_key}
+    try:
+        result["saga"] = {
+            "status": "found",
+            **_compact_saga_state(repository.get_saga_state(operation_key)),
+        }
+    except SagaReconcileRequiredError as exc:
+        result["saga"] = {"status": "missing", "reason": str(exc)}
+    try:
+        result["outbox"] = {
+            "status": "found",
+            **repository.get_outbox_state(operation_key),
+        }
+    except SagaReconcileRequiredError as exc:
+        result["outbox"] = {"status": "missing", "reason": str(exc)}
+    return result
+
+
+def build_listing_runtime_snapshot(
+    *,
+    audit_repository: ListingAuditRepository,
+    saga_repository: OperationSagaRepository,
+    targets: Iterable[dict[str, str]],
+    manager_run_id: str,
+) -> dict[str, Any]:
+    items: list[dict[str, Any]] = []
+    for target in targets:
+        task_id = str(target["task_id"])
+        account_key = str(target["account_key"])
+        draft_id = str(target["draft_id"])
+        idempotency_key = str(target["idempotency_key"])
+        task_row = audit_repository.find_existing_task(
+            task_id=task_id,
+            idempotency_key=idempotency_key,
+        )
+        items.append(
+            {
+                "task_id": task_id,
+                "account_key": account_key,
+                "draft_id": draft_id,
+                "listing_task": task_row,
+                "phases": {
+                    mode: _read_saga_phase(
+                        saga_repository,
+                        account_key=account_key,
+                        task_id=task_id,
+                        draft_id=draft_id,
+                        mode=mode,
+                    )
+                    for mode in ("draft", "submit")
+                },
+            }
+        )
+    return {
+        "artifact_version": "listing_runtime_live_v1",
+        "read_only": True,
+        "manager_run_id": manager_run_id,
+        "observed_at": datetime.now().astimezone().isoformat(),
+        "database": "JSReportReplica",
+        "schema": "app",
+        "items": items,
+    }
 
 
 def build_task_command(
@@ -258,6 +359,7 @@ def run_daily(
     *,
     source_reader_factory: Callable[[argparse.Namespace], Any] = build_source_reader,
     audit_repository_factory: Callable[[argparse.Namespace], Any] = build_audit_repository,
+    saga_repository_factory: Callable[[argparse.Namespace], Any] = build_saga_repository,
     command_runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
 ) -> tuple[int, dict[str, Any]]:
     if args.mode == "execute" and not args.yes:
@@ -294,15 +396,24 @@ def run_daily(
 
     seen_task_ids: set[str] = set()
     seen_idempotency_keys: set[str] = set()
+    runtime_targets: list[dict[str, str]] = []
+    saga_repository: OperationSagaRepository | None = None
+    audit_repository: ListingAuditRepository | None = None
     infrastructure_error: Exception | None = None
     return_code = 1
     try:
         candidates = discover_candidate_files(Path(args.candidate_root).resolve())[: args.max_items]
         repository = audit_repository_factory(args)
+        audit_repository = repository
         contract = repository.check_contract()
         summary["audit_contract"] = contract
         if not contract.get("ready"):
             raise RuntimeError("listing audit database contract is not ready")
+        saga_repository = saga_repository_factory(args)
+        saga_contract = saga_repository.check_contract()
+        summary["saga_contract"] = saga_contract
+        if not saga_contract.get("ready"):
+            raise RuntimeError("listing Saga database contract is not ready")
         with source_reader_factory(args) as source_reader:
             for index, candidate_path in enumerate(candidates, start=1):
                 item = _item_result(candidate_path)
@@ -331,6 +442,14 @@ def run_daily(
                         continue
                     seen_task_ids.add(task_id)
                     seen_idempotency_keys.add(idempotency_key)
+                    runtime_targets.append(
+                        {
+                            "task_id": task_id,
+                            "account_key": item["account_key"],
+                            "draft_id": draft_id,
+                            "idempotency_key": idempotency_key,
+                        }
+                    )
 
                     if args.mode == "preview":
                         existing = repository.find_existing_task(
@@ -447,6 +566,22 @@ def run_daily(
     except Exception as exc:
         infrastructure_error = exc
     finally:
+        if infrastructure_error is None and audit_repository is not None and saga_repository is not None:
+            try:
+                runtime_snapshot = build_listing_runtime_snapshot(
+                    audit_repository=audit_repository,
+                    saga_repository=saga_repository,
+                    targets=runtime_targets,
+                    manager_run_id=manager_run_id,
+                )
+                runtime_artifact = manager_dir / "listing_runtime.live.json"
+                latest_runtime_artifact = output_root / "latest.runtime.live.json"
+                _write_json(runtime_artifact, runtime_snapshot)
+                _write_json(latest_runtime_artifact, runtime_snapshot)
+                summary["runtime_artifact_path"] = str(runtime_artifact)
+                summary["runtime_artifact_status"] = "refreshed"
+            except Exception as exc:
+                infrastructure_error = exc
         if infrastructure_error is not None:
             summary["status"] = "infrastructure_failed"
             summary["error_type"] = type(infrastructure_error).__name__

@@ -104,6 +104,8 @@ submit 点击前必须重新应用契约内全部非持久字段，并从当前 
 
 核对两个任务的 Action、Principal、IgnoreNew、触发时间、账号、`LastTaskResult` 和 `latest.summary.json`。受控等价触发统一使用 `-Action start`；脚本会根据 Principal 选择 S4U 或 Interactive 兼容路径。不得绕过脚本直接重复启动业务任务。验收必须包含 launcher/worker 任务历史、scheduled log、Saga、Offer/业务库和无第二草稿证明；安装不等于业务验收。
 
+每次 Daily 运行还会在 `logs/listing_daily/scheduler/latest.runtime.live.json` 写入只读 `listing_runtime_live_v1` 快照。快照按现有 `draft_id` 分别计算 `listing-draft` 和 `listing-submit` operation key，读取 `app.ali1688_operation_saga` 与对应 outbox，并同时保留 `app.ali1688_listing_task` 当前行。Saga/outbox 缺行标记为 `missing`；Credential Manager、数据库连接或契约读取异常必须使本次调度 `infrastructure_failed`，不得将缺失证据解释为成功。
+
 ## 8. 风险与未验证项
 
 - 本轮 launcher 修复已部署并通过执行机 668 项 unittest、compileall、JSON、PowerShell parser 和 diff-check；本轮日度验证明确命中 `duplicate_existing`，未对唯一草稿执行新的保存、审批或 submit。Submit Saga/Offer 仍以既有 accepted reconciliation 与 fresh 只读审计为业务证据。

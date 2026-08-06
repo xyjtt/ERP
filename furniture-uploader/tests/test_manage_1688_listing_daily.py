@@ -17,6 +17,7 @@ if str(RPA_ROOT) not in sys.path:
     sys.path.insert(0, str(RPA_ROOT))
 
 from auto_listing import STATE_DRAFT_PENDING_REVIEW  # noqa: E402
+from operation_saga import SagaReconcileRequiredError  # noqa: E402
 from manage_1688_listing_daily import (  # noqa: E402
     DAILY_TASK_NAME,
     build_argument_parser,
@@ -81,6 +82,31 @@ class FakeAuditRepository:
         }
 
 
+class FakeSagaRepository:
+    def check_contract(self):
+        return {"database": "JSReportReplica", "schema": "app", "ready": True}
+
+    def get_saga_state(self, operation_key: str):
+        return {
+            "operation_key": operation_key,
+            "run_id": "run-1",
+            "task_type": "listing-submit",
+            "account_key": "muke_lixiang",
+            "business_key": "1688-listing-SKU-1",
+            "state": "completed",
+            "error_code": None,
+            "error_summary": None,
+            "prepared_at": None,
+            "ali1688_finished_at": "2026-08-06T00:00:00+08:00",
+            "finished_at": "2026-08-06T00:00:00+08:00",
+            "updated_at": "2026-08-06T00:00:00+08:00",
+        }
+
+    def get_outbox_state(self, operation_key: str):
+        del operation_key
+        raise SagaReconcileRequiredError("outbox_operation_missing")
+
+
 class ListingDailyManagerTests(unittest.TestCase):
     def payload(self, sku: str = "SKU-1") -> dict:
         payload = json.loads(
@@ -134,6 +160,10 @@ class ListingDailyManagerTests(unittest.TestCase):
             ]
         )
 
+    def run_manager(self, args, **kwargs):
+        kwargs.setdefault("saga_repository_factory", lambda _args: FakeSagaRepository())
+        return run_daily(args, **kwargs)
+
     def write_candidate(self, root: Path, payload: dict, name: str = "candidate.json") -> Path:
         inbox = root / "inbox"
         inbox.mkdir(parents=True, exist_ok=True)
@@ -170,7 +200,7 @@ class ListingDailyManagerTests(unittest.TestCase):
             def forbidden_runner(*_args, **_kwargs):
                 self.fail("preview must not run a child browser task")
 
-            return_code, summary = run_daily(
+            return_code, summary = self.run_manager(
                 self.args(root),
                 source_reader_factory=lambda _args: source,
                 audit_repository_factory=lambda _args: FakeAuditRepository(),
@@ -181,6 +211,16 @@ class ListingDailyManagerTests(unittest.TestCase):
             self.assertEqual(summary["status"], "preview_ready")
             self.assertEqual(summary["counts"], {"preview_ready": 1})
             self.assertFalse(summary["auto_submit"])
+            self.assertEqual(summary["runtime_artifact_status"], "refreshed")
+            runtime = json.loads(
+                (Path(summary["runtime_artifact_path"])).read_text(encoding="utf-8")
+            )
+            self.assertTrue(runtime["read_only"])
+            self.assertEqual(runtime["items"][0]["phases"]["submit"]["saga"]["status"], "found")
+            self.assertEqual(
+                runtime["items"][0]["phases"]["submit"]["outbox"]["status"],
+                "missing",
+            )
             task_payload = json.loads(Path(summary["items"][0]["input_path"]).read_text(encoding="utf-8"))
             self.assertEqual(task_payload["shop"]["account_key"], "muke_lixiang")
             self.assertEqual(task_payload["shop"]["shop_name"], "木刻理想")
@@ -191,7 +231,7 @@ class ListingDailyManagerTests(unittest.TestCase):
             payload = self.payload()
             self.write_candidate(root, payload)
             source = FakeSourceReader({"SKU-1": [self.source_row()]})
-            return_code, summary = run_daily(
+            return_code, summary = self.run_manager(
                 self.args(root),
                 source_reader_factory=lambda _args: source,
                 audit_repository_factory=lambda _args: FakeAuditRepository({payload["task_id"]}),
@@ -206,7 +246,7 @@ class ListingDailyManagerTests(unittest.TestCase):
             root = Path(temp_dir)
             self.write_candidate(root, self.payload())
             source = FakeSourceReader({"SKU-1": [self.source_row(eligible=False)]})
-            return_code, summary = run_daily(
+            return_code, summary = self.run_manager(
                 self.args(root),
                 source_reader_factory=lambda _args: source,
                 audit_repository_factory=lambda _args: FakeAuditRepository(),
@@ -221,7 +261,7 @@ class ListingDailyManagerTests(unittest.TestCase):
             payload = self.payload()
             payload["workflow"].pop("pending_draft_id")
             self.write_candidate(root, payload)
-            return_code, summary = run_daily(
+            return_code, summary = self.run_manager(
                 self.args(root),
                 source_reader_factory=lambda _args: FakeSourceReader({}),
                 audit_repository_factory=lambda _args: FakeAuditRepository(),
@@ -236,7 +276,7 @@ class ListingDailyManagerTests(unittest.TestCase):
             payload = self.payload()
             repository = FakeAuditRepository({payload["task_id"]})
             self.write_candidate(root, payload)
-            return_code, summary = run_daily(
+            return_code, summary = self.run_manager(
                 self.args(root, mode="execute"),
                 source_reader_factory=lambda _args: FakeSourceReader(
                     {"SKU-1": [self.source_row()]}
@@ -275,7 +315,7 @@ class ListingDailyManagerTests(unittest.TestCase):
                 output_path.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
                 return subprocess.CompletedProcess(command, 0, "ok", "")
 
-            return_code, summary = run_daily(
+            return_code, summary = self.run_manager(
                 self.args(root, mode="execute"),
                 source_reader_factory=lambda _args: source,
                 audit_repository_factory=lambda _args: FakeAuditRepository(),
@@ -300,7 +340,7 @@ class ListingDailyManagerTests(unittest.TestCase):
                 output_path.write_text("not json", encoding="utf-8")
                 return subprocess.CompletedProcess(command, 0, "ok", "")
 
-            return_code, summary = run_daily(
+            return_code, summary = self.run_manager(
                 self.args(root, mode="execute"),
                 source_reader_factory=lambda _args: source,
                 audit_repository_factory=lambda _args: FakeAuditRepository(),
@@ -331,7 +371,7 @@ class ListingDailyManagerTests(unittest.TestCase):
             payload = self.payload()
             payload["shop"]["account_key"] = "other_account"
             self.write_candidate(root, payload)
-            return_code, summary = run_daily(
+            return_code, summary = self.run_manager(
                 self.args(root),
                 source_reader_factory=lambda _args: FakeSourceReader({}),
                 audit_repository_factory=lambda _args: FakeAuditRepository(),
@@ -350,7 +390,7 @@ class ListingDailyManagerTests(unittest.TestCase):
                 def check_contract(self):
                     raise RuntimeError("audit unavailable")
 
-            return_code, summary = run_daily(
+            return_code, summary = self.run_manager(
                 self.args(root),
                 source_reader_factory=lambda _args: self.fail("source must not open"),
                 audit_repository_factory=lambda _args: BrokenRepository(),
