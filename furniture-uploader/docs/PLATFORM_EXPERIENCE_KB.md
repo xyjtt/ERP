@@ -1,5 +1,12 @@
 # Platform Experience Knowledge Base
 
+## 2026-08-06 S4U Browser Runtime Findings
+
+- Edge 是否能运行不能用 `explorer.exe` 判断。执行机 `Administrator/S4U` Worker 已在 Session 0 启动独立 Profile Edge、renderer 和 CDP，并完成真实爬虫任务。
+- Windows Credential Manager 也不能仅凭 SSH 的 `winerror=1312` 判定不可用；同一用户的 Task Scheduler S4U token 已实测可读取三个 Listing 正式引用。SSH 网络登录和 S4U 批处理登录是不同安全上下文。
+- Listing 原阻塞来自 Launcher 的代码门禁：它只接受 SessionId > 0 并强制 RunEx。浏览器会话 helper 本身复用 Crawler 的 S4U 兼容实现。
+- S4U 不提供可见桌面，但 CDP/Selenium 自动化不要求可见窗口；验证码、身份错配和未知风控仍必须失败关闭。
+
 ## 2026-08-05 Interrupted Manager and Jushuitan Recovery Findings
 
 - Manager 进程退出和计划任务变为 Ready 都不是日批收口证据。必须同时核对管理器锁、锁 PID、Manager run id、child run 范围、数据库终态和 child Summary。

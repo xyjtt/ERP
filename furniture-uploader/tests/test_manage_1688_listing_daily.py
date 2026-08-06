@@ -387,8 +387,13 @@ class ListingDailyTaskScriptContractTests(unittest.TestCase):
         self.assertIn("working_directory = [string]$_.WorkingDirectory", script)
         self.assertIn('New-Object -ComObject "Schedule.Service"', script)
         self.assertIn("$registeredTask.RunEx($null, 4, $session, $null)", script)
+        self.assertIn("-LogonType S4U", script)
+        self.assertIn('if ($logonType -eq "S4U")', script)
+        self.assertIn("Start-ScheduledTask -TaskName $TaskName", script)
+        self.assertIn('launch_mode = "s4u"', script)
+        self.assertIn('launch_mode = "interactive_runex"', script)
         self.assertIn('-UserId "SYSTEM" -LogonType ServiceAccount', script)
-        self.assertNotIn("Start-ScheduledTask -TaskName $TaskName", script)
+        self.assertNotIn("$launcherTrigger = New-ScheduledTaskTrigger", script)
         self.assertNotIn('"--mode", "submit"', script)
 
 

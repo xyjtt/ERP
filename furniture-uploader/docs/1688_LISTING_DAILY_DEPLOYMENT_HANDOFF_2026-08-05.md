@@ -2,6 +2,8 @@
 
 更新时间：2026-08-06
 
+> 2026-08-06 S4U 修订：正式 Daily 使用 `Administrator/S4U/Highest`，不再要求 Administrator 保持 explorer 会话。无日触发的 SYSTEM Launcher 仅作为按需 fallback：对 S4U Daily 使用 `Start-ScheduledTask`；旧 Interactive 任务仅作为兼容路径继续使用 `RunEx(session_id)`。
+
 ## 1. 交付边界
 
 - 开发工作树：`D:\script_files\ERP_listing_production_closeout_20260804\furniture-uploader`
@@ -98,9 +100,9 @@ submit 点击前必须重新应用契约内全部非持久字段，并从当前 
 & .\scripts\manage_1688_listing_daily_task.ps1 -Action status
 ```
 
-安装会保留 `YYDD-1688-Listing-Daily` 的 Interactive/Highest draft-only 任务，并额外注册同一 08:00 的 `YYDD-1688-Listing-Daily-Launcher`（SYSTEM）。launcher 只负责解析唯一活跃的 `Administrator` 会话并用 `Schedule.Service.RunEx($null, 4, session_id, $null)` 启动前者；它不执行 Python、浏览器或 submit。
+安装会注册 `YYDD-1688-Listing-Daily` 的 Administrator/S4U/Highest draft-only 日任务，并额外注册没有日触发的 `YYDD-1688-Listing-Daily-Launcher`（SYSTEM）作为按需 fallback。Launcher 只启动正式 Daily：S4U 任务走 `Start-ScheduledTask`；历史 Interactive 任务才解析唯一 Administrator 会话并使用 `Schedule.Service.RunEx($null, 4, session_id, $null)`。Launcher 不直接执行 Python、浏览器或 submit。
 
-核对两个任务的 Action、Principal、IgnoreNew、触发时间、账号、`LastTaskResult` 和 `latest.summary.json`。受控等价触发使用 `-Action start`（可在已确认会话时传 `-SessionId 3`），不得再使用普通 `Start-ScheduledTask`。本轮执行机已在 fresh lease/process gate 后部署 `b8c55de`，注册 launcher，并完成一次 `-Action start -SessionId 3`：worker 任务历史为成功 0、scheduled log 为 `20260806_131346.log`、summary 为 `duplicate_existing=1`，没有新 execution、草稿或 submit。launcher 已有注册事件但还没有自然 08:00 运行历史；下一次 08:00 仍需单独核对。验收还必须包含 launcher/worker 任务历史、scheduled log、Saga、Offer/业务库和无第二草稿证明；安装不等于业务验收。
+核对两个任务的 Action、Principal、IgnoreNew、触发时间、账号、`LastTaskResult` 和 `latest.summary.json`。受控等价触发统一使用 `-Action start`；脚本会根据 Principal 选择 S4U 或 Interactive 兼容路径。不得绕过脚本直接重复启动业务任务。验收必须包含 launcher/worker 任务历史、scheduled log、Saga、Offer/业务库和无第二草稿证明；安装不等于业务验收。
 
 ## 8. 风险与未验证项
 

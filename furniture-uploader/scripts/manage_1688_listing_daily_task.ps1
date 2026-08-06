@@ -145,7 +145,7 @@ function Resolve-InteractiveSessionId {
     return [int]$candidateIds[0]
 }
 
-function Invoke-ListingTaskInInteractiveSession {
+function Invoke-ListingTask {
     $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
     if ($null -eq $task) {
         throw "Formal listing task was not found: $TaskName"
@@ -155,13 +155,36 @@ function Invoke-ListingTaskInInteractiveSession {
             status = "already_running"
             task_name = $TaskName
             session_id = $null
-            run_ex_flags = 4
+            launch_mode = "already_running"
             task_state = [string]$task.State
         }
     }
+    $logonType = [string]$task.Principal.LogonType
+    $before = Get-ScheduledTaskInfo -TaskName $TaskName
+    if ($logonType -eq "S4U") {
+        Start-ScheduledTask -TaskName $TaskName
+        Start-Sleep -Milliseconds 500
+        $after = Get-ScheduledTaskInfo -TaskName $TaskName
+        $current = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+        $observed = ([string]$current.State -eq "Running") -or ($after.LastRunTime -gt $before.LastRunTime)
+        if (-not $observed) {
+            throw "Start-ScheduledTask did not produce an observable S4U run for $TaskName."
+        }
+        return [ordered]@{
+            status = "started"
+            task_name = $TaskName
+            session_id = 0
+            launch_mode = "s4u"
+            task_state = [string]$current.State
+            last_run_time = $after.LastRunTime
+            last_task_result = $after.LastTaskResult
+        }
+    }
+    if ($logonType -ne "Interactive") {
+        throw "Unsupported listing task logon type: $logonType"
+    }
     $principalUserId = [string]$task.Principal.UserId
     $session = Resolve-InteractiveSessionId -RequiredUserId $principalUserId -RequestedSessionId $SessionId
-    $before = Get-ScheduledTaskInfo -TaskName $TaskName
     $service = New-Object -ComObject "Schedule.Service"
     $service.Connect()
     $folder = $service.GetFolder("\")
@@ -181,6 +204,7 @@ function Invoke-ListingTaskInInteractiveSession {
         status = "started"
         task_name = $TaskName
         session_id = $session
+        launch_mode = "interactive_runex"
         run_ex_flags = 4
         task_state = [string]$current.State
         last_run_time = $after.LastRunTime
@@ -271,7 +295,7 @@ switch ($Action) {
             -RestartInterval (New-TimeSpan -Minutes 15)
         $principal = New-ScheduledTaskPrincipal `
             -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) `
-            -LogonType Interactive `
+            -LogonType S4U `
             -RunLevel Highest
         $task = New-ScheduledTask `
             -Action $scheduledAction `
@@ -299,13 +323,11 @@ switch ($Action) {
             -Execute "PowerShell.exe" `
             -Argument $launcherArguments `
             -WorkingDirectory $ProjectRoot
-        $launcherTrigger = New-ScheduledTaskTrigger -Daily -At $DailyAt
         $launcherTask = New-ScheduledTask `
             -Action $launcherAction `
-            -Trigger $launcherTrigger `
             -Settings $settings `
             -Principal (New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest) `
-            -Description "Binds the 1688 listing task to the active Administrator session via Schedule.Service RunEx"
+            -Description "On-demand fallback for the guarded Administrator S4U listing task"
         Register-ScheduledTask -TaskName $LauncherTaskName -InputObject $launcherTask -Force | Out-Null
         Get-ListingTaskStatus | ConvertTo-Json -Depth 10
     }
@@ -333,10 +355,10 @@ switch ($Action) {
         Get-ListingTaskStatus | ConvertTo-Json -Depth 10
     }
     "start" {
-        Invoke-ListingTaskInInteractiveSession | ConvertTo-Json -Depth 10
+        Invoke-ListingTask | ConvertTo-Json -Depth 10
     }
     "launch" {
-        Invoke-ListingTaskInInteractiveSession | ConvertTo-Json -Depth 10
+        Invoke-ListingTask | ConvertTo-Json -Depth 10
     }
     "stop" {
         Stop-ScheduledTask -TaskName $TaskName

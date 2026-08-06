@@ -1,5 +1,11 @@
 # Project Evolution
 
+## 2026-08-06 Listing Scheduling Moves to S4U
+
+- 上架日度从“必须保留 Administrator explorer 会话，再由 SYSTEM Launcher 调用 RunEx”演进为“Administrator S4U 任务在 Session 0 直接运行”。
+- 无日触发的按需 Launcher 按正式任务 Principal 分流：S4U 使用 `Start-ScheduledTask`；历史 Interactive 安装仍使用经过校验的单一 session `RunEx`，未知 LogonType 失败关闭。只有 Daily 持有 08:00 触发，避免两任务先后重复运行。
+- 该变化只移除桌面依赖，不放宽账号租约、Credential Manager、身份、唯一草稿、重复任务、审批和 submit 门禁。
+
 ## 2026-08-05 Interrupted Stop-Sale Recovery Becomes Evidence-Driven
 
 - 中断日批不再通过人工删除 Manager 锁恢复。恢复工具必须证明锁归属、owner PID 已死亡、child run 集合完整且全部终态，并采用“先 Summary、后二次锁校验、最后释放”的顺序。

@@ -1,5 +1,12 @@
 # Project Memory
 
+## 2026-08-06 Managed Update (Listing S4U Daily Runtime)
+
+- 正式 Crawler Worker 已在执行机证明 `Administrator/S4U/Highest` 可于 Session 0 启动真实 Edge/CDP；Listing 浏览器链路复用相同的账号 Profile、`ensure_1688_authenticated_session`、租约与 CDP 绑定，不依赖可见桌面。
+- Listing Daily 改为 `Administrator/S4U/Highest`。SYSTEM Launcher 是无日触发的按需 fallback：对 S4U 任务使用 `Start-ScheduledTask`，仅对历史 Interactive 任务保留 `Schedule.Service.RunEx(session_id)` 兼容路径，避免 08:00 重复启动。
+- 执行机 S4U 探针只输出配置布尔值，已验证 `app-writer`、`listing-source`、`muke_lixiang` 三个 Credential Manager 引用可读，且账号 Profile 存在；未读取或记录秘密值，也未启动 9306。
+- 安全边界不变：清除 `ENABLE_1688_LISTING_SUBMIT`、`MultipleInstances IgnoreNew`、账号租约、任务 claim、唯一 draft/Offer 幂等门禁继续生效。
+
 ## 2026-08-05 Managed Update (Interrupted Daily Manager Recovery)
 
 - 安全复核补强：Manager 锁释放改为 Windows 独占句柄内复核 cycle/run/token 指纹并标记删除；恢复清单必须与批准的 52 missing + 7 technical 四字段身份集合和双 SHA-256 完全一致，否则只产诊断。

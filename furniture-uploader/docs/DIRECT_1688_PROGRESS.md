@@ -1,5 +1,11 @@
 # DIRECT 1688 Progress
 
+## 2026-08-06 Managed Update (Listing No Longer Requires Interactive Desktop)
+
+- 根因已定位为 Listing 计划任务脚本强制 `Interactive + RunEx`，不是 Selenium、Edge、Credential Manager 或账号 Profile 的底层限制。
+- 执行机正式 Crawler 现状证明 `Administrator/S4U` 在 Session 0 可运行 Python 和真实 Edge；独立 Listing S4U 探针进一步验证三个正式 Credential Manager 引用均可读。
+- Listing Daily 已改为 S4U；无日触发的按需 Launcher 可直接启动 S4U 正式任务，并保留旧 Interactive 兼容分支。任务仍为 draft-only，已有 `offer_written_back` 候选只返回 `duplicate_existing`，不得再次保存或提交。
+
 ## 2026-08-05 Managed Update (Stop-Sale Recovery Code Complete)
 
 - 中断日批 Manager 现在有正式 fail-closed 收口入口：校验锁归属、死 PID、child run 范围和终态后，先写 Summary，再二次校验锁快照，最后释放锁。
