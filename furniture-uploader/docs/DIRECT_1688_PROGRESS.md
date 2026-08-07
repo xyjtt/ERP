@@ -381,3 +381,9 @@
 - The sync tool fails closed unless external accounts, task roster, member/profile identity, source-store Preview, and the checked-in blocker policy all agree.
 - `pingcan`, `pingcan_rpa`, and `xinbaiguang_shanzhu` remain excluded for explicit identity/Jushuitan gaps. No Jushuitan name was inferred.
 - This is deployment-ready configuration, not full-shop production acceptance; all 17 configured accounts were `waiting_auth` in the source snapshot.
+
+## 2026-08-07 Executor Marker Race Fix
+
+- The first executor closeout attempt reached the updated code but its `747`-case Python regression had one Windows-only `PermissionError` while the saved-draft launcher replaced `.launcher.json`.
+- The wrapper now replaces an existing marker with same-volume `System.IO.File.Replace` instead of `Move-Item -Force`. Focused regression is `3/3`; a 12-run stress loop is `12/12`.
+- Deployment was rolled back by the guarded script after the failed test. The next deployment must target `eb69091` plus this fix and repeat the executor full regression before tasks are re-enabled.

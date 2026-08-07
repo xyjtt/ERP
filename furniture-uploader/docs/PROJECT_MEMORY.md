@@ -427,3 +427,9 @@
 - `scripts/sync_1688_store_accounts_from_roster.py` 默认 dry-run，并校验 accounts revision/hash、20 家集合、身份唯一性和固定 blocker policy；不猜测别名或聚水潭店铺名。
 - `pingcan`/`pingcan_rpa` 因 member/shop/source 身份冲突保持未配置；`xinbaiguang_shanzhu` 因缺少权威 `jushuitan_store_name` 保持未配置。三者继续由映射门禁 fail closed。
 - 本次只完成独立分支配置和测试，未启动浏览器或生产任务。快照中 17 家均为 `waiting_auth`，部署后仍需逐店 preflight/RPA 登录验收。
+
+## 2026-08-07 Saved-Draft Inspector Marker Atomicity
+
+- Windows 执行机回归曾在 `test_running_marker_exists_before_blocking_inspector_returns` 中观察到 marker 更新期间的 `PermissionError`。原因是 PowerShell `Move-Item -Force` 替换目标文件时存在读写竞争窗口。
+- Launcher 现在使用同卷临时文件加 `System.IO.File.Replace`（带短生命周期备份）更新已有 marker，首次写入使用 `File.Move`；这保持了 running/terminal marker 的可读性，不改变 Draft/Offer 业务幂等规则。
+- 聚焦 wrapper 回归 `3/3`，12 次连续 stress `12/12`；执行机上一轮 `747` 回归的唯一错误已定位为该竞态，修复后需重新部署并完成全量执行机回归。

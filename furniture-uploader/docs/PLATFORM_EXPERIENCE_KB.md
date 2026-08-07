@@ -313,3 +313,9 @@
 - `task.shop_name`、1688 源表店铺名和聚水潭店铺名是三个不同字段。前两者可以通过 authoritative roster + 只读源表 Preview 验证；聚水潭店铺名不存在权威值时必须缺失，不能由前两者改写或猜测。
 - 两个 `account_key` 共用 member/shop/source 身份时不能按 Profile 名或历史使用习惯自动选择 owner。`pingcan`/`pingcan_rpa` 因此保持 fail closed。
 - Profile 文件存在只证明配置路径可用，不证明登录有效。把映射加入配置后仍需逐店 preflight、RPA 登录以及 member/store 双重核验。
+
+## 2026-08-07 Windows Marker 替换竞态
+
+- PowerShell `Move-Item -Force` 更新 inspector 的 `.launcher.json` 时，读进程可能在替换窗口收到 `PermissionError`，不能把它误判为浏览器或 1688 业务失败。
+- 生产 launcher 使用同卷临时文件和 `System.IO.File.Replace` 更新已有 marker，首次创建才使用 `File.Move`；读者始终看到旧的完整 JSON 或新的完整 JSON。
+- 该修复必须同时通过 wrapper 回归、执行机全量回归和真实页面证据；测试通过本身不代表 Draft/Offer 验收。

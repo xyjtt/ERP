@@ -186,3 +186,9 @@
 - ERP store mappings are no longer extended from remembered aliases. A deterministic dry-run compares external accounts, the task roster, member/profile identity, and the source-store Preview before producing a binding.
 - The configuration expands only when each identity is unique. Shared member/source identities and missing Jushuitan names are explicit blockers, not fallback guesses.
 - SKU Replace inherits the same mapping set from Stop-Sale, preventing the two flows from drifting to different account ownership.
+
+## 2026-08-07 Windows Launcher Marker Atomicity
+
+- A production-style executor regression exposed a read/write race in the saved-draft inspector marker: `Move-Item -Force` could leave a reader with `PermissionError` during replacement.
+- Marker updates now use same-volume `System.IO.File.Replace` with a temporary backup when a marker already exists, preserving the existing fail-closed launcher and idempotent Draft/Offer contract.
+- Focused regression and repeated stress validation pass; the fix is not production-accepted until the guarded executor deployment and post-deploy tests pass.

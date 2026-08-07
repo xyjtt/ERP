@@ -106,7 +106,18 @@ function Write-LauncherMarker([string]$Status) {
         $renderedMarker + [Environment]::NewLine,
         (New-Object System.Text.UTF8Encoding($false))
     )
-    Move-Item -LiteralPath $temporaryMarkerPath -Destination $markerPath -Force
+    if ([System.IO.File]::Exists($markerPath)) {
+        $backupMarkerPath = "$markerPath.$PID.bak"
+        [System.IO.File]::Replace(
+            $temporaryMarkerPath,
+            $markerPath,
+            $backupMarkerPath,
+            $true
+        )
+        [System.IO.File]::Delete($backupMarkerPath)
+    } else {
+        [System.IO.File]::Move($temporaryMarkerPath, $markerPath)
+    }
 }
 
 Write-LauncherMarker "running"
