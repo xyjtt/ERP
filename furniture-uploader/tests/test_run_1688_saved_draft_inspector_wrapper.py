@@ -17,6 +17,64 @@ WRAPPER = PROJECT_ROOT / "scripts" / "run_1688_saved_draft_inspector.ps1"
 
 @unittest.skipUnless(os.name == "nt", "PowerShell launcher is Windows-only")
 class SavedDraftInspectorWrapperTests(unittest.TestCase):
+    def test_empty_expected_shop_is_omitted_from_python_arguments(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "ERP Root"
+            scripts = root / "scripts"
+            scripts.mkdir(parents=True)
+            runtime_root = Path(temp_dir) / "Runtime Root"
+            runtime_root.mkdir()
+            payload = root / "payload.json"
+            payload.write_text("{}", encoding="utf-8")
+            output = root / "inspection.json"
+            (scripts / "inspect_1688_saved_draft.py").write_text(
+                textwrap.dedent(
+                    """
+                    import json
+                    from pathlib import Path
+                    import sys
+
+                    args = sys.argv[1:]
+                    output = Path(args[args.index("--output") + 1])
+                    output.write_text(json.dumps(args), encoding="utf-8")
+                    """
+                ),
+                encoding="utf-8",
+            )
+            completed = subprocess.run(
+                [
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(WRAPPER),
+                    "-ProjectRoot",
+                    str(root),
+                    "-Payload",
+                    str(payload),
+                    "-Output",
+                    str(output),
+                    "-DraftId",
+                    "draft-1",
+                    "-SharedRuntimeRoot",
+                    str(runtime_root),
+                    "-PythonExe",
+                    sys.executable,
+                ],
+                cwd=PROJECT_ROOT,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=30,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            passed = json.loads(output.read_text(encoding="utf-8"))
+            self.assertNotIn("--expected-shop", passed)
+
     def test_paths_with_drive_backslashes_and_spaces_are_passed_as_arguments(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir) / "ERP Root With Spaces"

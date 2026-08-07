@@ -154,7 +154,6 @@ try {
         "--output", $resolvedOutput,
         "--progress-output", $progressPath,
         "--draft-id", $DraftId,
-        "--expected-shop", $ExpectedShop,
         "--account-key", $AccountKey,
         "--expected-cdp-port", ([string]$ExpectedCdpPort),
         "--shared-runtime-root", $resolvedSharedRuntimeRoot,
@@ -164,6 +163,9 @@ try {
         ),
         "--login-timeout-seconds", ([string]$LoginTimeoutSeconds)
     )
+    if ($ExpectedShop) {
+        $pythonArguments += @("--expected-shop", $ExpectedShop)
+    }
     if ($OpenFromManagement) {
         $pythonArguments += "--open-from-management"
     }
