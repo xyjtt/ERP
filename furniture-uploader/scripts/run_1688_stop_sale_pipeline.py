@@ -55,6 +55,148 @@ class AuditHeartbeatProcessError(RuntimeError):
     pass
 
 
+def load_interrupted_recovery_approval(
+    path: Path,
+    expected_sha256: str,
+    *,
+    input_path: Path,
+    operations: list[SagaOperation],
+    account_key: str,
+) -> dict[str, Any]:
+    if not path.is_file():
+        raise FileNotFoundError(f"Interrupted recovery approval does not exist: {path}")
+    if not re.fullmatch(r"[0-9a-f]{64}", str(expected_sha256 or "")):
+        raise ValueError("--approved-recovery-sha256 must be a lowercase SHA-256 value")
+    raw = path.read_bytes()
+    observed_sha256 = hashlib.sha256(raw).hexdigest()
+    if observed_sha256 != expected_sha256:
+        raise RuntimeError("Interrupted recovery approval SHA-256 does not match")
+    payload = json.loads(raw.decode("utf-8-sig"))
+    if not isinstance(payload, dict) or int(payload.get("version") or 0) != 1:
+        raise RuntimeError("Interrupted recovery approval must be a version 1 object")
+
+    source_run_id = str(payload.get("source_run_id") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", source_run_id):
+        raise RuntimeError("Interrupted recovery source_run_id is invalid")
+    expected_contract = {
+        "task_type": "stop_sale",
+        "account_key": account_key,
+        "expected_saga_state": "failed_terminal",
+        "expected_ali1688_status": "failed",
+        "expected_saga_error_code": "interrupted_executor_process",
+        "expected_item_status": "failed",
+        "expected_item_error_category": "automation_error",
+        "expected_item_error_message_prefix": "interrupted_executor_process:",
+        "expected_outbox_count": 0,
+    }
+    changed = [name for name, value in expected_contract.items() if payload.get(name) != value]
+    if changed:
+        raise RuntimeError(
+            "Interrupted recovery approval contract changed: " + ",".join(changed)
+        )
+
+    input_sha256 = hashlib.sha256(input_path.read_bytes()).hexdigest()
+    if str(payload.get("input_sha256") or "") != input_sha256:
+        raise RuntimeError("Interrupted recovery input SHA-256 does not match")
+    operation_keys = [str(key or "").strip().lower() for key in payload.get("operation_keys") or []]
+    if not operation_keys or len(operation_keys) != len(set(operation_keys)):
+        raise RuntimeError("Interrupted recovery approval operation_keys are empty or duplicated")
+    if any(
+        len(key) != 64 or any(char not in "0123456789abcdef" for char in key)
+        for key in operation_keys
+    ):
+        raise RuntimeError("Interrupted recovery approval contains an invalid operation_key")
+    operation_set = {operation.operation_key for operation in operations}
+    if set(operation_keys) != operation_set or len(operation_keys) != len(operations):
+        raise RuntimeError("Interrupted recovery approval does not match the selected input")
+    if int(payload.get("operation_count") or 0) != len(operation_keys):
+        raise RuntimeError("Interrupted recovery approval operation_count does not match")
+    run_ids = {operation.run_id for operation in operations}
+    recovery_run_id = str(payload.get("recovery_run_id") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", recovery_run_id):
+        raise RuntimeError("Interrupted recovery recovery_run_id is invalid")
+    if len(run_ids) != 1 or recovery_run_id not in run_ids or source_run_id in run_ids:
+        raise RuntimeError("Interrupted recovery requires a new run_id")
+    return {
+        "approval_path": str(path.resolve()),
+        "approval_sha256": observed_sha256,
+        "input_path": str(input_path.resolve()),
+        "input_sha256": input_sha256,
+        "source_run_id": source_run_id,
+        "recovery_run_id": recovery_run_id,
+        "operation_keys": operation_keys,
+        "operation_count": len(operation_keys),
+    }
+
+
+def assert_interrupted_recovery_input_unchanged(
+    recovery_approval: dict[str, Any] | None,
+) -> None:
+    if recovery_approval is None:
+        return
+    input_path = Path(str(recovery_approval.get("input_path") or "")).resolve()
+    expected_sha256 = str(recovery_approval.get("input_sha256") or "")
+    if not input_path.is_file():
+        raise RuntimeError("Interrupted recovery approved input no longer exists")
+    if hashlib.sha256(input_path.read_bytes()).hexdigest() != expected_sha256:
+        raise RuntimeError("Interrupted recovery approved input changed before execution")
+
+
+def validate_interrupted_recovery_arguments(
+    args: argparse.Namespace,
+    *,
+    recovery_requested: bool,
+) -> None:
+    if not recovery_requested:
+        return
+    if args.mode != "execute":
+        raise ValueError("Interrupted recovery approval is execute-only")
+    if args.limit:
+        raise ValueError("Interrupted recovery does not allow --limit")
+    if args.no_shared_lock or str(args.shared_lock_path or "").strip():
+        raise ValueError("Interrupted recovery requires the standard account-scoped shared lock")
+    if not args.skip_login:
+        raise ValueError("Interrupted recovery does not allow the interactive login prompt")
+    if args.no_notify:
+        raise ValueError("Interrupted recovery requires the formal notification path")
+    wait_values = {
+        "--lock-wait-seconds": args.lock_wait_seconds,
+        "--runtime-lease-wait-seconds": args.runtime_lease_wait_seconds,
+        "--crawler-task-wait-seconds": args.crawler_task_wait_seconds,
+        "--jushuitan-lock-wait-seconds": args.jushuitan_lock_wait_seconds,
+    }
+    nonzero_waits = [name for name, value in wait_values.items() if float(value) != 0]
+    if nonzero_waits:
+        raise ValueError(
+            "Interrupted recovery is fail-fast; set wait values to zero: "
+            + ", ".join(nonzero_waits)
+        )
+
+
+def prepare_saga_operations(
+    repository: OperationSagaRepository,
+    operations: list[SagaOperation],
+    runtime_guard: RuntimeLeaseGuard,
+    recovery_approval: dict[str, Any] | None,
+) -> dict[str, str]:
+    fencing = {
+        "owner_token": runtime_guard.owner_token,
+        "account_fencing_token": runtime_guard.account_fencing_token,
+        "browser_slot_key": runtime_guard.browser_slot_key,
+        "browser_slot_fencing_token": runtime_guard.browser_slot_fencing_token,
+    }
+    if recovery_approval is not None:
+        return repository.prepare_interrupted_stop_sale_recovery_many(
+            operations,
+            source_run_id=str(recovery_approval["source_run_id"]),
+            approved_operation_keys=list(recovery_approval["operation_keys"]),
+            approval_sha256=str(recovery_approval["approval_sha256"]),
+            input_sha256=str(recovery_approval["input_sha256"]),
+            **fencing,
+        )
+    return repository.prepare_many(operations, **fencing)
+
+
 def terminate_stage_process_tree(process: subprocess.Popen[Any]) -> None:
     if process.poll() is not None:
         return
@@ -209,6 +351,16 @@ def build_argument_parser() -> argparse.ArgumentParser:
         help="Run the legacy interactive login prompt before opening product management.",
     )
     parser.add_argument("--no-notify", action="store_true")
+    parser.add_argument(
+        "--approved-recovery-file",
+        default="",
+        help="Version 1 exact-scope approval for interrupted failed-terminal recovery.",
+    )
+    parser.add_argument(
+        "--approved-recovery-sha256",
+        default="",
+        help="Lowercase SHA-256 of --approved-recovery-file.",
+    )
     parser.add_argument("--jushuitan-root", default=str(DEFAULT_JUSHUITAN_ROOT))
     parser.add_argument("--shared-runtime-root", default=str(DEFAULT_SHARED_RUNTIME_ROOT))
     parser.add_argument("--shared-lock-path", default="")
@@ -725,6 +877,7 @@ def run_pipeline(
     runtime_guard: RuntimeLeaseGuard | None = None,
     saga_repository: OperationSagaRepository | None = None,
     saga_operations: list[SagaOperation] | None = None,
+    recovery_approval: dict[str, Any] | None = None,
 ) -> int:
     handoff_path = pipeline_dir / f"{run_id}.jushuitan.jsonl"
     summary_path = pipeline_dir / f"{run_id}.summary.json"
@@ -747,6 +900,7 @@ def run_pipeline(
     )
 
     try:
+        assert_interrupted_recovery_input_unchanged(recovery_approval)
         if args.mode == "execute":
             if audit_repository is None:
                 raise RuntimeError("execute mode requires the JSReportReplica stop-sale audit repository")
@@ -785,15 +939,16 @@ def run_pipeline(
                 guard_acquired_here = True
             guard_outcome = "completed"
             try:
-                saga_repository.prepare_many(
+                assert_interrupted_recovery_input_unchanged(recovery_approval)
+                prepare_saga_operations(
+                    saga_repository,
                     saga_operations or [],
-                    owner_token=runtime_guard.owner_token,
-                    account_fencing_token=runtime_guard.account_fencing_token,
-                    browser_slot_key=runtime_guard.browser_slot_key,
-                    browser_slot_fencing_token=runtime_guard.browser_slot_fencing_token,
+                    runtime_guard,
+                    recovery_approval,
                 )
                 command_environment = os.environ.copy()
                 command_environment.update(runtime_guard.environment())
+                assert_interrupted_recovery_input_unchanged(recovery_approval)
                 command_1688 = build_1688_command(args, handoff_path)
                 emit_pipeline_event(
                     run_id,
@@ -950,6 +1105,7 @@ def run_pipeline(
         "error_message": error_message or item_error,
         "summary_path": str(summary_path),
         "notification_sent": False,
+        "targeted_recovery": recovery_approval,
     }
     if args.mode == "execute":
         summary["notification_sent"] = send_pipeline_notification(
@@ -1027,6 +1183,10 @@ def main() -> int:
         raise ValueError("Crawler task wait values must be positive (wait may be zero)")
     if args.mode == "execute" and not args.yes:
         raise ValueError("execute mode requires --yes")
+    recovery_requested = bool(args.approved_recovery_file or args.approved_recovery_sha256)
+    if recovery_requested and not (args.approved_recovery_file and args.approved_recovery_sha256):
+        raise ValueError("Interrupted recovery requires both approval file and SHA-256")
+    validate_interrupted_recovery_arguments(args, recovery_requested=recovery_requested)
     if args.mode == "execute" and not args.no_notify:
         dingtalk_credentials = hydrate_dingtalk_credentials(args.shared_runtime_root)
         if not all(dingtalk_credentials.values()):
@@ -1049,6 +1209,7 @@ def main() -> int:
     runtime_guard: RuntimeLeaseGuard | None = None
     saga_repository: OperationSagaRepository | None = None
     saga_operations: list[SagaOperation] = []
+    recovery_approval: dict[str, Any] | None = None
     if args.mode == "execute":
         try:
             audit_config = resolve_stop_sale_app_config(args.shared_runtime_root)
@@ -1086,6 +1247,14 @@ def main() -> int:
                 account_key,
                 audit_tasks,
             )
+            if recovery_requested:
+                recovery_approval = load_interrupted_recovery_approval(
+                    Path(args.approved_recovery_file).resolve(),
+                    str(args.approved_recovery_sha256),
+                    input_path=Path(args.file).resolve(),
+                    operations=saga_operations,
+                    account_key=account_key,
+                )
             runtime_guard = RuntimeLeaseGuard(
                 RuntimeLeaseRepository(audit_config),
                 binding=binding,
@@ -1153,6 +1322,7 @@ def main() -> int:
                         runtime_guard=runtime_guard,
                         saga_repository=saga_repository,
                         saga_operations=saga_operations,
+                        recovery_approval=recovery_approval,
                     )
                 except BaseException:
                     guard_outcome = "failed"
@@ -1183,6 +1353,7 @@ def main() -> int:
                 runtime_guard=runtime_guard,
                 saga_repository=saga_repository,
                 saga_operations=saga_operations,
+                recovery_approval=recovery_approval,
             )
     except Exception as exc:
         if timeout_error is not None and isinstance(exc, timeout_error) and not pipeline_invoked:

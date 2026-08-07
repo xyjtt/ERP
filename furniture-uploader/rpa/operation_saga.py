@@ -351,6 +351,231 @@ class OperationSagaRepository:
             for operation in operations
         }
 
+    def prepare_interrupted_stop_sale_recovery_many(
+        self,
+        operations: Iterable[SagaOperation],
+        *,
+        source_run_id: str,
+        approved_operation_keys: Iterable[str],
+        approval_sha256: str,
+        input_sha256: str,
+        owner_token: str,
+        account_fencing_token: int,
+        browser_slot_key: str,
+        browser_slot_fencing_token: int,
+    ) -> dict[str, str]:
+        operation_list = list(operations)
+        operation_map = {operation.operation_key: operation for operation in operation_list}
+        approved_keys = sorted(
+            str(key or "").strip().lower() for key in approved_operation_keys
+        )
+        if not operation_list or len(operation_map) != len(operation_list):
+            raise ValueError("Interrupted recovery requires unique Saga operations")
+        if len(approved_keys) != len(set(approved_keys)):
+            raise ValueError("Interrupted recovery approval contains duplicate operation_keys")
+        if set(approved_keys) != set(operation_map):
+            raise ValueError("Interrupted recovery operations do not match the approved scope")
+        if any(
+            len(key) != 64 or any(char not in "0123456789abcdef" for char in key)
+            for key in approved_keys
+        ):
+            raise ValueError("Interrupted recovery requires lowercase SHA-256 operation_keys")
+        if not str(source_run_id or "").strip():
+            raise ValueError("Interrupted recovery requires a source_run_id")
+        recovery_hashes = {
+            "approval_sha256": str(approval_sha256 or "").strip(),
+            "input_sha256": str(input_sha256 or "").strip(),
+        }
+        if any(
+            len(value) != 64 or any(char not in "0123456789abcdef" for char in value)
+            for value in recovery_hashes.values()
+        ):
+            raise ValueError("Interrupted recovery requires lowercase SHA-256 evidence hashes")
+        if account_fencing_token <= 0 or browser_slot_fencing_token <= 0:
+            raise SagaFencingError("saga_requires_positive_fencing_tokens")
+        if not str(owner_token or "").strip() or not str(browser_slot_key or "").strip():
+            raise SagaFencingError("saga_requires_runtime_ownership")
+        if any(operation.task_type != "stop_sale" for operation in operation_list):
+            raise ValueError("Interrupted recovery supports stop_sale operations only")
+        recovery_run_ids = {str(operation.run_id or "").strip() for operation in operation_list}
+        if len(recovery_run_ids) != 1 or source_run_id in recovery_run_ids:
+            raise ValueError("Interrupted recovery requires one new recovery run_id")
+        account_keys = {str(operation.account_key or "").strip() for operation in operation_list}
+        if len(account_keys) != 1 or "" in account_keys:
+            raise ValueError("Interrupted recovery requires one non-empty account_key")
+
+        saga = self._table("ali1688_operation_saga")
+        outbox = self._table("ali1688_operation_outbox")
+        item = self._table("ali1688_stop_sale_item")
+        expected_error_code = "interrupted_executor_process"
+        expected_item_error_category = "automation_error"
+        expected_item_error_prefix = "interrupted_executor_process:"
+        with self._connect(self.config) as connection:
+            cursor = connection.cursor()
+            try:
+                cursor.execute(
+                    "SET XACT_ABORT ON; SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;"
+                )
+                for key in approved_keys:
+                    operation = operation_map[key]
+                    row = cursor.execute(
+                        f"""
+                        SELECT saga_row.run_id, saga_row.task_type, saga_row.account_key,
+                               saga_row.business_key,
+                               saga_row.state, saga_row.ali1688_status,
+                               saga_row.jushuitan_status, saga_row.error_code,
+                               (SELECT COUNT_BIG(1)
+                                  FROM {outbox} AS outbox_row WITH (UPDLOCK, HOLDLOCK)
+                                 WHERE outbox_row.operation_key = saga_row.operation_key),
+                               (SELECT COUNT_BIG(1)
+                                  FROM {item} AS source_item WITH (UPDLOCK, HOLDLOCK)
+                                 WHERE source_item.task_key = saga_row.operation_key
+                                   AND source_item.run_id = ?),
+                               (SELECT COUNT_BIG(1)
+                                  FROM {item} AS source_item WITH (UPDLOCK, HOLDLOCK)
+                                 WHERE source_item.task_key = saga_row.operation_key
+                                   AND source_item.run_id = ?
+                                   AND source_item.offline_status = 'failed'
+                                   AND source_item.error_category = ?
+                                   AND LEFT(source_item.error_message, ?) = ?),
+                               (SELECT COUNT_BIG(1)
+                                  FROM {item} AS successful_item WITH (UPDLOCK, HOLDLOCK)
+                                 WHERE successful_item.task_key = saga_row.operation_key
+                                   AND successful_item.offline_status IN ('success', 'already_offline'))
+                          FROM {saga} AS saga_row WITH (UPDLOCK, HOLDLOCK)
+                         WHERE saga_row.operation_key = ?
+                        """,
+                        (
+                            source_run_id,
+                            source_run_id,
+                            expected_item_error_category,
+                            len(expected_item_error_prefix),
+                            expected_item_error_prefix,
+                            key,
+                        ),
+                    ).fetchone()
+                    if row is None:
+                        raise SagaReconcileRequiredError(
+                            f"interrupted_recovery_saga_missing:{key}"
+                        )
+                    observed = {
+                        "run_id": str(row[0] or ""),
+                        "task_type": str(row[1] or ""),
+                        "account_key": str(row[2] or ""),
+                        "business_key": str(row[3] or ""),
+                        "state": str(row[4] or ""),
+                        "ali1688_status": str(row[5] or ""),
+                        "jushuitan_status": str(row[6] or ""),
+                        "error_code": str(row[7] or ""),
+                        "outbox_count": int(row[8] or 0),
+                        "source_item_count": int(row[9] or 0),
+                        "eligible_source_item_count": int(row[10] or 0),
+                        "successful_item_count": int(row[11] or 0),
+                    }
+                    expected = {
+                        "run_id": source_run_id,
+                        "task_type": "stop_sale",
+                        "account_key": operation.account_key,
+                        "business_key": operation.business_key,
+                        "state": "failed_terminal",
+                        "ali1688_status": "failed",
+                        "jushuitan_status": "",
+                        "error_code": expected_error_code,
+                        "outbox_count": 0,
+                        "source_item_count": 1,
+                        "eligible_source_item_count": 1,
+                        "successful_item_count": 0,
+                    }
+                    changed = [name for name, value in expected.items() if observed[name] != value]
+                    if changed:
+                        raise SagaReconcileRequiredError(
+                            "interrupted_recovery_precondition_changed:"
+                            f"{key}:" + ",".join(changed)
+                        )
+
+                for key in approved_keys:
+                    operation = operation_map[key]
+                    payload = dict(operation.payload)
+                    payload["targeted_recovery_source_run_id"] = source_run_id
+                    payload["targeted_recovery_approval_sha256"] = recovery_hashes[
+                        "approval_sha256"
+                    ]
+                    payload["targeted_recovery_input_sha256"] = recovery_hashes[
+                        "input_sha256"
+                    ]
+                    cursor.execute(
+                        f"""
+                        UPDATE saga_row
+                           SET run_id = ?, state = 'prepared', owner_token_hash = ?,
+                               account_fencing_token = ?, browser_slot_key = ?,
+                               browser_slot_fencing_token = ?, payload_json = ?,
+                               evidence_json = NULL, error_code = NULL,
+                               error_summary = NULL, prepared_at = SYSUTCDATETIME(),
+                               ali1688_status = NULL, jushuitan_status = NULL,
+                               ali1688_finished_at = NULL, finished_at = NULL,
+                               updated_at = SYSUTCDATETIME()
+                          FROM {saga} AS saga_row
+                         WHERE saga_row.operation_key = ?
+                           AND saga_row.run_id = ?
+                           AND saga_row.task_type = 'stop_sale'
+                           AND saga_row.account_key = ?
+                           AND saga_row.state = 'failed_terminal'
+                           AND saga_row.ali1688_status = 'failed'
+                           AND saga_row.jushuitan_status IS NULL
+                           AND saga_row.error_code = ?
+                           AND NOT EXISTS (
+                               SELECT 1 FROM {outbox} AS outbox_row
+                                WHERE outbox_row.operation_key = saga_row.operation_key
+                           )
+                           AND EXISTS (
+                               SELECT 1 FROM {item} AS source_item
+                                WHERE source_item.task_key = saga_row.operation_key
+                                  AND source_item.run_id = ?
+                                  AND source_item.offline_status = 'failed'
+                                  AND source_item.error_category = ?
+                                  AND LEFT(source_item.error_message, ?) = ?
+                           )
+                           AND 1 = (
+                               SELECT COUNT_BIG(1) FROM {item} AS source_item
+                                WHERE source_item.task_key = saga_row.operation_key
+                                  AND source_item.run_id = ?
+                           )
+                           AND NOT EXISTS (
+                               SELECT 1 FROM {item} AS successful_item
+                                WHERE successful_item.task_key = saga_row.operation_key
+                                  AND successful_item.offline_status IN ('success', 'already_offline')
+                           )
+                        """,
+                        (
+                            operation.run_id,
+                            owner_token_hash(owner_token),
+                            account_fencing_token,
+                            browser_slot_key,
+                            browser_slot_fencing_token,
+                            json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str),
+                            key,
+                            source_run_id,
+                            operation.account_key,
+                            expected_error_code,
+                            source_run_id,
+                            expected_item_error_category,
+                            len(expected_item_error_prefix),
+                            expected_item_error_prefix,
+                            source_run_id,
+                        ),
+                    )
+                    if cursor.rowcount != 1:
+                        raise SagaFencingError(
+                            f"interrupted_recovery_compare_and_set_failed:{key}"
+                        )
+                connection.commit()
+            except Exception:
+                rollback = getattr(connection, "rollback", None)
+                if callable(rollback):
+                    rollback()
+                raise
+        return {key: "prepared" for key in approved_keys}
+
     def record_ali1688_result(
         self,
         *,

@@ -422,3 +422,224 @@ class OperationSagaExactClaimTests(unittest.TestCase):
 
         self.assertEqual(connection.commits, 0)
         self.assertEqual(connection.rollbacks, 1)
+
+
+class _InterruptedRecoveryCursor:
+    def __init__(
+        self,
+        *,
+        successful_item_count: int = 0,
+        eligible_source_item_count: int = 1,
+        saga_state: str = "failed_terminal",
+        invalid_key: str = "",
+    ) -> None:
+        self.successful_item_count = successful_item_count
+        self.eligible_source_item_count = eligible_source_item_count
+        self.saga_state = saga_state
+        self.invalid_key = invalid_key
+        self.current_key = ""
+        self.rowcount = -1
+        self.stage = ""
+        self.executed: list[tuple] = []
+
+    def execute(self, sql, params=None):
+        self.executed.append((sql, params))
+        if "SELECT saga_row.run_id" in sql:
+            self.stage = "validate"
+            self.current_key = str(params[-1])
+            self.rowcount = -1
+        elif "UPDATE saga_row" in sql:
+            self.stage = "update"
+            self.rowcount = 1
+        return self
+
+    def fetchone(self):
+        if self.stage != "validate":
+            return None
+        return (
+            "source-run",
+            "stop_sale",
+            "gonglai",
+            "store|product|sku|item",
+            self.saga_state,
+            "failed",
+            None,
+            "interrupted_executor_process",
+            0,
+            1,
+            self.eligible_source_item_count,
+            1 if self.current_key == self.invalid_key else self.successful_item_count,
+        )
+
+
+class OperationSagaInterruptedRecoveryTests(unittest.TestCase):
+    def operation(self, key: str = "a" * 64) -> SagaOperation:
+        return SagaOperation(
+            operation_key=key,
+            run_id="recovery-run",
+            task_type="stop_sale",
+            account_key="gonglai",
+            business_key="store|product|sku|item",
+            payload={"operation_key": key},
+        )
+
+    def test_exact_interrupted_recovery_prepares_only_after_all_gates_match(self) -> None:
+        cursor = _InterruptedRecoveryCursor()
+        connection = _FakeConnection(cursor)  # type: ignore[arg-type]
+        repository = OperationSagaRepository(_FakeConfig(), connect=lambda _config: connection)
+        operation = self.operation()
+
+        result = repository.prepare_interrupted_stop_sale_recovery_many(
+            [operation],
+            source_run_id="source-run",
+            approved_operation_keys=[operation.operation_key],
+            approval_sha256="c" * 64,
+            input_sha256="d" * 64,
+            owner_token="owner-1",
+            account_fencing_token=11,
+            browser_slot_key="host:1",
+            browser_slot_fencing_token=22,
+        )
+
+        self.assertEqual(result, {operation.operation_key: "prepared"})
+        self.assertEqual(connection.commits, 1)
+        self.assertEqual(connection.rollbacks, 0)
+        updates = [entry for entry in cursor.executed if "UPDATE saga_row" in entry[0]]
+        self.assertEqual(len(updates), 1)
+        self.assertIn("NOT EXISTS", updates[0][0])
+        self.assertIn("offline_status IN ('success', 'already_offline')", updates[0][0])
+        self.assertIn("LEFT(source_item.error_message", updates[0][0])
+        self.assertIn("targeted_recovery_source_run_id", str(updates[0][1]))
+        self.assertIn("targeted_recovery_approval_sha256", str(updates[0][1]))
+
+    def test_successful_item_evidence_blocks_entire_recovery(self) -> None:
+        cursor = _InterruptedRecoveryCursor(successful_item_count=1)
+        connection = _FakeConnection(cursor)  # type: ignore[arg-type]
+        repository = OperationSagaRepository(_FakeConfig(), connect=lambda _config: connection)
+        operation = self.operation()
+
+        with self.assertRaisesRegex(RuntimeError, "successful_item_count"):
+            repository.prepare_interrupted_stop_sale_recovery_many(
+                [operation],
+                source_run_id="source-run",
+                approved_operation_keys=[operation.operation_key],
+                approval_sha256="c" * 64,
+                input_sha256="d" * 64,
+                owner_token="owner-1",
+                account_fencing_token=11,
+                browser_slot_key="host:1",
+                browser_slot_fencing_token=22,
+            )
+
+        self.assertEqual(connection.commits, 0)
+        self.assertEqual(connection.rollbacks, 1)
+        self.assertFalse(any("UPDATE saga_row" in sql for sql, _ in cursor.executed))
+
+    def test_non_interrupted_source_item_blocks_entire_recovery(self) -> None:
+        cursor = _InterruptedRecoveryCursor(eligible_source_item_count=0)
+        connection = _FakeConnection(cursor)  # type: ignore[arg-type]
+        repository = OperationSagaRepository(_FakeConfig(), connect=lambda _config: connection)
+        operation = self.operation()
+
+        with self.assertRaisesRegex(RuntimeError, "eligible_source_item_count"):
+            repository.prepare_interrupted_stop_sale_recovery_many(
+                [operation],
+                source_run_id="source-run",
+                approved_operation_keys=[operation.operation_key],
+                approval_sha256="c" * 64,
+                input_sha256="d" * 64,
+                owner_token="owner-1",
+                account_fencing_token=11,
+                browser_slot_key="host:1",
+                browser_slot_fencing_token=22,
+            )
+
+        self.assertEqual(connection.commits, 0)
+        self.assertEqual(connection.rollbacks, 1)
+        self.assertFalse(any("UPDATE saga_row" in sql for sql, _ in cursor.executed))
+
+    def test_second_key_drift_blocks_before_any_update(self) -> None:
+        first = self.operation("a" * 64)
+        second = self.operation("b" * 64)
+        cursor = _InterruptedRecoveryCursor(invalid_key=second.operation_key)
+        connection = _FakeConnection(cursor)  # type: ignore[arg-type]
+        repository = OperationSagaRepository(_FakeConfig(), connect=lambda _config: connection)
+
+        with self.assertRaisesRegex(RuntimeError, "successful_item_count"):
+            repository.prepare_interrupted_stop_sale_recovery_many(
+                [first, second],
+                source_run_id="source-run",
+                approved_operation_keys=[first.operation_key, second.operation_key],
+                approval_sha256="c" * 64,
+                input_sha256="d" * 64,
+                owner_token="owner-1",
+                account_fencing_token=11,
+                browser_slot_key="host:1",
+                browser_slot_fencing_token=22,
+            )
+
+        self.assertEqual(connection.commits, 0)
+        self.assertEqual(connection.rollbacks, 1)
+        self.assertFalse(any("UPDATE saga_row" in sql for sql, _ in cursor.executed))
+
+    def test_terminal_state_drift_blocks_entire_recovery(self) -> None:
+        cursor = _InterruptedRecoveryCursor(saga_state="completed")
+        connection = _FakeConnection(cursor)  # type: ignore[arg-type]
+        repository = OperationSagaRepository(_FakeConfig(), connect=lambda _config: connection)
+        operation = self.operation()
+
+        with self.assertRaisesRegex(RuntimeError, ":state"):
+            repository.prepare_interrupted_stop_sale_recovery_many(
+                [operation],
+                source_run_id="source-run",
+                approved_operation_keys=[operation.operation_key],
+                approval_sha256="c" * 64,
+                input_sha256="d" * 64,
+                owner_token="owner-1",
+                account_fencing_token=11,
+                browser_slot_key="host:1",
+                browser_slot_fencing_token=22,
+            )
+
+        self.assertEqual(connection.commits, 0)
+        self.assertEqual(connection.rollbacks, 1)
+
+    def test_approved_key_scope_must_equal_operation_scope(self) -> None:
+        cursor = _InterruptedRecoveryCursor()
+        connection = _FakeConnection(cursor)  # type: ignore[arg-type]
+        repository = OperationSagaRepository(_FakeConfig(), connect=lambda _config: connection)
+
+        with self.assertRaisesRegex(ValueError, "approved scope"):
+            repository.prepare_interrupted_stop_sale_recovery_many(
+                [self.operation()],
+                source_run_id="source-run",
+                approved_operation_keys=["b" * 64],
+                approval_sha256="c" * 64,
+                input_sha256="d" * 64,
+                owner_token="owner-1",
+                account_fencing_token=11,
+                browser_slot_key="host:1",
+                browser_slot_fencing_token=22,
+            )
+
+        self.assertEqual(cursor.executed, [])
+
+    def test_source_run_cannot_equal_recovery_run(self) -> None:
+        cursor = _InterruptedRecoveryCursor()
+        connection = _FakeConnection(cursor)  # type: ignore[arg-type]
+        repository = OperationSagaRepository(_FakeConfig(), connect=lambda _config: connection)
+
+        with self.assertRaisesRegex(ValueError, "new recovery run_id"):
+            repository.prepare_interrupted_stop_sale_recovery_many(
+                [self.operation()],
+                source_run_id="recovery-run",
+                approved_operation_keys=["a" * 64],
+                approval_sha256="c" * 64,
+                input_sha256="d" * 64,
+                owner_token="owner-1",
+                account_fencing_token=11,
+                browser_slot_key="host:1",
+                browser_slot_fencing_token=22,
+            )
+
+        self.assertEqual(cursor.executed, [])
