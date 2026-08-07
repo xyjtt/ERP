@@ -393,3 +393,11 @@
 - The first executor closeout attempt reached the updated code but its `747`-case Python regression had one Windows-only `PermissionError` while the saved-draft launcher replaced `.launcher.json`.
 - The wrapper now replaces an existing marker with same-volume `System.IO.File.Replace` instead of `Move-Item -Force`. Focused regression is `3/3`; a 12-run stress loop is `12/12`.
 - Deployment was rolled back by the guarded script after the failed test. The next deployment must target `eb69091` plus this fix and repeat the executor full regression before tasks are re-enabled.
+
+## 2026-08-07 Exact Interrupted Stop-Sale Recovery Gate
+
+- Added an execute-only approval path for an exact set of interrupted Stop-Sale operation keys. Approval binds source run, new recovery run, account, input hash, fixed failure contract, count, and key set.
+- Saga preparation is all-or-nothing under SERIALIZABLE locking and rejects any Outbox, successful historical Item, non-interrupted source Item, business-key drift, or state drift before page execution.
+- Exact recovery is fail-fast: standard account lock only, no custom/disabled lock, no interactive login, notifications enabled, and all lock/lease/crawler/Jushuitan waits set to zero.
+- Development validation: focused `59/59`, full Python `765/765`, Jushuitan `28/28`, TypeScript `check/build`, `compileall`, and `doctor=ok` with two pre-existing warnings.
+- Status remains development-only. No executor deployment or production recovery has run.

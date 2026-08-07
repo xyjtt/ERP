@@ -439,3 +439,11 @@
 - Windows 执行机回归曾在 `test_running_marker_exists_before_blocking_inspector_returns` 中观察到 marker 更新期间的 `PermissionError`。原因是 PowerShell `Move-Item -Force` 替换目标文件时存在读写竞争窗口。
 - Launcher 现在使用同卷临时文件加 `System.IO.File.Replace`（带短生命周期备份）更新已有 marker，首次写入使用 `File.Move`；这保持了 running/terminal marker 的可读性，不改变 Draft/Offer 业务幂等规则。
 - 聚焦 wrapper 回归 `3/3`，12 次连续 stress `12/12`；执行机上一轮 `747` 回归的唯一错误已定位为该竞态，修复后需重新部署并完成全量执行机回归。
+
+## 2026-08-07 下架中断项精确定向恢复门禁
+
+- `run_1688_stop_sale_pipeline.py` 新增版本 1 恢复审批入口，只接受审批文件 SHA-256、输入 CSV SHA-256、源 child run、新 recovery run、单一账号和完整 operation-key 集合全部一致的 `failed_terminal/interrupted_executor_process` 范围。
+- `OperationSagaRepository.prepare_interrupted_stop_sale_recovery_many()` 在一个 SERIALIZABLE 事务中锁定并校验全部 Saga、源 Item 和 Outbox；源 Item 必须为唯一的 `failed/automation_error` 且错误原文以 `interrupted_executor_process:` 精确开头，任何历史 `success/already_offline` 或任一字段漂移都会整批回滚。审批 SHA 和输入 SHA 会写入新 Saga payload。
+- 恢复入口强制标准账号锁、非交互登录、正式通知和全部资源等待参数为零；CSV 在审计建 run 前、Saga prepare 前及 1688 子进程启动前重复验哈希。普通日批路径不变。
+- 本地验证：聚焦 `59/59`，完整 Python `765/765`，聚水潭 `28/28`，TypeScript `check/build`、`compileall`、`doctor` 通过。`doctor` 仍只有两条既有空 selector warning。
+- 本次仅完成独立 worktree 开发验证；未部署执行机、未改生产数据库/Saga/Outbox/锁/进程，未执行任何定向下架。

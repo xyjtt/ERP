@@ -191,3 +191,11 @@
 - 生产默认自动恢复过期登录态；人工调试可使用 `--require-manual-login`。
 - 预期钉钉结果：自动登录成功且身份匹配后继续执行；退出码 1/2/4 记录对应技术或认证异常并继续隔离后的业务范围；退出码 3 才因真实店铺/`member_id` 不匹配停止店铺。
 - 交付验证缺口：需要执行机关闭或使一个测试店铺 Profile 失效，确认自动登录命令、店铺身份复核和后续 SKU 操作真实完成。不能用单元测试代替该 canary。
+
+## 10. 2026-08-07 精确中断下架恢复交接
+
+- 正式入口仍是 `scripts/run_1688_stop_sale_pipeline.py`，但恢复必须同时提供 `--approved-recovery-file` 和该文件的小写 SHA-256。
+- 审批版本 1 必须绑定源 child run、新 recovery run、账号、输入 CSV SHA、固定 `failed_terminal/interrupted_executor_process` 契约和完整 operation-key 集合。
+- 所有共享锁、租约、Crawler 和聚水潭等待参数必须显式为零；禁止 `--no-shared-lock`、自定义锁、`--require-manual-login` 和 `--no-notify`。
+- 执行机部署后仍需重新生成 fresh 只读 Preview。Preview、自动化测试或 Git SHA 都不能替代真实 1688、Jushuitan、Item、Saga 和 Outbox 逐条终态。
+- 当前代码只在独立开发 worktree 验证，尚未部署或执行生产恢复。

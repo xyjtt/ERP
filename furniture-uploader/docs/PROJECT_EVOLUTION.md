@@ -198,3 +198,10 @@
 - A production-style executor regression exposed a read/write race in the saved-draft inspector marker: `Move-Item -Force` could leave a reader with `PermissionError` during replacement.
 - Marker updates now use same-volume `System.IO.File.Replace` with a temporary backup when a marker already exists, preserving the existing fail-closed launcher and idempotent Draft/Offer contract.
 - Focused regression and repeated stress validation pass; the fix is not production-accepted until the guarded executor deployment and post-deploy tests pass.
+
+## 2026-08-07 Failed-Terminal Replay Becomes an Exact Transactional Transition
+
+- A normal pipeline replay is no longer considered sufficient for interrupted `failed_terminal` operations: skipping a completed Saga does not prevent the CSV subprocess from repeating a page action.
+- The recovery authorization now binds both immutable input identity and runtime identity: approval SHA, CSV SHA, source run, target run, account, fixed interrupted contract, count, and exact operation-key set.
+- All keys are validated before any Saga is changed. SERIALIZABLE locks and compare-and-set updates make scope drift, a newly created Outbox, or historical 1688 success abort the entire transition.
+- Recovery resource acquisition is intentionally fail-fast. A busy account, browser slot, crawler, account lock, or Jushuitan lock is a stop condition for a fresh review, not permission to wait or broaden the scope.

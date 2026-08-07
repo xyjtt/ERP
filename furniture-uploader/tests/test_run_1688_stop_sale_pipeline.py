@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from argparse import Namespace
 from pathlib import Path
+import hashlib
 import json
 import subprocess
 import sys
@@ -18,6 +19,7 @@ if str(SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_ROOT))
 
 from run_1688_stop_sale_pipeline import (
+    assert_interrupted_recovery_input_unchanged,
     assert_no_recent_stop_sale_runs,
     assert_crawler_worker_paused,
     build_argument_parser,
@@ -27,19 +29,250 @@ from run_1688_stop_sale_pipeline import (
     build_jushuitan_lock,
     derive_audit_status,
     load_selected_audit_tasks,
+    load_interrupted_recovery_approval,
     notify_execute_startup_failure,
     PipelineStageTimeoutError,
     AuditHeartbeatProcessError,
     run_audit_heartbeat_process,
     run_stage_command,
     run_pipeline,
+    prepare_saga_operations,
+    SagaOperation,
     resolve_pipeline_account,
     resolve_shared_lock_path,
+    validate_interrupted_recovery_arguments,
     wait_for_active_crawler_tasks,
 )
 
 
 class Run1688StopSalePipelineTests(unittest.TestCase):
+    def recovery_operation(self, key: str = "a" * 64) -> SagaOperation:
+        return SagaOperation(
+            operation_key=key,
+            run_id="recovery-run",
+            task_type="stop_sale",
+            account_key="gonglai",
+            business_key="store|product|sku|item",
+            payload={"operation_key": key},
+        )
+
+    def write_recovery_approval(
+        self,
+        root: Path,
+        input_path: Path,
+        operation: SagaOperation,
+        **overrides,
+    ) -> tuple[Path, str]:
+        payload = {
+            "version": 1,
+            "task_type": "stop_sale",
+            "account_key": "gonglai",
+            "source_run_id": "source-run",
+            "recovery_run_id": operation.run_id,
+            "expected_saga_state": "failed_terminal",
+            "expected_ali1688_status": "failed",
+            "expected_saga_error_code": "interrupted_executor_process",
+            "expected_item_status": "failed",
+            "expected_item_error_category": "automation_error",
+            "expected_item_error_message_prefix": "interrupted_executor_process:",
+            "expected_outbox_count": 0,
+            "input_sha256": hashlib.sha256(input_path.read_bytes()).hexdigest(),
+            "operation_count": 1,
+            "operation_keys": [operation.operation_key],
+            **overrides,
+        }
+        path = root / "approval.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return path, hashlib.sha256(path.read_bytes()).hexdigest()
+
+    def test_interrupted_recovery_approval_binds_input_and_exact_keys(self) -> None:
+        operation = self.recovery_operation()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            input_path = root / "tasks.csv"
+            input_path.write_text("exact input", encoding="utf-8")
+            approval_path, approval_sha = self.write_recovery_approval(
+                root, input_path, operation
+            )
+
+            result = load_interrupted_recovery_approval(
+                approval_path,
+                approval_sha,
+                input_path=input_path,
+                operations=[operation],
+                account_key="gonglai",
+            )
+
+        self.assertEqual(result["source_run_id"], "source-run")
+        self.assertEqual(result["recovery_run_id"], operation.run_id)
+        self.assertEqual(result["operation_keys"], [operation.operation_key])
+
+    def test_interrupted_recovery_approval_rejects_business_terminal_contract(self) -> None:
+        operation = self.recovery_operation()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            input_path = root / "tasks.csv"
+            input_path.write_text("exact input", encoding="utf-8")
+            approval_path, approval_sha = self.write_recovery_approval(
+                root,
+                input_path,
+                operation,
+                expected_saga_error_code="sole_sku_requires_product_offline",
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "contract changed"):
+                load_interrupted_recovery_approval(
+                    approval_path,
+                    approval_sha,
+                    input_path=input_path,
+                    operations=[operation],
+                    account_key="gonglai",
+                )
+
+    def test_interrupted_recovery_approval_rejects_input_drift(self) -> None:
+        operation = self.recovery_operation()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            input_path = root / "tasks.csv"
+            input_path.write_text("exact input", encoding="utf-8")
+            approval_path, approval_sha = self.write_recovery_approval(
+                root, input_path, operation
+            )
+            input_path.write_text("changed input", encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "input SHA-256"):
+                load_interrupted_recovery_approval(
+                    approval_path,
+                    approval_sha,
+                    input_path=input_path,
+                    operations=[operation],
+                    account_key="gonglai",
+                )
+
+    def test_interrupted_recovery_approval_rejects_key_scope_drift(self) -> None:
+        operation = self.recovery_operation()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            input_path = root / "tasks.csv"
+            input_path.write_text("exact input", encoding="utf-8")
+            approval_path, approval_sha = self.write_recovery_approval(
+                root,
+                input_path,
+                operation,
+                operation_keys=["b" * 64],
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "selected input"):
+                load_interrupted_recovery_approval(
+                    approval_path,
+                    approval_sha,
+                    input_path=input_path,
+                    operations=[operation],
+                    account_key="gonglai",
+                )
+
+    def test_interrupted_recovery_approval_rejects_target_run_drift(self) -> None:
+        operation = self.recovery_operation()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            input_path = root / "tasks.csv"
+            input_path.write_text("exact input", encoding="utf-8")
+            approval_path, approval_sha = self.write_recovery_approval(
+                root,
+                input_path,
+                operation,
+                recovery_run_id="different-recovery-run",
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "new run_id"):
+                load_interrupted_recovery_approval(
+                    approval_path,
+                    approval_sha,
+                    input_path=input_path,
+                    operations=[operation],
+                    account_key="gonglai",
+                )
+
+    def test_interrupted_recovery_rechecks_input_before_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            input_path = Path(temp_dir) / "tasks.csv"
+            input_path.write_text("exact input", encoding="utf-8")
+            approval = {
+                "input_path": str(input_path),
+                "input_sha256": hashlib.sha256(input_path.read_bytes()).hexdigest(),
+            }
+
+            assert_interrupted_recovery_input_unchanged(approval)
+            input_path.write_text("changed input", encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "changed before execution"):
+                assert_interrupted_recovery_input_unchanged(approval)
+
+    def test_interrupted_recovery_cli_requires_fail_fast_standard_runtime(self) -> None:
+        parser = build_argument_parser()
+        args = parser.parse_args(
+            [
+                "--file",
+                "tasks.csv",
+                "--mode",
+                "execute",
+                "--yes",
+                "--approved-recovery-file",
+                "approval.json",
+                "--approved-recovery-sha256",
+                "a" * 64,
+                "--runtime-lease-wait-seconds",
+                "0",
+                "--crawler-task-wait-seconds",
+                "0",
+                "--jushuitan-lock-wait-seconds",
+                "0",
+            ]
+        )
+
+        validate_interrupted_recovery_arguments(args, recovery_requested=True)
+
+        args.runtime_lease_wait_seconds = 1
+        with self.assertRaisesRegex(ValueError, "fail-fast"):
+            validate_interrupted_recovery_arguments(args, recovery_requested=True)
+
+        args.runtime_lease_wait_seconds = 0
+        args.no_shared_lock = True
+        with self.assertRaisesRegex(ValueError, "standard account-scoped"):
+            validate_interrupted_recovery_arguments(args, recovery_requested=True)
+
+    def test_pipeline_uses_exact_recovery_prepare_when_approval_is_present(self) -> None:
+        operation = self.recovery_operation()
+        calls: list[tuple[str, dict]] = []
+
+        class Repository:
+            def prepare_interrupted_stop_sale_recovery_many(self, operations, **kwargs):
+                calls.append(("recovery", {"operations": operations, **kwargs}))
+                return {operation.operation_key: "prepared"}
+
+            def prepare_many(self, operations, **kwargs):
+                calls.append(("generic", {"operations": operations, **kwargs}))
+                return {}
+
+        guard = SimpleNamespace(
+            owner_token="owner",
+            account_fencing_token=11,
+            browser_slot_key="host:1",
+            browser_slot_fencing_token=22,
+        )
+        approval = {
+            "source_run_id": "source-run",
+            "operation_keys": [operation.operation_key],
+            "approval_sha256": "c" * 64,
+            "input_sha256": "d" * 64,
+        }
+
+        prepare_saga_operations(Repository(), [operation], guard, approval)  # type: ignore[arg-type]
+
+        self.assertEqual([name for name, _ in calls], ["recovery"])
+        self.assertEqual(calls[0][1]["source_run_id"], "source-run")
+        self.assertEqual(calls[0][1]["approval_sha256"], "c" * 64)
+
     def test_audit_heartbeat_runs_in_an_isolated_bounded_process(self) -> None:
         completed = subprocess.CompletedProcess(["python"], 0, stdout="", stderr="")
         with patch("run_1688_stop_sale_pipeline.subprocess.run", return_value=completed) as run:

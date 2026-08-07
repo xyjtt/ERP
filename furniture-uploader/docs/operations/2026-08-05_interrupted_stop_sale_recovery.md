@@ -173,3 +173,60 @@ Repository 在单一事务内校验所有批准 key 的 run_id、topic、状态�
 - Manager 收口会改变生产锁和 Summary，必须由执行机正式任务用户执行并保存输出。
 - 历史 11 条 Outbox 的实时状态可能已漂移；必须逐条重新读取后再决定是否重排。
 - `npm ci` 当前报告 5 个既有依赖漏洞；本次未执行破坏性依赖升级，不影响现有功能验证，但需单独治理。
+
+## `failed_terminal/interrupted_executor_process` 精确定向恢复
+
+仅当每个目标都已由 fresh 只读证据证明以下条件时，才能使用本节入口：
+
+- Saga 属于同一个源 child run，状态为 `failed_terminal`、`ali1688_status=failed`、`error_code=interrupted_executor_process`。
+- 源 run 中恰有一个 Item，状态为 `failed/automation_error`，错误原文以 `interrupted_executor_process:` 开头。
+- operation key 全局没有任何 `success/already_offline` Item，且没有 Outbox。
+- 账号 runtime request、账号租约、浏览器槽位、同账号 Crawler task/attempt、标准账号文件锁和相关进程均为 fresh 空闲状态。
+
+版本 1 审批文件格式：
+
+```json
+{
+  "version": 1,
+  "task_type": "stop_sale",
+  "account_key": "<account_key>",
+  "source_run_id": "<source_child_run_id>",
+  "recovery_run_id": "<new_recovery_run_id>",
+  "expected_saga_state": "failed_terminal",
+  "expected_ali1688_status": "failed",
+  "expected_saga_error_code": "interrupted_executor_process",
+  "expected_item_status": "failed",
+  "expected_item_error_category": "automation_error",
+  "expected_item_error_message_prefix": "interrupted_executor_process:",
+  "expected_outbox_count": 0,
+  "input_sha256": "<exact_csv_sha256>",
+  "operation_count": 9,
+  "operation_keys": ["<64-char-lowercase-sha256>"]
+}
+```
+
+计算审批文件 SHA-256 后，只能用与审批中 `recovery_run_id` 完全相同的 run id 执行一次：
+
+```powershell
+python scripts\run_1688_stop_sale_pipeline.py `
+  --file <exact_recovery.csv> `
+  --mode execute `
+  --run-id <new_recovery_run_id> `
+  --account-key <account_key> `
+  --approved-recovery-file <approval.json> `
+  --approved-recovery-sha256 <approval_sha256> `
+  --lock-wait-seconds 0 `
+  --runtime-lease-wait-seconds 0 `
+  --crawler-task-wait-seconds 0 `
+  --jushuitan-lock-wait-seconds 0 `
+  --shared-runtime-root E:\1688\1688-script-new `
+  --jushuitan-root <formal_jushuitan_root> `
+  --skip-login `
+  --yes
+```
+
+Repository 在一个 SERIALIZABLE 事务中先校验完整集合，再逐 key CAS 到新 run；Item 错误前缀使用 `LEFT(...)=...` 精确比较，不使用会把下划线解释成通配符的 `LIKE`。任一漂移整批回滚，审批 SHA 和输入 SHA 写入新 Saga payload。入口在审计建 run 前、Saga prepare 前和启动 1688 子进程前重复核对 CSV SHA。不要使用 `--limit`、`--no-shared-lock`、`--shared-lock-path`、`--require-manual-login` 或 `--no-notify`。
+
+若 1688 阶段仅部分成功或单次聚水潭阶段失败，立即读取本 run 的 report、Summary、Item、Saga 和 Outbox。只允许对本 run 产生的精确 Outbox key 使用批准 key Worker；禁止重新执行整个 CSV、广泛 requeue 或重复长时间等待。
+
+本能力的开发验证为 Python 聚焦 `59/59`、完整 `765/765`、聚水潭 `28/28`、TypeScript `check/build`、`compileall` 和 `doctor=ok`。这些结果不代表执行机部署或生产恢复已完成。

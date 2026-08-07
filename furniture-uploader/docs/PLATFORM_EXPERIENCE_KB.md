@@ -325,3 +325,10 @@
 - PowerShell `Move-Item -Force` 更新 inspector 的 `.launcher.json` 时，读进程可能在替换窗口收到 `PermissionError`，不能把它误判为浏览器或 1688 业务失败。
 - 生产 launcher 使用同卷临时文件和 `System.IO.File.Replace` 更新已有 marker，首次创建才使用 `File.Move`；读者始终看到旧的完整 JSON 或新的完整 JSON。
 - 该修复必须同时通过 wrapper 回归、执行机全量回归和真实页面证据；测试通过本身不代表 Draft/Offer 验收。
+
+## 2026-08-07 中断下架不能用普通 CSV 重放
+
+- Saga 的 operation key 不含 run id，这保证业务幂等身份稳定，但普通流水线仍可能把 CSV 全量交给页面子进程；仅在 `prepare()` 中跳过已完成 Saga 不能证明页面动作不会重复。
+- 精确恢复必须在同一事务中先锁定全部批准 key，再核对源 Saga、唯一源 Item、Outbox 和所有历史成功 Item。只有全体仍为 `failed_terminal/interrupted_executor_process` 且无 `success/already_offline` 时才切换到新 run。
+- 审批文件必须同时绑定源 run 和目标 run。只绑定 CSV 数量、`--limit` 或源 run 会允许同一审批被错误复用。
+- CSV 哈希要在资源等待后和页面启动前再次验证；恢复模式的资源等待值必须为零。资源忙或单次聚水潭执行失败时保留精确证据并停止，不做宽范围重排或长时间重复探测。
