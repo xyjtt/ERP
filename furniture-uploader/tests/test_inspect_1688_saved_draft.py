@@ -75,6 +75,94 @@ def fake_account_browser_session(**kwargs):
 
 
 class InspectSavedDraftTests(unittest.TestCase):
+    def test_offer_target_requires_exact_numeric_detail_url(self) -> None:
+        url = "https://detail.1688.com/offer/1072868453052.html"
+        self.assertEqual(
+            inspector._resolve_offer_target(url, "1072868453052"),
+            (url, "1072868453052"),
+        )
+        self.assertEqual(
+            inspector._resolve_offer_target("", "1072868453052"),
+            (url, "1072868453052"),
+        )
+        with self.assertRaisesRegex(ValueError, "exact detail"):
+            inspector._resolve_offer_target(
+                "https://example.com/offer/1072868453052.html",
+                "1072868453052",
+            )
+        with self.assertRaisesRegex(ValueError, "exact detail"):
+            inspector._resolve_offer_target(
+                "https://detail.1688.com/offer/1072868453052.html?from=test",
+                "1072868453052",
+            )
+
+    def test_offer_page_inspection_is_read_only_and_matches_identity(self) -> None:
+        class OfferDriver:
+            current_url = ""
+
+            def get(self, url: str) -> None:
+                self.current_url = url
+
+            def execute_script(self, _script: str) -> dict[str, object]:
+                return {
+                    "current_url": self.current_url,
+                    "page_title": "Target product",
+                    "ready_state": "complete",
+                    "body_text": "木刻理想 Target product",
+                    "product_title": "Target product",
+                    "seller_text": "木刻理想",
+                }
+
+            def save_screenshot(self, _path: str) -> bool:
+                return True
+
+        browser = SimpleNamespace(driver=OfferDriver(), _pause=lambda _seconds: None)
+        evidence = inspector._inspect_offer_detail_page(
+            browser,
+            offer_url="https://detail.1688.com/offer/1072868453052.html",
+            expected_offer_id="1072868453052",
+            expected_title="Target product",
+            expected_shop="木刻理想",
+            output_path=Path("inspection.json"),
+        )
+
+        self.assertEqual(evidence["status"], "passed")
+        self.assertTrue(evidence["offer_id_matched"])
+        self.assertTrue(evidence["title_matched"])
+        self.assertTrue(evidence["read_only"])
+
+    def test_offer_page_stops_on_auth_challenge(self) -> None:
+        class AuthDriver:
+            current_url = "https://login.1688.com/member/signin.htm"
+
+            def get(self, _url: str) -> None:
+                return None
+
+            def execute_script(self, _script: str) -> dict[str, object]:
+                return {
+                    "current_url": self.current_url,
+                    "page_title": "Login",
+                    "ready_state": "complete",
+                    "body_text": "请登录并完成安全验证",
+                    "product_title": "",
+                    "seller_text": "",
+                }
+
+            def save_screenshot(self, _path: str) -> bool:
+                return True
+
+        evidence = inspector._inspect_offer_detail_page(
+            SimpleNamespace(driver=AuthDriver(), _pause=lambda _seconds: None),
+            offer_url="https://detail.1688.com/offer/1072868453052.html",
+            expected_offer_id="1072868453052",
+            expected_title="Target product",
+            expected_shop="木刻理想",
+            output_path=Path("inspection.json"),
+        )
+
+        self.assertEqual(evidence["status"], "blocked_auth")
+        self.assertTrue(evidence["auth_challenge"])
+
     def test_inspection_draft_id_must_match_unique_payload_draft(self) -> None:
         payload = {
             "workflow": {
