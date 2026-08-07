@@ -374,3 +374,10 @@
 - Post-apply verification requires the new owner, Stop-Sale request identity, `status=cancelled`, a populated `completed_at`, and zero related runtime leases. Configuration failures also produce a structured `blocked` artifact instead of an unstructured traceback.
 - Final local validation: full `furniture-uploader` regression `734/734`; C-line Stop-Sale/replacement focus `324/324`; recovery utility `29/29`; exact system-prompt plus `combination_sku` regression `6/6` (`2 + 4`); `compileall` and `git diff --check` passed.
 - This development closeout does not claim executor or production acceptance. No production database, lock, task, browser, Preview, or Apply was touched in this change.
+
+## 2026-08-07 All-Shop Store Mapping Expansion
+
+- Stop-Sale and SKU Replace now share 17 authoritative `store_accounts`: four existing mappings plus 13 uniquely derived mappings.
+- The sync tool fails closed unless external accounts, task roster, member/profile identity, source-store Preview, and the checked-in blocker policy all agree.
+- `pingcan`, `pingcan_rpa`, and `xinbaiguang_shanzhu` remain excluded for explicit identity/Jushuitan gaps. No Jushuitan name was inferred.
+- This is deployment-ready configuration, not full-shop production acceptance; all 17 configured accounts were `waiting_auth` in the source snapshot.

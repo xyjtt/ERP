@@ -103,6 +103,134 @@
         "account_key": "lechang",
         "browser_type": "edge",
         "browser_profile_dir": "C:/ProgramData/YYDD/1688-crawler/profiles/lechang"
+      },
+      {
+        "store_name": "阿里巴巴-翔沛家居",
+        "store_aliases": [
+          "阿里巴巴_翔沛家居",
+          "翔沛家居"
+        ],
+        "account_key": "xiangpei_main",
+        "browser_type": "edge",
+        "browser_profile_dir": "C:/ProgramData/YYDD/1688-crawler/profiles/xiangpei_main"
+      },
+      {
+        "store_name": "阿里巴巴-常州来居客家具有限公司",
+        "store_aliases": [
+          "常州来居客家具有限公司",
+          "常州来居客家居"
+        ],
+        "account_key": "laijuke",
+        "browser_type": "edge",
+        "browser_profile_dir": "C:/ProgramData/YYDD/1688-crawler/profiles/laijuke"
+      },
+      {
+        "store_name": "阿里巴巴-常州珐美家居有限公司",
+        "store_aliases": [
+          "阿里巴巴_常州珐美家居有限公司",
+          "常州珐美家居有限公司",
+          "常州珐美家居"
+        ],
+        "account_key": "famei",
+        "browser_type": "edge",
+        "browser_profile_dir": "C:/Users/Administrator/AppData/Local/Microsoft/Edge/User Data_recovery_1"
+      },
+      {
+        "store_name": "阿里巴巴-飞檀家居",
+        "store_aliases": [
+          "阿里巴巴_飞檀家居",
+          "飞檀家居"
+        ],
+        "account_key": "feitan_shaoyou",
+        "browser_type": "edge",
+        "browser_profile_dir": "C:/ProgramData/YYDD/1688-crawler/profiles/feitan_shaoyou"
+      },
+      {
+        "store_name": "阿里巴巴-常州华之信家具",
+        "store_aliases": [
+          "常州华之信家具"
+        ],
+        "account_key": "huazhixin",
+        "browser_type": "edge",
+        "browser_profile_dir": "C:/ProgramData/YYDD/1688-crawler/profiles/huazhixin"
+      },
+      {
+        "store_name": "阿里巴巴-常州林境家居",
+        "store_aliases": [
+          "常州林境家居",
+          "林境家居"
+        ],
+        "account_key": "linjing",
+        "browser_type": "edge",
+        "browser_profile_dir": "C:/ProgramData/YYDD/1688-crawler/profiles/linjing"
+      },
+      {
+        "store_name": "阿里巴巴-常州凡舍家具",
+        "store_aliases": [
+          "常州凡舍家具"
+        ],
+        "account_key": "fanshe",
+        "browser_type": "edge",
+        "browser_profile_dir": "C:/ProgramData/YYDD/1688-crawler/profiles/fanshe"
+      },
+      {
+        "store_name": "阿里巴巴-常州板板顺家居有限公司",
+        "store_aliases": [
+          "常州板板顺家居有限公司",
+          "板板顺家居"
+        ],
+        "account_key": "banbanshun",
+        "browser_type": "edge",
+        "browser_profile_dir": "C:/ProgramData/YYDD/1688-crawler/profiles/banbanshun"
+      },
+      {
+        "store_name": "阿里巴巴-常州悦宅家居有限公司",
+        "store_aliases": [
+          "常州悦宅家居有限公司",
+          "悦宅家居"
+        ],
+        "account_key": "yuezhai",
+        "browser_type": "edge",
+        "browser_profile_dir": "C:/ProgramData/YYDD/1688-crawler/profiles/yuezhai"
+      },
+      {
+        "store_name": "阿里巴巴-常州玖阔家居有限公司",
+        "store_aliases": [
+          "常州玖阔家居有限公司",
+          "JSjj16735957824"
+        ],
+        "account_key": "jiukuo",
+        "browser_type": "edge",
+        "browser_profile_dir": "C:/ProgramData/YYDD/1688-crawler/profiles/jiukuo"
+      },
+      {
+        "store_name": "阿里巴巴-常州劲合萌家具有限公司",
+        "store_aliases": [
+          "常州劲合萌家具有限公司",
+          "常州劲合萌家具"
+        ],
+        "account_key": "jinhemeng",
+        "browser_type": "edge",
+        "browser_profile_dir": "C:/ProgramData/YYDD/1688-crawler/profiles/jinhemeng"
+      },
+      {
+        "store_name": "阿里巴巴-常州固图家居有限公司",
+        "store_aliases": [
+          "常州固图家居有限公司",
+          "常州固图家居"
+        ],
+        "account_key": "gutu_baiqian",
+        "browser_type": "edge",
+        "browser_profile_dir": "C:/ProgramData/YYDD/1688-crawler/profiles/gutu_baiqian"
+      },
+      {
+        "store_name": "阿里巴巴-常州千之尚家居有限公司",
+        "store_aliases": [
+          "常州千之尚家居有限公司"
+        ],
+        "account_key": "qianzhishang_qiyiguo",
+        "browser_type": "edge",
+        "browser_profile_dir": "C:/ProgramData/YYDD/1688-crawler/profiles/qianzhishang_qiyiguo"
       }
     ]
   },

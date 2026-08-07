@@ -180,3 +180,9 @@
 - The recovery owner is immediately completed as `cancelled` after the stale owner is reconciled; a locked pre-commit post-state gate proves `cancelled + completed_at + leases=0`, and a separate read after commit verifies the persisted state.
 - This architecture preserves same-account exclusion and browser capacity while allowing unrelated queued Crawler work to remain outside the recovery gate.
 - Local contract verification passed the full `furniture-uploader` suite (`734/734`), the C-line Stop-Sale/replacement focus (`324/324`), the dedicated recovery suite (`29/29`), and the exact system-prompt plus `combination_sku` contract (`6/6`); production Preview, Apply, executor deployment, and real-page Canary remain separately verified production stages.
+
+## 2026-08-07 Store Mapping Becomes Roster-Derived
+
+- ERP store mappings are no longer extended from remembered aliases. A deterministic dry-run compares external accounts, the task roster, member/profile identity, and the source-store Preview before producing a binding.
+- The configuration expands only when each identity is unique. Shared member/source identities and missing Jushuitan names are explicit blockers, not fallback guesses.
+- SKU Replace inherits the same mapping set from Stop-Sale, preventing the two flows from drifting to different account ownership.

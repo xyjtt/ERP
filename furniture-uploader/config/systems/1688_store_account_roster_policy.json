@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "expected_enabled_count": 20,
+  "expected_final_configured_count": 17,
+  "blocked_accounts": {
+    "pingcan": {
+      "reason_code": "member_identity_collision",
+      "required_resolution": "pingcan 与 pingcan_rpa 共用 expected_member_id、shop_id 和源店铺；必须由业务指定唯一 ERP owner，不能自动选择。"
+    },
+    "pingcan_rpa": {
+      "reason_code": "member_identity_collision",
+      "required_resolution": "pingcan 与 pingcan_rpa 共用 expected_member_id、shop_id 和源店铺；必须由业务指定唯一 ERP owner，不能自动选择。"
+    },
+    "xinbaiguang_shanzhu": {
+      "reason_code": "jushuitan_store_mapping_missing",
+      "required_resolution": "authoritative roster 只有 1688 店铺名“新佰广1688”，没有聚水潭精确店铺名；需新增经确认的 jushuitan_store_name 后才能配置。"
+    }
+  }
+}

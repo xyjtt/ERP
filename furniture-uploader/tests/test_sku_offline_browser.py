@@ -206,20 +206,40 @@ class SkuOfflineBrowserTests(unittest.TestCase):
         )
         bindings = config["execution"]["store_accounts"]
 
+        profiles = {
+            binding["account_key"]: binding["browser_profile_dir"]
+            for binding in bindings
+        }
+        standard_profile_keys = {
+            "muke_lixiang",
+            "guangzhou_wolai",
+            "gonglai",
+            "lechang",
+            "xiangpei_main",
+            "laijuke",
+            "feitan_shaoyou",
+            "huazhixin",
+            "linjing",
+            "fanshe",
+            "banbanshun",
+            "yuezhai",
+            "jiukuo",
+            "jinhemeng",
+            "gutu_baiqian",
+            "qianzhishang_qiyiguo",
+        }
+        for account_key in standard_profile_keys:
+            self.assertEqual(
+                profiles[account_key],
+                f"C:/ProgramData/YYDD/1688-crawler/profiles/{account_key}",
+            )
         self.assertEqual(
-            {
-                binding["account_key"]: binding["browser_profile_dir"]
-                for binding in bindings
-            },
-            {
-                account_key: f"C:/ProgramData/YYDD/1688-crawler/profiles/{account_key}"
-                for account_key in (
-                    "muke_lixiang",
-                    "guangzhou_wolai",
-                    "gonglai",
-                    "lechang",
-                )
-            },
+            profiles["famei"],
+            "C:/Users/Administrator/AppData/Local/Microsoft/Edge/User Data_recovery_1",
+        )
+        self.assertEqual(len(profiles), 17)
+        self.assertTrue(
+            {"pingcan", "pingcan_rpa", "xinbaiguang_shanzhu"}.isdisjoint(profiles)
         )
 
     def test_management_url_normalizes_to_unfiltered_all_tab(self) -> None:

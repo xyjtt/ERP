@@ -420,3 +420,10 @@
 - 浏览器槽位、账号租约、request owner 接管和 request `cancelled` 终态按正式“先槽位、后账号”释放顺序，在一个数据库事务内通过正式 CAS 存储过程完成；request-only 路径不调用租约恢复过程，但在 request CAS 前以锁定查询确认目标账号、run 和 owner 相关租约为零，并在提交前再次锁定验证 request 已 `cancelled`、`completed_at` 非空且相关租约仍为零。任一步不返回精确成功状态或后态不符即整体回滚，提交后再独立读取复核。
 - 最终本地验证：完整 `furniture-uploader` 回归 `734/734`；C 线下架/替换聚焦回归 `324/324`；恢复工具 `29/29`；毛重系统提示与 `combination_sku` 精确回归 `6/6`（`2 + 4`）；`compileall` 与 `git diff --check` 通过。
 - 本次只完成本地实现、文档和自动化验证；未连接生产数据库，未确认执行机存储过程、实时租约或浏览器状态，也未执行 Preview/Apply。生产使用前仍需单独 fresh Preview 和受控审批。
+
+## 2026-08-07 下架/替换全店账号配置扩展
+
+- `execution.store_accounts` 由 4 家扩展到 17 家；新增 13 家只使用外置 `accounts.json`、task roster 和只读源表 Preview 中能唯一相互验证的 account/shop/member/profile/source 字段。
+- `scripts/sync_1688_store_accounts_from_roster.py` 默认 dry-run，并校验 accounts revision/hash、20 家集合、身份唯一性和固定 blocker policy；不猜测别名或聚水潭店铺名。
+- `pingcan`/`pingcan_rpa` 因 member/shop/source 身份冲突保持未配置；`xinbaiguang_shanzhu` 因缺少权威 `jushuitan_store_name` 保持未配置。三者继续由映射门禁 fail closed。
+- 本次只完成独立分支配置和测试，未启动浏览器或生产任务。快照中 17 家均为 `waiting_auth`，部署后仍需逐店 preflight/RPA 登录验收。

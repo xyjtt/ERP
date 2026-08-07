@@ -307,3 +307,9 @@
 - 完整资源恢复必须先释放浏览器槽位、再释放账号租约，并与 request 接管/完成放在同一事务中执行。`request_only` 不调用租约恢复过程，但必须在 request CAS 前以锁定查询确认目标账号、run、owner 相关租约为零；提交前还要在同一事务内再次验证 request 已 `cancelled`、`completed_at` 非空且相关租约为零。仅依赖逐条存储过程各自成功会留下部分释放窗口；任一后态不符必须整体回滚，提交后再做独立读取复核。
 - 凭据或配置不可用同样是可审计阻塞，应输出结构化 `blocked` artifact，不能只留下 traceback。工具验证不等于真实页面、执行机或生产数据库验收。
 - 本地复用契约由 `29/29` 个恢复工具测试覆盖；本轮 C 线下架/替换聚焦回归为 `324/324`，完整 `furniture-uploader` 回归为 `734/734`；毛重系统提示与 `combination_sku` 精确契约为 `6/6`（`2 + 4`）。生产 Preview、Apply 和真实页面 Canary 仍必须以执行机实时证据为准。
+
+## 2026-08-07 全店账号映射经验
+
+- `task.shop_name`、1688 源表店铺名和聚水潭店铺名是三个不同字段。前两者可以通过 authoritative roster + 只读源表 Preview 验证；聚水潭店铺名不存在权威值时必须缺失，不能由前两者改写或猜测。
+- 两个 `account_key` 共用 member/shop/source 身份时不能按 Profile 名或历史使用习惯自动选择 owner。`pingcan`/`pingcan_rpa` 因此保持 fail closed。
+- Profile 文件存在只证明配置路径可用，不证明登录有效。把映射加入配置后仍需逐店 preflight、RPA 登录以及 member/store 双重核验。

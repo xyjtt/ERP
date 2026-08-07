@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "status": "applied",
+  "write_executed": true,
+  "enabled_count": 20,
+  "configured_before_count": 4,
+  "configured_after_count": 17,
+  "added_count": 13,
+  "added_account_keys": [
+    "xiangpei_main",
+    "laijuke",
+    "famei",
+    "feitan_shaoyou",
+    "huazhixin",
+    "linjing",
+    "fanshe",
+    "banbanshun",
+    "yuezhai",
+    "jiukuo",
+    "jinhemeng",
+    "gutu_baiqian",
+    "qianzhishang_qiyiguo"
+  ],
+  "configured_account_keys": [
+    "banbanshun",
+    "famei",
+    "fanshe",
+    "feitan_shaoyou",
+    "gonglai",
+    "guangzhou_wolai",
+    "gutu_baiqian",
+    "huazhixin",
+    "jinhemeng",
+    "jiukuo",
+    "laijuke",
+    "lechang",
+    "linjing",
+    "muke_lixiang",
+    "qianzhishang_qiyiguo",
+    "xiangpei_main",
+    "yuezhai"
+  ],
+  "blocked_count": 3,
+  "blocked_accounts": [
+    {
+      "account_key": "pingcan",
+      "reason_code": "member_identity_collision",
+      "expected_member_id": "b2b-2221733989984a3731",
+      "conflicting_account_keys": [
+        "pingcan",
+        "pingcan_rpa"
+      ],
+      "source_store_name": "阿里巴巴-常州平灿家居有限公司",
+      "required_resolution": "pingcan 与 pingcan_rpa 共用 expected_member_id、shop_id 和源店铺；必须由业务指定唯一 ERP owner，不能自动选择。"
+    },
+    {
+      "account_key": "pingcan_rpa",
+      "reason_code": "member_identity_collision",
+      "expected_member_id": "b2b-2221733989984a3731",
+      "conflicting_account_keys": [
+        "pingcan",
+        "pingcan_rpa"
+      ],
+      "source_store_name": "阿里巴巴-常州平灿家居有限公司",
+      "required_resolution": "pingcan 与 pingcan_rpa 共用 expected_member_id、shop_id 和源店铺；必须由业务指定唯一 ERP owner，不能自动选择。"
+    },
+    {
+      "account_key": "xinbaiguang_shanzhu",
+      "reason_code": "jushuitan_store_mapping_missing",
+      "source_store_name": "新佰广1688",
+      "required_field": "jushuitan_store_name",
+      "observed_contract_status": "requires_explicit_mapping_field",
+      "required_resolution": "authoritative roster 只有 1688 店铺名“新佰广1688”，没有聚水潭精确店铺名；需新增经确认的 jushuitan_store_name 后才能配置。"
+    }
+  ],
+  "configured_auth_status_counts": {
+    "waiting_auth": 17
+  },
+  "accounts_config_revision": "20260730-1",
+  "accounts_config_hash": "7257f536b3760c808f57905c8e88642d5f02ed07f96ba805f24f9abd92a035f5",
+  "preview_generated_at": "2026-08-07T12:18:31+08:00",
+  "identity_rules": {
+    "task_shop_name_from_roster": true,
+    "source_store_name_from_read_only_preview": true,
+    "expected_member_and_profile_from_accounts": true,
+    "jushuitan_store_name_guessed": false
+  },
+  "input_sha256": {
+    "accounts_config": "093294e8ddb2db9ff91366edcf3ddf02d2fc9c3c3d85549451715c66af549849",
+    "task_roster": "4a94bc539c492bfe002c617780e056186c58885ffcd3bdc49c826200703d4241",
+    "preview": "934de8b27c43a76f359f7c778c35121648dc7021a1bf72c3cf1813f678b4474e",
+    "config_before": "bfc3bc6c33aa361151c23a48de8d717391d9ebb0bfce115fc1726569933b04e4",
+    "policy": "c22d38d7e8e7de19abf92bf2ad77ec33d78440c6169d6ff902deb62851a95870"
+  },
+  "config_after_sha256": "de2819e594d9d455b75e9784d2f1a0bc2f64bdd48a5bba59539107cbfd00801e"
+}
