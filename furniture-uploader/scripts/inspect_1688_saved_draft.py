@@ -98,6 +98,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="open the draft by clicking its real product-management draft-box link",
     )
+    parser.add_argument(
+        "--offer-only",
+        action="store_true",
+        help="inspect an already-published Offer without requiring the historical draft row",
+    )
     parser.add_argument("--expected-shop", default="")
     parser.add_argument("--account-key", default="muke_lixiang")
     parser.add_argument("--expected-cdp-port", type=int, default=9306)
@@ -134,6 +139,17 @@ def _resolve_inspection_draft_id(payload: dict[str, object], requested_draft_id:
     if requested and requested != expected_draft_id:
         raise ValueError("--draft-id must match the payload's unique existing draft ID")
     return expected_draft_id
+
+
+def _resolve_expected_shop(payload: dict[str, object], requested_shop: str) -> str:
+    shop = payload.get("shop") or {}
+    payload_shop = str(shop.get("shop_name") or payload.get("shop_name") or "").strip()
+    if not payload_shop:
+        raise ValueError("payload must provide shop.shop_name for account-bound inspection")
+    requested = str(requested_shop or "").strip()
+    if requested and requested != payload_shop:
+        raise ValueError("--expected-shop must match payload shop.shop_name")
+    return payload_shop
 
 
 def _buyer_protection_matches(
@@ -573,6 +589,7 @@ def main() -> int:
     progress.write("inspector_started")
     payload = json.loads(Path(args.payload).read_text(encoding="utf-8-sig"))
     expected_draft_id = _resolve_inspection_draft_id(payload, args.draft_id)
+    expected_shop = _resolve_expected_shop(payload, args.expected_shop)
     expected_detail_count = len(list(((payload.get("images") or {}).get("detail_urls") or [])))
     expected_main_image_count = _expected_main_image_count(payload)
     expected_title = str((payload.get("product") or {}).get("selected_title") or "").strip()
@@ -598,9 +615,16 @@ def main() -> int:
     operator_config = load_json_with_local_override(config_dir / "operator_config.json")
     system_config = load_json_with_local_override(config_dir / "systems" / "1688_sku_offline.json")
     offer_url, expected_offer_id = _resolve_offer_target(args.offer_url, args.offer_id)
+    if args.offer_only and not offer_url:
+        raise ValueError("--offer-only requires --offer-id or --offer-url")
     publish_url = ""
     entry_evidence: dict[str, object] = {"entry_mode": "direct_draft_url"}
-    if not args.open_from_management:
+    if args.offer_only:
+        entry_evidence = {
+            "entry_mode": "published_offer_detail",
+            "offer_url": offer_url,
+        }
+    elif not args.open_from_management:
         publish_url, _category_id = resolve_1688_publish_url(
             {
                 **payload,
@@ -617,7 +641,9 @@ def main() -> int:
                 "entry_mode": "saved_publish_url",
                 "publish_url": publish_url,
             }
-    browser_class = SkuOfflineBrowser if args.open_from_management else BrowserRPA
+    browser_class = (
+        SkuOfflineBrowser if args.open_from_management or args.offer_only else BrowserRPA
+    )
     progress.write("preflight_complete")
     with open_account_bound_listing_browser(
         payload=payload,
@@ -626,7 +652,7 @@ def main() -> int:
         project_root=PROJECT_ROOT,
         shared_runtime_root=args.shared_runtime_root,
         expected_account_key=args.account_key,
-        expected_shop_name=args.expected_shop,
+        expected_shop_name=expected_shop,
         expected_cdp_port=args.expected_cdp_port,
         component="erp-listing-draft-inspector",
         task_type="listing",
@@ -635,6 +661,57 @@ def main() -> int:
         login_timeout_seconds=args.login_timeout_seconds,
         progress_callback=progress.write,
     ) as (browser, binding, identity):
+        if args.offer_only:
+            offer_evidence = _inspect_offer_detail_page(
+                browser,
+                offer_url=offer_url,
+                expected_offer_id=expected_offer_id,
+                expected_title=expected_title,
+                expected_shop=identity.shop_name,
+                output_path=output_path,
+            )
+            offer_passed = offer_evidence.get("status") == "passed"
+            evidence = {
+                "artifact_version": INSPECTION_ARTIFACT_VERSION,
+                "inspector_build_sha": resolve_build_sha(PROJECT_ROOT.parent),
+                "payload_contract_sha256": build_review_contract_sha256(payload),
+                "status": "passed" if offer_passed else "failed",
+                "checked_at": datetime.now(timezone.utc).isoformat(),
+                "task_id": str(payload.get("task_id") or ""),
+                "draft_id": expected_draft_id,
+                "entry": {
+                    "entry_mode": "published_offer_detail",
+                    "offer_url": offer_url,
+                },
+                "requested_url": offer_url,
+                "current_url": str(offer_evidence.get("current_url") or ""),
+                "offer": offer_evidence,
+                "checks": {
+                    "offer_exists": offer_passed,
+                    "offer_id": bool(offer_evidence.get("offer_id_matched")),
+                    "title": bool(offer_evidence.get("title_matched")),
+                    "shop_identity": not bool(offer_evidence.get("identity_mismatch")),
+                },
+                "draft_saved": False,
+                "offer_submitted": False,
+                "account_key": identity.account_key,
+                "shop_name": identity.shop_name,
+                "cdp_port": binding.cdp_port,
+                "read_only": True,
+            }
+            rendered = json.dumps(evidence, ensure_ascii=False, indent=2)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(rendered + "\n", encoding="utf-8")
+            print(rendered)
+            exit_code = 0 if offer_passed else 2
+            progress.write(
+                "offer_inspection_completed",
+                status="completed",
+                exit_code=exit_code,
+                inspection_status=evidence["status"],
+            )
+            return exit_code
+
         boot_network_probe_installed = _install_draft_boot_network_probe(browser)
         if args.open_from_management:
             entry_evidence = _open_draft_from_management(

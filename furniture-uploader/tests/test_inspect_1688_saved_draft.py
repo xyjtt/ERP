@@ -188,6 +188,16 @@ class InspectSavedDraftTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "found 0"):
             inspector._resolve_inspection_draft_id({"workflow": {}}, "draft-1")
 
+    def test_expected_shop_comes_from_payload_and_rejects_override(self) -> None:
+        payload = {"shop": {"shop_name": "木刻理想"}}
+        self.assertEqual(inspector._resolve_expected_shop(payload, ""), "木刻理想")
+        self.assertEqual(
+            inspector._resolve_expected_shop(payload, "木刻理想"),
+            "木刻理想",
+        )
+        with self.assertRaisesRegex(ValueError, "must match"):
+            inspector._resolve_expected_shop(payload, "其他店铺")
+
     def test_expected_main_image_count_caps_at_four(self) -> None:
         self.assertEqual(
             inspector._expected_main_image_count(
@@ -471,6 +481,81 @@ class InspectSavedDraftTests(unittest.TestCase):
             resolve_publish_url.assert_not_called()
             self.assertEqual(evidence["entry"], management_entry)
             self.assertEqual(evidence["requested_url"], management_entry["clicked_href"])
+
+    def test_offer_only_inspection_does_not_require_management_draft_row(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            payload_path = root / "payload.json"
+            output_path = root / "inspection.json"
+            payload_path.write_text(
+                json.dumps(
+                    {
+                        "task_id": "task-1",
+                        "shop": {
+                            "account_key": "muke_lixiang",
+                            "shop_name": "木刻理想",
+                        },
+                        "workflow": {"draft": {"draft_id": "draft-1"}},
+                        "images": {"detail_urls": []},
+                        "product": {"selected_title": "Target product"},
+                        "pricing": {"publish_price": "1.0"},
+                        "inventory": {"quantity": 999},
+                        "attributes": {"color": "black", "size": "small"},
+                        "logistics": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            offer_evidence = {
+                "status": "passed",
+                "current_url": "https://detail.1688.com/offer/1072868453052.html",
+                "offer_id_matched": True,
+                "title_matched": True,
+                "identity_mismatch": False,
+            }
+
+            with (
+                patch.object(inspector, "SkuOfflineBrowser", FakeBrowser),
+                patch.object(
+                    inspector,
+                    "open_account_bound_listing_browser",
+                    side_effect=fake_account_browser_session,
+                ),
+                patch.object(inspector, "load_json_with_local_override", return_value={}),
+                patch.object(
+                    inspector,
+                    "_inspect_offer_detail_page",
+                    return_value=offer_evidence,
+                ) as inspect_offer,
+                patch.object(inspector, "_open_draft_from_management") as open_draft,
+                patch.object(inspector, "_wait_for_inspection_runtime") as wait_runtime,
+                patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "inspect_1688_saved_draft.py",
+                        "--payload",
+                        str(payload_path),
+                        "--output",
+                        str(output_path),
+                        "--offer-id",
+                        "1072868453052",
+                        "--offer-only",
+                    ],
+                ),
+            ):
+                exit_code = inspector.main()
+
+            evidence = json.loads(output_path.read_text(encoding="utf-8"))
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(evidence["status"], "passed")
+            self.assertEqual(evidence["entry"]["entry_mode"], "published_offer_detail")
+            self.assertTrue(evidence["checks"]["offer_exists"])
+            self.assertFalse(evidence["draft_saved"])
+            self.assertFalse(evidence["offer_submitted"])
+            inspect_offer.assert_called_once()
+            open_draft.assert_not_called()
+            wait_runtime.assert_not_called()
 
 
 if __name__ == "__main__":

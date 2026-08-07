@@ -76,6 +76,7 @@ class SavedDraftInspectorWrapperTests(unittest.TestCase):
                 "-PythonExe",
                 sys.executable,
                 "-OpenFromManagement",
+                "-OfferOnly",
             ]
             completed = subprocess.run(
                 command,
@@ -101,6 +102,7 @@ class SavedDraftInspectorWrapperTests(unittest.TestCase):
             self.assertEqual(passed[passed.index("--output") + 1], str(output.resolve()))
             self.assertTrue(os.path.samefile(passed_runtime_root, runtime_root))
             self.assertIn("--open-from-management", passed)
+            self.assertIn("--offer-only", passed)
             self.assertEqual(
                 passed[passed.index("--login-timeout-seconds") + 1],
                 "300",

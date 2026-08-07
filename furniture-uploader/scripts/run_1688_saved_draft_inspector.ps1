@@ -8,8 +8,7 @@ param(
     [string]$Output,
     [Parameter(Mandatory = $true)]
     [string]$DraftId,
-    [Parameter(Mandatory = $true)]
-    [string]$ExpectedShop,
+    [string]$ExpectedShop = "",
     [string]$AccountKey = "muke_lixiang",
     [int]$ExpectedCdpPort = 9306,
     [string]$SharedRuntimeRoot = "D:\script_1688",
@@ -20,7 +19,8 @@ param(
     [double]$RuntimeLeaseWaitSeconds = 0,
     [int]$LoginTimeoutSeconds = 300,
     [string]$PythonExe = "",
-    [switch]$OpenFromManagement
+    [switch]$OpenFromManagement,
+    [switch]$OfferOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -166,6 +166,9 @@ try {
     )
     if ($OpenFromManagement) {
         $pythonArguments += "--open-from-management"
+    }
+    if ($OfferOnly) {
+        $pythonArguments += "--offer-only"
     }
     if ($PublishUrl) {
         $pythonArguments += @("--publish-url", $PublishUrl)
