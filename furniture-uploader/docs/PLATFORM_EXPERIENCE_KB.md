@@ -1,5 +1,11 @@
 # Platform Experience Knowledge Base
 
+## 2026-08-07 Partial Child Report Recovery Finding
+
+- An externally terminated browser process can leave a valid JSONL result before `record_1688_results()` and the Saga terminal transition run. Database `pending/prepared` therefore does not prove that no page result exists.
+- Recovery must key every report row by store, product ID, online SKU and platform item code, then preserve recorded failure category and evidence. Only report-missing items may be classified as interrupted.
+- A recorded `success` or `already_offline` result cannot be auto-terminalized as failed. Stop and reconcile page/Saga state first so a later recovery cannot repeat the 1688 write.
+
 ## 2026-08-06 S4U Browser Runtime Findings
 
 - Edge 是否能运行不能用 `explorer.exe` 判断。执行机 `Administrator/S4U` Worker 已在 Session 0 启动独立 Profile Edge、renderer 和 CDP，并完成真实爬虫任务。

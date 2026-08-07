@@ -12,6 +12,8 @@
 
 ## 工具职责
 
+子批次进程被外部终止时，先运行 `recover_interrupted_stop_sale_run.py`。该工具必须先读取该子批次的正式 JSONL report：已记录的失败保留原分类、原文和页面证据；没有 report 的 item 才记为 `interrupted_executor_process`。若 report 中存在 `success` 或 `already_offline`，工具必须停止并要求真实页面/Saga 对账，禁止把已执行动作改写为失败后再次执行。
+
 `scripts/recover_interrupted_stop_sale_daily_manager.py` 负责中断 Manager 收口：
 
 1. 校验锁的 `cycle`、`manager_run_id` 和 token。

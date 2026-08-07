@@ -1,5 +1,11 @@
 # DIRECT 1688 Progress
 
+## 2026-08-07 Managed Update (Interrupted Child Recovery Classification)
+
+- The interrupted child `daily_20260807_123003_304694_s02_b003` has 10 audit items. Its JSONL report proves one pre-toggle `sole_sku_requires_product_offline` business terminal; the other nine have no execution report.
+- Recovery now preserves recorded failed evidence and blocks on any recorded success/already-offline action. The nine unrecorded items remain eligible only for exact interrupted-work recovery after child and manager closeout.
+- Focused recovery tests pass. Production apply still requires the exact dead-owner lock, stale runtime request/lease CAS, matching run id and unchanged report evidence.
+
 ## 2026-08-06 Managed Update (Listing No Longer Requires Interactive Desktop)
 
 - 根因已定位为 Listing 计划任务脚本强制 `Interactive + RunEx`，不是 Selenium、Edge、Credential Manager 或账号 Profile 的底层限制。

@@ -1,5 +1,11 @@
 # Project Memory
 
+## 2026-08-07 Managed Update (Interrupted Child Evidence Preservation)
+
+- `recover_interrupted_stop_sale_run.py` now reads the exact child JSONL report before terminalizing an externally stopped run. A recorded failed item keeps its platform category, message, attempts, screenshot and HTML evidence; only items without a report record become `automation_error/interrupted_executor_process`.
+- A recorded `success` or `already_offline` result blocks automatic recovery and requires explicit page/Saga reconciliation. This prevents a completed 1688 action from being mislabeled and later executed again.
+- The production case `daily_20260807_123003_304694_s02_b003` contains one recorded `sole_sku_requires_product_offline` result and nine items without execution evidence. Recovery must preserve the first as a normal business terminal and isolate only the remaining nine as interrupted work.
+
 ## 2026-08-06 Managed Update (Listing S4U Daily Runtime)
 
 - 正式 Crawler Worker 已在执行机证明 `Administrator/S4U/Highest` 可于 Session 0 启动真实 Edge/CDP；Listing 浏览器链路复用相同的账号 Profile、`ensure_1688_authenticated_session`、租约与 CDP 绑定，不依赖可见桌面。

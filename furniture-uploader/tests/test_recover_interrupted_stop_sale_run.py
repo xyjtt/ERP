@@ -14,17 +14,20 @@ if str(SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_ROOT))
 
 from recover_interrupted_stop_sale_run import (  # noqa: E402
+    _load_recorded_terminal_failures,
     _load_owned_interrupted_lock,
     _reconcile_interrupted_audit,
     build_argument_parser,
+    stop_sale_task_key,
 )
 
 
 class _RecoveryCursor:
-    def __init__(self) -> None:
+    def __init__(self, operation_key: str = "a" * 64) -> None:
         self.rowcount = -1
         self._result = None
         self.executed: list[tuple[str, object]] = []
+        self.operation_key = operation_key
 
     def execute(self, sql, params=None):
         self.executed.append((sql, params))
@@ -32,12 +35,12 @@ class _RecoveryCursor:
             self._result = [
                 (
                     7,
-                    "a" * 64,
+                    self.operation_key,
                     "pending",
                     0,
                     None,
                     None,
-                    "a" * 64,
+                    self.operation_key,
                     "RUN-1",
                     "stop_sale",
                     "muke_lixiang",
@@ -67,8 +70,8 @@ class _RecoveryCursor:
 
 
 class _RecoveryConnection:
-    def __init__(self) -> None:
-        self._cursor = _RecoveryCursor()
+    def __init__(self, operation_key: str = "a" * 64) -> None:
+        self._cursor = _RecoveryCursor(operation_key)
         self.commits = 0
 
     def __enter__(self):
@@ -116,6 +119,66 @@ class RecoverInterruptedStopSaleRunTests(unittest.TestCase):
         saga_update = next(sql for sql in updates if "state = 'failed_terminal'" in sql)
         self.assertIn("run_id = ?", saga_update)
         self.assertIn("account_fencing_token = ?", saga_update)
+
+    def test_reconcile_preserves_recorded_business_terminal_failure(self) -> None:
+        record = {
+            "operation": "offline",
+            "status": "failed",
+            "store_name": "阿里巴巴-常州工莱家具",
+            "product_id": "1022984903964",
+            "online_sku": "AD006825N486V01",
+            "platform_store_item_code": "6200210923101",
+            "attempts": 1,
+            "error_category": "sole_sku_requires_product_offline",
+            "error_message": "1688 requires one online SKU",
+            "screenshot_path": "D:/evidence.png",
+            "html_snapshot_path": "D:/evidence.html",
+        }
+        operation_key = stop_sale_task_key(
+            record["store_name"],
+            record["product_id"],
+            record["online_sku"],
+            record["platform_store_item_code"],
+        )
+        connection = _RecoveryConnection(operation_key)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            report_path = Path(temp_dir) / "RUN-1.jsonl"
+            report_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+            with patch(
+                "recover_interrupted_stop_sale_run.connect_app_database",
+                return_value=connection,
+            ):
+                result = _reconcile_interrupted_audit(
+                    _RecoveryRepository(),
+                    run_id="RUN-1",
+                    reason="executor stopped",
+                    report_path=report_path,
+                )
+
+        self.assertEqual(result["recorded_terminal_failure_count"], 1)
+        self.assertEqual(result["interrupted_failure_count"], 0)
+        updates = [entry for entry in connection._cursor.executed if "UPDATE" in entry[0]]
+        item_update = next(entry for entry in updates if "offline_status = 'failed'" in entry[0])
+        saga_update = next(entry for entry in updates if "state = 'failed_terminal'" in entry[0])
+        self.assertEqual(item_update[1][2], "sole_sku_requires_product_offline")
+        self.assertEqual(item_update[1][3], "1688 requires one online SKU")
+        self.assertEqual(saga_update[1][1], "sole_sku_requires_product_offline")
+        self.assertEqual(saga_update[1][2], "1688 requires one online SKU")
+
+    def test_recorded_success_blocks_automatic_interrupted_recovery(self) -> None:
+        record = {
+            "operation": "offline",
+            "status": "success",
+            "store_name": "store-a",
+            "product_id": "product-a",
+            "online_sku": "sku-a",
+            "platform_store_item_code": "item-a",
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            report_path = Path(temp_dir) / "RUN-1.jsonl"
+            report_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "recorded successful 1688 action"):
+                _load_recorded_terminal_failures(report_path)
 
     def test_accepts_matching_stop_sale_lock_with_dead_owner(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

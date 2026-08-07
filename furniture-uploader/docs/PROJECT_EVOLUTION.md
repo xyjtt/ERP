@@ -1,5 +1,11 @@
 # Project Evolution
 
+## 2026-08-07 Interrupted Child Recovery Preserves Partial Reports
+
+- Child recovery evolved from marking every pending audit item as an interruption failure to reconciling the persisted JSONL report first.
+- Recorded platform failures retain their original business or technical classification. Unrecorded items alone receive `interrupted_executor_process`.
+- Recorded success/already-offline evidence is a hard stop because it may represent an irreversible 1688 action that needs explicit Saga reconciliation before any retry.
+
 ## 2026-08-06 Listing Scheduling Moves to S4U
 
 - 上架日度从“必须保留 Administrator explorer 会话，再由 SYSTEM Launcher 调用 RunEx”演进为“Administrator S4U 任务在 Session 0 直接运行”。

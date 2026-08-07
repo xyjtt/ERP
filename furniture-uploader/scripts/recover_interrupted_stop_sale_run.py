@@ -20,8 +20,13 @@ from stop_sale_audit import (
     StopSaleAuditRepository,
     connect_app_database,
     hydrate_dingtalk_credentials,
+    load_jsonl_records,
     resolve_stop_sale_app_config,
+    stop_sale_task_key,
 )
+
+
+RECORDED_TERMINAL_FAILURE_STATUS = "failed"
 
 
 def build_argument_parser() -> argparse.ArgumentParser:
@@ -121,11 +126,44 @@ def _load_completed_recovery_summary(
     return summary, summary_path
 
 
+def _clean_text(value: Any, limit: int) -> str:
+    return str(value or "").strip()[:limit]
+
+
+def _load_recorded_terminal_failures(report_path: Path) -> dict[str, dict[str, Any]]:
+    failures: dict[str, dict[str, Any]] = {}
+    for record in load_jsonl_records(report_path):
+        if str(record.get("operation") or "offline").strip() != "offline":
+            continue
+        status = str(record.get("status") or "").strip()
+        operation_key = stop_sale_task_key(
+            record.get("store_name"),
+            record.get("product_id"),
+            record.get("online_sku"),
+            record.get("platform_store_item_code"),
+        )
+        if status in {"success", "already_offline"}:
+            raise RuntimeError(
+                "Interrupted recovery found a recorded successful 1688 action; "
+                f"explicit page/Saga reconciliation is required: operation_key={operation_key}"
+            )
+        if status != RECORDED_TERMINAL_FAILURE_STATUS:
+            continue
+        if operation_key in failures:
+            raise RuntimeError(
+                "Interrupted recovery report contains duplicate terminal evidence: "
+                f"operation_key={operation_key}"
+            )
+        failures[operation_key] = dict(record)
+    return failures
+
+
 def _reconcile_interrupted_audit(
     repository: StopSaleAuditRepository,
     *,
     run_id: str,
     reason: str,
+    report_path: Path | None = None,
 ) -> dict[str, Any]:
     item_table = repository._table("ali1688_stop_sale_item")
     run_table = repository._table("ali1688_stop_sale_run")
@@ -136,6 +174,10 @@ def _reconcile_interrupted_audit(
         "run_id": run_id,
         "reason": reason,
     }
+    resolved_report_path = report_path or (
+        PROJECT_ROOT / "logs" / "sku_offline" / "run_reports" / f"{run_id}.jsonl"
+    )
+    recorded_failures = _load_recorded_terminal_failures(resolved_report_path)
     with connect_app_database(repository.config) as connection:
         cursor = connection.cursor()
         rows = cursor.execute(
@@ -158,6 +200,9 @@ def _reconcile_interrupted_audit(
         ).fetchall()
         item_updates = 0
         saga_updates = 0
+        recorded_failure_count = 0
+        interrupted_failure_count = 0
+        item_operation_keys: set[str] = set()
         for row in rows:
             item_id = int(row[0])
             operation_key = str(row[1] or "")
@@ -173,6 +218,28 @@ def _reconcile_interrupted_audit(
             saga_error_code = str(row[14] or "")
             saga_error_summary = str(row[15] or "")
             outbox_count = int(row[16] or 0)
+            item_operation_keys.add(operation_key)
+            recorded_failure = recorded_failures.get(operation_key)
+            if recorded_failure is not None:
+                error_category = _clean_text(
+                    recorded_failure.get("error_category")
+                    or recorded_failure.get("page_error_category")
+                    or "automation_error",
+                    100,
+                )
+                error_message = _clean_text(
+                    recorded_failure.get("error_message")
+                    or recorded_failure.get("page_error_text")
+                    or reason,
+                    2000,
+                )
+                saga_error_code_expected = error_category
+                saga_error_summary_expected = error_message
+            else:
+                error_category = "automation_error"
+                error_message = reason
+                saga_error_code_expected = "interrupted_executor_process"
+                saga_error_summary_expected = reason
             if not operation_key or saga_operation_key != operation_key:
                 raise RuntimeError(f"Interrupted recovery Saga is missing or mismatched: item_id={item_id}")
             if saga_run_id != run_id or saga_task_type != "stop_sale":
@@ -189,7 +256,7 @@ def _reconcile_interrupted_audit(
                     f"status={offline_status!r}"
                 )
             if offline_status == "failed" and (
-                error_category != "automation_error" or error_message != reason
+                str(row[4] or "") != error_category or str(row[5] or "") != error_message
             ):
                 raise RuntimeError(f"Interrupted recovery item terminal evidence changed: item_id={item_id}")
             if saga_state not in {"prepared", "failed_terminal"}:
@@ -198,22 +265,40 @@ def _reconcile_interrupted_audit(
                     f"state={saga_state!r}"
                 )
             if saga_state == "failed_terminal" and (
-                saga_error_code != "interrupted_executor_process" or saga_error_summary != reason
+                saga_error_code != saga_error_code_expected
+                or saga_error_summary != saga_error_summary_expected
             ):
                 raise RuntimeError(
                     f"Interrupted recovery Saga terminal evidence changed: operation_key={operation_key}"
                 )
             if offline_status == "pending":
+                attempts = max(1, int((recorded_failure or {}).get("attempts") or 0))
+                screenshot_path = _clean_text(
+                    (recorded_failure or {}).get("screenshot_path"), 1000
+                )
+                html_snapshot_path = _clean_text(
+                    (recorded_failure or {}).get("html_snapshot_path"), 1000
+                )
                 cursor.execute(
                     f"""
                     UPDATE {item_table}
                     SET offline_status = 'failed',
-                        attempts = CASE WHEN ISNULL(attempts, 0) < 1 THEN 1 ELSE attempts END,
-                        error_category = 'automation_error', error_message = ?,
+                        attempts = CASE WHEN ISNULL(attempts, 0) < ? THEN ? ELSE attempts END,
+                        error_category = ?, error_message = ?,
+                        screenshot_path = ?, html_snapshot_path = ?,
                         updated_at = SYSUTCDATETIME()
                     WHERE id = ? AND run_id = ? AND offline_status = 'pending'
                     """,
-                    (reason, item_id, run_id),
+                    (
+                        attempts,
+                        attempts,
+                        error_category,
+                        error_message,
+                        screenshot_path,
+                        html_snapshot_path,
+                        item_id,
+                        run_id,
+                    ),
                 )
                 if cursor.rowcount != 1:
                     raise RuntimeError(f"Interrupted recovery item CAS failed: item_id={item_id}")
@@ -224,11 +309,13 @@ def _reconcile_interrupted_audit(
                 except json.JSONDecodeError:
                     current_evidence = {"previous_evidence_raw": saga_evidence}
                 current_evidence["interrupted_recovery"] = evidence
+                if recorded_failure is not None:
+                    current_evidence["recorded_terminal_failure"] = recorded_failure
                 cursor.execute(
                     f"""
                     UPDATE {saga_table}
                     SET state = 'failed_terminal', ali1688_status = 'failed',
-                        evidence_json = ?, error_code = 'interrupted_executor_process',
+                        evidence_json = ?, error_code = ?,
                         error_summary = ?,
                         ali1688_finished_at = COALESCE(ali1688_finished_at, SYSUTCDATETIME()),
                         finished_at = COALESCE(finished_at, SYSUTCDATETIME()),
@@ -238,7 +325,8 @@ def _reconcile_interrupted_audit(
                     """,
                     (
                         json.dumps(current_evidence, ensure_ascii=False, default=str),
-                        reason,
+                        saga_error_code_expected,
+                        saga_error_summary_expected,
                         operation_key,
                         run_id,
                         account_fencing_token,
@@ -249,6 +337,16 @@ def _reconcile_interrupted_audit(
                         f"Interrupted recovery Saga CAS failed: operation_key={operation_key}"
                     )
                 saga_updates += 1
+            if recorded_failure is not None:
+                recorded_failure_count += 1
+            else:
+                interrupted_failure_count += 1
+        unknown_report_keys = sorted(set(recorded_failures) - item_operation_keys)
+        if unknown_report_keys:
+            raise RuntimeError(
+                "Interrupted recovery report contains evidence outside the audit run: "
+                + ",".join(unknown_report_keys)
+            )
         counts = cursor.execute(
             f"""
             SELECT
@@ -283,6 +381,9 @@ def _reconcile_interrupted_audit(
         "item_count": len(rows),
         "item_terminalized_count": item_updates,
         "saga_terminalized_count": saga_updates,
+        "recorded_terminal_failure_count": recorded_failure_count,
+        "interrupted_failure_count": interrupted_failure_count,
+        "offline_report_path": str(resolved_report_path),
         "outbox_count": 0,
         "jushuitan_action": "not_created_ali1688_failed",
     }
