@@ -14,6 +14,7 @@ if str(SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_ROOT))
 
 from recover_interrupted_stop_sale_run import (  # noqa: E402
+    _load_completed_recovery_summary,
     _load_recorded_terminal_failures,
     _load_owned_interrupted_lock,
     _reconcile_interrupted_audit,
@@ -96,6 +97,39 @@ class _RecoveryRepository:
 
 
 class RecoverInterruptedStopSaleRunTests(unittest.TestCase):
+    def test_completed_recovery_backfills_finished_at_from_recovered_at(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            lock_path = Path(temp_dir) / "shared.lock"
+            summary_path = Path(temp_dir) / "recovery.summary.json"
+            summary_path.write_text(
+                json.dumps(
+                    {
+                        "run_id": "RUN-1",
+                        "error_message": "executor stopped",
+                        "shared_lock_path": str(lock_path),
+                        "recovered_at": "2026-08-07T14:46:40",
+                        "lock_removed": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            summary, resolved_path = _load_completed_recovery_summary(
+                {
+                    "status": "failed",
+                    "finished_at": "2026-08-07T06:46:40",
+                    "error_message": "executor stopped",
+                    "summary_path": str(summary_path),
+                    "notification_sent": True,
+                },
+                run_id="RUN-1",
+                reason="executor stopped",
+                lock_path=lock_path.resolve(),
+            )
+
+        self.assertEqual(summary["finished_at"], "2026-08-07T14:46:40")
+        self.assertEqual(resolved_path, summary_path.resolve())
+
     def test_reconcile_terminalizes_pending_item_and_prepared_saga(self) -> None:
         connection = _RecoveryConnection()
         with patch(

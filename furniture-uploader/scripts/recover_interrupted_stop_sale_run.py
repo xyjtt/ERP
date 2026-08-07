@@ -123,6 +123,12 @@ def _load_completed_recovery_summary(
         raise RuntimeError("Completed recovery summary does not prove lock removal.")
     if Path(str(summary.get("shared_lock_path") or "")).resolve() != lock_path:
         raise RuntimeError("Completed recovery summary lock path does not match.")
+    if not str(summary.get("finished_at") or "").strip():
+        # Older recovery artifacts used recovered_at only. Preserve that
+        # timestamp so manager closeout can validate the DB terminal time.
+        summary["finished_at"] = str(
+            summary.get("recovered_at") or datetime.now().isoformat(timespec="seconds")
+        )
     return summary, summary_path
 
 
@@ -452,6 +458,7 @@ def recover(args: argparse.Namespace) -> dict[str, Any]:
     offline_report_path = (
         PROJECT_ROOT / "logs" / "sku_offline" / "run_reports" / f"{run_id}.jsonl"
     )
+    finished_at = datetime.now().isoformat(timespec="seconds")
     summary = {
         "run_id": run_id,
         "audit_status": "failed",
@@ -460,7 +467,8 @@ def recover(args: argparse.Namespace) -> dict[str, Any]:
         "notification_sent": bool(notification_sent),
         "shared_lock_path": str(lock_path),
         "lock_owner_pid": int(lock_payload.get("pid") or 0),
-        "recovered_at": datetime.now().isoformat(timespec="seconds"),
+        "recovered_at": finished_at,
+        "finished_at": finished_at,
     }
     summary["audit_reconciliation"] = audit_reconciliation
     summary_path.write_text(
