@@ -53,6 +53,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="exact saved offer-new publish URL; must match the expected draft ID and category",
     )
     parser.add_argument(
+        "--offer-id",
+        default="",
+        help="existing numeric Offer ID to verify in the same read-only browser session",
+    )
+    parser.add_argument(
+        "--offer-url",
+        default="",
+        help="existing detail.1688.com Offer URL; must match --offer-id",
+    )
+    parser.add_argument(
         "--open-from-management",
         action="store_true",
         help="open the draft by clicking its real product-management draft-box link",
@@ -151,6 +161,151 @@ def _validate_publish_url_override(raw_url: object, expected_draft_id: str) -> s
     ):
         raise ValueError("publish URL must be the saved 1688 URL for the expected draft and category")
     return url
+
+
+def _resolve_offer_target(raw_url: object, requested_offer_id: object) -> tuple[str, str]:
+    url = str(raw_url or "").strip()
+    offer_id = str(requested_offer_id or "").strip()
+    if not url and not offer_id:
+        return "", ""
+    if not re.fullmatch(r"\d+", offer_id):
+        raise ValueError("--offer-id must be numeric when Offer inspection is requested")
+    if not url:
+        url = f"https://detail.1688.com/offer/{offer_id}.html"
+    parsed = urlparse(url)
+    path_match = re.fullmatch(r"/offer/(\d+)\.html", parsed.path)
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != "detail.1688.com"
+        or parsed.username is not None
+        or parsed.password is not None
+        or path_match is None
+        or path_match.group(1) != offer_id
+        or bool(parsed.query)
+        or bool(parsed.fragment)
+    ):
+        raise ValueError("Offer URL must be the exact detail.1688.com URL for --offer-id")
+    return url, offer_id
+
+
+def _inspect_offer_detail_page(
+    browser: BrowserRPA,
+    *,
+    offer_url: str,
+    expected_offer_id: str,
+    expected_title: str,
+    expected_shop: str,
+    output_path: Path,
+) -> dict[str, object]:
+    driver = browser.driver
+    if driver is None:
+        raise RuntimeError("Browser has not been opened.")
+    try:
+        driver.get(offer_url)
+        diagnostic: dict[str, object] = {}
+        for _attempt in range(60):
+            diagnostic = driver.execute_script(
+                """
+                const firstText = (selectors) => {
+                  for (const selector of selectors) {
+                    const node = document.querySelector(selector);
+                    const value = String(
+                      (node && (node.getAttribute('content') || node.textContent)) || ''
+                    ).replace(/\\s+/g, ' ').trim();
+                    if (value) return value;
+                  }
+                  return '';
+                };
+                return {
+                  current_url: String(window.location.href || ''),
+                  page_title: String(document.title || ''),
+                  ready_state: String(document.readyState || ''),
+                  body_text: String((document.body && document.body.innerText) || '').slice(0, 4000),
+                  product_title: firstText([
+                    'h1.title-text',
+                    'h1[class*="title"]',
+                    'h1',
+                    'meta[property="og:title"]'
+                  ]),
+                  seller_text: firstText([
+                    '[class*="company-name"]',
+                    '[class*="shop-name"]',
+                    '[class*="seller-name"]'
+                  ]),
+                };
+                """
+            ) or {}
+            if str(diagnostic.get("ready_state") or "") == "complete" and str(
+                diagnostic.get("body_text") or ""
+            ).strip():
+                break
+            browser._pause(0.5)
+
+        current_url = str(diagnostic.get("current_url") or "").strip()
+        current_path = urlparse(current_url).path
+        current_match = re.fullmatch(r"/offer/(\d+)\.html", current_path)
+        actual_offer_id = current_match.group(1) if current_match else ""
+        body_text = str(diagnostic.get("body_text") or "")
+        product_title = str(diagnostic.get("product_title") or "").strip()
+        seller_text = str(diagnostic.get("seller_text") or "").strip()
+        lowered_url = current_url.lower()
+        auth_challenge = (
+            any(host in lowered_url for host in ("login.1688.com", "login.alibaba.com"))
+            or any(term in body_text for term in ("请登录", "滑块", "安全验证", "请输入验证码"))
+        )
+        unavailable = any(
+            term in body_text
+            for term in ("商品不存在", "商品已下架", "访问的商品不存在", "页面不存在")
+        )
+        identity_mismatch = bool(seller_text) and expected_shop not in seller_text
+        title_matched = bool(product_title) and product_title == expected_title
+        if auth_challenge:
+            status = "blocked_auth"
+        elif identity_mismatch:
+            status = "blocked_identity_mismatch"
+        elif actual_offer_id != expected_offer_id:
+            status = "failed_offer_identity"
+        elif unavailable:
+            status = "offer_unavailable"
+        elif not title_matched:
+            status = "failed_title_mismatch"
+        else:
+            status = "passed"
+
+        screenshot_path = output_path.with_suffix(".offer.png")
+        screenshot_saved = bool(driver.save_screenshot(str(screenshot_path)))
+        return {
+            "status": status,
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+            "requested_url": offer_url,
+            "current_url": current_url,
+            "expected_offer_id": expected_offer_id,
+            "actual_offer_id": actual_offer_id,
+            "offer_id_matched": actual_offer_id == expected_offer_id,
+            "page_title": str(diagnostic.get("page_title") or ""),
+            "ready_state": str(diagnostic.get("ready_state") or ""),
+            "product_title": product_title,
+            "expected_title": expected_title,
+            "title_matched": title_matched,
+            "seller_text": seller_text,
+            "expected_shop": expected_shop,
+            "identity_mismatch": identity_mismatch,
+            "auth_challenge": auth_challenge,
+            "unavailable": unavailable,
+            "body_text": body_text,
+            "screenshot_path": str(screenshot_path) if screenshot_saved else "",
+            "read_only": True,
+        }
+    except Exception as exc:
+        return {
+            "status": "inspection_error",
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+            "requested_url": offer_url,
+            "expected_offer_id": expected_offer_id,
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+            "read_only": True,
+        }
 
 
 def _assert_management_inspection_gate(report: dict[str, object]) -> None:
@@ -403,6 +558,7 @@ def main() -> int:
     operator_config = load_json_with_local_override(config_dir / "operator_config.json")
     system_config = load_json_with_local_override(config_dir / "systems" / "1688_sku_offline.json")
     output_path = Path(args.output)
+    offer_url, expected_offer_id = _resolve_offer_target(args.offer_url, args.offer_id)
     publish_url = ""
     entry_evidence: dict[str, object] = {"entry_mode": "direct_draft_url"}
     if not args.open_from_management:
@@ -468,6 +624,18 @@ def main() -> int:
             )
             screenshot_path = output_path.with_suffix(".load-failure.png")
             screenshot_saved = bool(browser.driver.save_screenshot(str(screenshot_path)))
+            offer_evidence = (
+                _inspect_offer_detail_page(
+                    browser,
+                    offer_url=offer_url,
+                    expected_offer_id=expected_offer_id,
+                    expected_title=expected_title,
+                    expected_shop=identity.shop_name,
+                    output_path=output_path,
+                )
+                if offer_url
+                else None
+            )
             evidence = {
                 "status": "unavailable",
                 "checked_at": datetime.now(timezone.utc).isoformat(),
@@ -487,6 +655,7 @@ def main() -> int:
                 "boot_network_probe_installed": boot_network_probe_installed,
                 "boot_network_records": boot_network_records,
                 "screenshot_path": str(screenshot_path) if screenshot_saved else "",
+                "offer": offer_evidence,
                 "draft_saved": False,
                 "offer_submitted": False,
                 "account_key": identity.account_key,
@@ -546,6 +715,20 @@ def main() -> int:
         buyer_schedule = browser._draft_selected_buyer_protection_schedule()
         assist_messages = browser._collect_assist_messages()
         boot_network_records = _collect_draft_boot_network_records(browser)
+        draft_screenshot_path = output_path.with_suffix(".draft.png")
+        draft_screenshot_saved = bool(browser.driver.save_screenshot(str(draft_screenshot_path)))
+        offer_evidence = (
+            _inspect_offer_detail_page(
+                browser,
+                offer_url=offer_url,
+                expected_offer_id=expected_offer_id,
+                expected_title=expected_title,
+                expected_shop=identity.shop_name,
+                output_path=output_path,
+            )
+            if offer_url
+            else None
+        )
 
     selected_delivery_ids = {
         int(item)
@@ -585,6 +768,11 @@ def main() -> int:
         submit_reapply_fields=submit_reapply_fields,
         submit_reapply_contract_sha256=submit_reapply_contract_sha256,
     )
+    if offer_evidence is not None:
+        checks["offer_exists"] = offer_evidence.get("status") == "passed"
+        field_outcomes["offer_exists"] = {
+            "status": "persisted" if checks["offer_exists"] else "failed"
+        }
     evidence = {
         "artifact_version": INSPECTION_ARTIFACT_VERSION,
         "inspector_build_sha": resolve_build_sha(PROJECT_ROOT.parent),
@@ -596,6 +784,8 @@ def main() -> int:
         "entry": entry_evidence,
         "requested_url": publish_url,
         "current_url": current_url,
+        "draft_screenshot_path": str(draft_screenshot_path) if draft_screenshot_saved else "",
+        "offer": offer_evidence,
         "checks": checks,
         "field_outcomes": field_outcomes,
         "submit_reapply_contract_sha256": submit_reapply_contract_sha256,
@@ -624,6 +814,8 @@ def main() -> int:
             "buyer_protection": expected_buyer_protection,
             "buyer_protection_code": expected_buyer_protection_code,
             "submit_reapply_required_fields": sorted(submit_reapply_fields),
+            "offer_id": expected_offer_id,
+            "offer_url": offer_url,
         },
         "boot_network_probe_installed": boot_network_probe_installed,
         "boot_network_records": boot_network_records,
