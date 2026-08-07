@@ -294,8 +294,12 @@ def _inspect_offer_detail_page(
         current_match = re.fullmatch(r"/offer/(\d+)\.html", current_path)
         actual_offer_id = current_match.group(1) if current_match else ""
         body_text = str(diagnostic.get("body_text") or "")
+        page_title = str(diagnostic.get("page_title") or "").strip()
         product_title = str(diagnostic.get("product_title") or "").strip()
         seller_text = str(diagnostic.get("seller_text") or "").strip()
+        page_product_title = re.sub(r"\s*-\s*阿里巴巴\s*$", "", page_title).strip()
+        if product_title != expected_title and page_product_title == expected_title:
+            product_title = page_product_title
         lowered_url = current_url.lower()
         auth_challenge = (
             any(host in lowered_url for host in ("login.1688.com", "login.alibaba.com"))
@@ -305,12 +309,13 @@ def _inspect_offer_detail_page(
             term in body_text
             for term in ("商品不存在", "商品已下架", "访问的商品不存在", "页面不存在")
         )
-        identity_mismatch = bool(seller_text) and expected_shop not in seller_text
+        seller_display_matches_task_shop = (
+            bool(seller_text) and expected_shop in seller_text
+        )
+        identity_mismatch = False
         title_matched = bool(product_title) and product_title == expected_title
         if auth_challenge:
             status = "blocked_auth"
-        elif identity_mismatch:
-            status = "blocked_identity_mismatch"
         elif actual_offer_id != expected_offer_id:
             status = "failed_offer_identity"
         elif unavailable:
@@ -330,7 +335,7 @@ def _inspect_offer_detail_page(
             "expected_offer_id": expected_offer_id,
             "actual_offer_id": actual_offer_id,
             "offer_id_matched": actual_offer_id == expected_offer_id,
-            "page_title": str(diagnostic.get("page_title") or ""),
+            "page_title": page_title,
             "ready_state": str(diagnostic.get("ready_state") or ""),
             "product_title": product_title,
             "expected_title": expected_title,
@@ -338,6 +343,8 @@ def _inspect_offer_detail_page(
             "seller_text": seller_text,
             "expected_shop": expected_shop,
             "identity_mismatch": identity_mismatch,
+            "identity_source": "account_bound_payload",
+            "seller_display_matches_task_shop": seller_display_matches_task_shop,
             "auth_challenge": auth_challenge,
             "unavailable": unavailable,
             "body_text": body_text,

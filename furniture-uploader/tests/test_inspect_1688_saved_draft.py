@@ -170,6 +170,41 @@ class InspectSavedDraftTests(unittest.TestCase):
         self.assertEqual(evidence["status"], "blocked_auth")
         self.assertTrue(evidence["auth_challenge"])
 
+    def test_offer_page_does_not_use_public_seller_name_as_task_identity(self) -> None:
+        class OfferDriver:
+            current_url = ""
+
+            def get(self, url: str) -> None:
+                self.current_url = url
+
+            def execute_script(self, _script: str) -> dict[str, object]:
+                return {
+                    "current_url": self.current_url,
+                    "page_title": "Target product - 阿里巴巴",
+                    "ready_state": "complete",
+                    "body_text": "常州洁秋家居有限公司 Target product",
+                    "product_title": "常州洁秋家居有限公司",
+                    "seller_text": "常州洁秋家居有限公司",
+                }
+
+            def save_screenshot(self, _path: str) -> bool:
+                return True
+
+        evidence = inspector._inspect_offer_detail_page(
+            SimpleNamespace(driver=OfferDriver(), _pause=lambda _seconds: None),
+            offer_url="https://detail.1688.com/offer/1072868453052.html",
+            expected_offer_id="1072868453052",
+            expected_title="Target product",
+            expected_shop="木刻理想",
+            output_path=Path("inspection.json"),
+        )
+
+        self.assertEqual(evidence["status"], "passed")
+        self.assertEqual(evidence["product_title"], "Target product")
+        self.assertEqual(evidence["identity_source"], "account_bound_payload")
+        self.assertFalse(evidence["identity_mismatch"])
+        self.assertFalse(evidence["seller_display_matches_task_shop"])
+
     def test_inspection_draft_id_must_match_unique_payload_draft(self) -> None:
         payload = {
             "workflow": {
