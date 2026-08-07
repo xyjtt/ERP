@@ -33,7 +33,7 @@ from cross_project_runtime import (
 )
 from operation_saga import OperationSagaRepository, SagaOperation
 from sku_operation_saga import build_saga_operations, persist_ali1688_results
-from sku_offline_main import resolve_store_account_binding
+from sku_offline_main import resolve_jushuitan_store_name, resolve_store_account_binding
 from sku_offline_tasks import dedupe_offline_tasks, filter_offline_tasks, load_offline_tasks
 from stop_sale_audit import (
     StopSaleAuditRepository,
@@ -1228,6 +1228,7 @@ def main() -> int:
                 PROJECT_ROOT / "config" / "systems" / "1688_sku_offline.json"
             )
             store_binding = resolve_store_account_binding(system_config, store_name)
+            jushuitan_store_name = resolve_jushuitan_store_name(store_binding, store_name)
             binding = resolve_executor_binding(
                 account_key,
                 fallback_profile_ref=str(store_binding.get("browser_profile_dir") or ""),
@@ -1246,6 +1247,7 @@ def main() -> int:
                 run_id,
                 account_key,
                 audit_tasks,
+                jushuitan_store_names={store_name: jushuitan_store_name},
             )
             if recovery_requested:
                 recovery_approval = load_interrupted_recovery_approval(

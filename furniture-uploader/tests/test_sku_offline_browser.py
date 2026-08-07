@@ -227,6 +227,8 @@ class SkuOfflineBrowserTests(unittest.TestCase):
             "jinhemeng",
             "gutu_baiqian",
             "qianzhishang_qiyiguo",
+            "pingcan",
+            "xinbaiguang_shanzhu",
         }
         for account_key in standard_profile_keys:
             self.assertEqual(
@@ -237,9 +239,20 @@ class SkuOfflineBrowserTests(unittest.TestCase):
             profiles["famei"],
             "C:/Users/Administrator/AppData/Local/Microsoft/Edge/User Data_recovery_1",
         )
-        self.assertEqual(len(profiles), 17)
-        self.assertTrue(
-            {"pingcan", "pingcan_rpa", "xinbaiguang_shanzhu"}.isdisjoint(profiles)
+        self.assertEqual(len(profiles), 19)
+        self.assertNotIn("pingcan_rpa", profiles)
+        self.assertEqual(
+            next(item for item in bindings if item["account_key"] == "pingcan")["store_name"],
+            "阿里巴巴-常州平灿家居有限公司",
+        )
+        xinbaiguang = next(
+            item for item in bindings
+            if item["account_key"] == "xinbaiguang_shanzhu"
+        )
+        self.assertEqual(xinbaiguang["store_name"], "新佰广1688")
+        self.assertEqual(
+            xinbaiguang["jushuitan_store_name"],
+            "阿里巴巴-新佰广",
         )
 
     def test_management_url_normalizes_to_unfiltered_all_tab(self) -> None:

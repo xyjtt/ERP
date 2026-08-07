@@ -44,6 +44,28 @@ test("replacement sync rejects offline handling", () => {
   );
 });
 
+test("replacement sync preserves business identity and separates the Jushuitan selector", () => {
+  const payload = rawTask({
+    store_name: "新佰广1688",
+    jushuitan_store_name: "阿里巴巴-新佰广",
+  });
+  const task = parseSyncTask(payload);
+  assert.equal(task.store_name, "新佰广1688");
+  assert.equal(task.jushuitan_store_name, "阿里巴巴-新佰广");
+  assert.equal(
+    task.task_id,
+    buildSyncTaskId(payload as ReturnType<typeof rawTask> & {
+      store_name: string;
+      product_id: string;
+      online_sku: string;
+      replacement_sku: string;
+    }),
+  );
+  const [group] = groupSyncTasksByStore([task]);
+  assert.equal(group.store_name, "新佰广1688");
+  assert.equal(group.jushuitan_store_name, "阿里巴巴-新佰广");
+});
+
 test("store grouping dedupes product IDs but keeps per-SKU tasks", () => {
   const first = parseSyncTask(rawTask());
   const second = parseSyncTask(rawTask({

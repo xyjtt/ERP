@@ -401,3 +401,11 @@
 - Exact recovery is fail-fast: standard account lock only, no custom/disabled lock, no interactive login, notifications enabled, and all lock/lease/crawler/Jushuitan waits set to zero.
 - Development validation: focused `59/59`, full Python `765/765`, Jushuitan `28/28`, TypeScript `check/build`, `compileall`, and `doctor=ok` with two pre-existing warnings.
 - Status remains development-only. No executor deployment or production recovery has run.
+
+## 2026-08-08 ERP Identity Closeout And Replace Scheduler
+
+- Canonical `pingcan` and verified `xinbaiguang_shanzhu` are now included in the shared Stop-Sale/Replace mapping, bringing the effective ERP binding count to 19. `pingcan_rpa` remains disabled and cannot be scheduled.
+- Xinbaiguang keeps `store_name=新佰广1688`; only the Jushuitan picker receives `jushuitan_store_name=阿里巴巴-新佰广`. A real read-only executor Probe confirmed both the picker identity and returned-row business identity.
+- The checked-in evidence hash is enforced by the roster sync policy. A targeted sync of `pingcan + xinbaiguang_shanzhu` moved the local config from 18 to 19 bindings while preserving all non-target rows; the full sync still rejects the unrelated `muke_lixiang` roster/Preview drift.
+- A formal daily Replace manager and Windows task installer now exist. The intended tasks are `YYDD-1688-Replace-Daily` at 14:00 and `YYDD-1688-Replace-Daily-Launcher`, using S4U/SYSTEM, `IgnoreNew`, account-scoped runtime leases, Saga/Outbox, and fixed business-date idempotency.
+- Development tests and script checks pass at this stage. The real read-only identity Canary is accepted; executor deployment and a one-item replacement write Canary are still separate acceptance steps. No successful Stop-Sale action was replayed.

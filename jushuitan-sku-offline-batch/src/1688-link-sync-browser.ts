@@ -197,7 +197,7 @@ async function selectStoreInSyncModal(modal: Locator, storeName: string): Promis
 
 async function submitStoreSync(page: Page, target: Target, group: StoreSyncGroup): Promise<string> {
   const modal = await openSyncModal(page, target);
-  await selectStoreInSyncModal(modal, group.store_name);
+  await selectStoreInSyncModal(modal, group.jushuitan_store_name);
   const textarea = await firstVisible(modal, [
     'textarea[placeholder*="商品链接或商品ID"]',
     'textarea[placeholder*="商品链接"]',
@@ -248,6 +248,7 @@ async function saveEvidence(
   await fs.writeFile(targetHtmlPath, targetHtml, "utf8");
   await fs.writeFile(jsonPath, JSON.stringify({
     store_name: group.store_name,
+    jushuitan_store_name: group.jushuitan_store_name,
     batch_index: group.batch_index,
     product_ids: group.product_ids,
     stage,
@@ -267,6 +268,7 @@ function resultForTask(task: SyncTask, status: SyncResult["status"], options: {
     task_id: task.task_id,
     status,
     store_name: task.store_name,
+    jushuitan_store_name: task.jushuitan_store_name,
     product_id: task.product_id,
     online_sku: task.online_sku,
     replacement_sku: task.replacement_sku,

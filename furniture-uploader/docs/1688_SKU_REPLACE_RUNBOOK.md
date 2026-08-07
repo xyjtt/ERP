@@ -1,6 +1,6 @@
 # 1688 SKU 替换运行手册
 
-更新时间：2026-08-04
+更新时间：2026-08-08
 
 ## 业务规则
 
@@ -71,6 +71,26 @@ python scripts\run_1688_sku_replace_pipeline.py `
 ### 登录态失效处理
 
 生产执行默认复用映射的 Profile。发现登录失效后，执行器会释放 ERP 浏览器并调用共享 1688 项目的账号级登录一次；该调用显式复用既有滑块 RPA，最多 4 次。随后重新打开管理页，并核对 `expected_member_id` 和店铺。未解决滑块、未知风控或技术异常写审计并发钉钉，只有真实身份不匹配停止该店。只有人工调试时才使用 `--require-manual-login`。
+
+## 正式日度任务
+
+安装或更新任务定义：
+
+```powershell
+PowerShell.exe -NoProfile -ExecutionPolicy Bypass `
+  -File scripts\manage_1688_sku_replace_daily_task.ps1 `
+  -Action install `
+  -DailyAt 14:00 `
+  -ProjectRoot E:\1688\ERP-final-75368f8\furniture-uploader `
+  -SharedRuntimeRoot E:\1688\1688-script-new `
+  -JushuitanRoot E:\1688\ERP-final-75368f8\jushuitan-sku-offline-batch
+```
+
+- 正式任务：`YYDD-1688-Replace-Daily`，S4U，每天 14:00，`MultipleInstances=IgnoreNew`。
+- 受控启动器：`YYDD-1688-Replace-Daily-Launcher`，SYSTEM；不得创建第二套 Replace 任务名。
+- 手工只读 Preview 使用 `-Action preview`；等价启动使用 `-Action start`。状态核对使用 `-Action status`，同时读取 Task、Launcher 和 `logs/sku_replace/scheduler/latest.summary.json`。
+- 同一业务日期已有 `success/completed_with_exceptions/business_skipped/no_tasks` Summary 时不再次执行；需要恢复时必须按精确失败范围走独立恢复流程，不能删除 Summary 后广泛重跑。
+- `LastTaskResult=0`、任务 `Running/Ready` 或 manager exit 0 不是业务验收。必须核对 Replace Run/Item、Saga、Outbox、1688 持久化和聚水潭终态。
 
 ## 日志
 

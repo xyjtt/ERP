@@ -66,6 +66,32 @@ test("parser rejects a non-Alibaba task", () => {
   assert.throws(() => parseCleanupTask({ ...rawTask, platform: "Taobao" }), /Only Alibaba/);
 });
 
+test("business store identity stays stable while Jushuitan uses an exact selector name", () => {
+  const task = parseCleanupTask({
+    ...rawTask,
+    store_name: "新佰广1688",
+    jushuitan_store_name: "阿里巴巴-新佰广",
+  });
+  assert.equal(task.store_name, "新佰广1688");
+  assert.equal(task.jushuitan_store_name, "阿里巴巴-新佰广");
+  assert.equal(task.task_id, buildTaskId({...rawTask, store_name: "新佰广1688"}));
+
+  const row = buildStructuredRowEvidence(
+    0,
+    "verified xinbaiguang row",
+    ["店铺名称", "商品ID", "平台店铺商品编码", "线上商品编码"],
+    ["新佰广1688", task.product_id, task.platform_store_item_code, task.online_sku],
+  );
+  assert.deepEqual(findMatchingRows(task, [row]).map((item) => item.index), [0]);
+});
+
+test("non-prefixed business store requires an explicit verified Jushuitan store", () => {
+  assert.throws(
+    () => parseCleanupTask({...rawTask, store_name: "新佰广1688"}),
+    /exact Alibaba store name/,
+  );
+});
+
 test("execute rejects a task that has not succeeded on 1688", () => {
   const task = parseCleanupTask({ ...rawTask, source_status: "pending_1688" });
   assert.throws(() => assertTasksAllowedForMode("execute", [task]), /already verified/);

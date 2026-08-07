@@ -1,19 +1,38 @@
 {
-  "schema_version": 1,
-  "expected_enabled_count": 20,
-  "expected_final_configured_count": 17,
-  "blocked_accounts": {
+  "schema_version": 2,
+  "expected_enabled_count": 19,
+  "expected_final_configured_count": 19,
+  "canonical_accounts": {
     "pingcan": {
-      "reason_code": "member_identity_collision",
-      "required_resolution": "pingcan 与 pingcan_rpa 共用 expected_member_id、shop_id 和源店铺；必须由业务指定唯一 ERP owner，不能自动选择。"
-    },
-    "pingcan_rpa": {
-      "reason_code": "member_identity_collision",
-      "required_resolution": "pingcan 与 pingcan_rpa 共用 expected_member_id、shop_id 和源店铺；必须由业务指定唯一 ERP owner，不能自动选择。"
-    },
-    "xinbaiguang_shanzhu": {
-      "reason_code": "jushuitan_store_mapping_missing",
-      "required_resolution": "authoritative roster 只有 1688 店铺名“新佰广1688”，没有聚水潭精确店铺名；需新增经确认的 jushuitan_store_name 后才能配置。"
+      "expected_shop_name": "阿里巴巴-常州平灿家居有限公司",
+      "source_store_name": "阿里巴巴-常州平灿家居有限公司",
+      "login_name": "平灿家居",
+      "expected_member_id": "b2b-2221733989984a3731",
+      "superseded_account_keys": [
+        "pingcan_rpa"
+      ]
     }
-  }
+  },
+  "disabled_accounts": {
+    "pingcan_rpa": {
+      "reason_code": "superseded_identity",
+      "superseded_by_account_key": "pingcan",
+      "expected_shop_name": "阿里巴巴-常州平灿家居有限公司",
+      "expected_member_id": "b2b-2221733989984a3731",
+      "required_state": "disabled"
+    }
+  },
+  "jushuitan_store_mappings": {
+    "xinbaiguang_shanzhu": {
+      "business_store_name": "新佰广1688",
+      "jushuitan_store_name": "阿里巴巴-新佰广",
+      "jushuitan_row_store_name": "新佰广1688",
+      "verified": true,
+      "evidence_type": "live_jushuitan_store_selector_and_row_query",
+      "evidence_run_id": "xinbaiguang-jst-store-discovery-20260808",
+      "evidence_file": "docs/operations/1688_XINBAIGUANG_JUSHUITAN_IDENTITY_EVIDENCE_2026-08-08.json",
+      "evidence_sha256": "484835ef897f83bf65959d06ac16771b005bc0b14199fd3d4e6ec931d7d6f23d"
+    }
+  },
+  "blocked_accounts": {}
 }

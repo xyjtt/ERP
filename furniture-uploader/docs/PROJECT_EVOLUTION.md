@@ -205,3 +205,10 @@
 - The recovery authorization now binds both immutable input identity and runtime identity: approval SHA, CSV SHA, source run, target run, account, fixed interrupted contract, count, and exact operation-key set.
 - All keys are validated before any Saga is changed. SERIALIZABLE locks and compare-and-set updates make scope drift, a newly created Outbox, or historical 1688 success abort the entire transition.
 - Recovery resource acquisition is intentionally fail-fast. A busy account, browser slot, crawler, account lock, or Jushuitan lock is a stop condition for a fresh review, not permission to wait or broaden the scope.
+
+## 2026-08-08 ERP Store Identity Separates Business And Jushuitan Names
+
+- ERP mapping evolved from one overloaded `store_name` to two explicit identities: caller/task business `store_name` remains authoritative for Saga, operation keys, audit, idempotency and result-row matching; optional `jushuitan_store_name` is used only by the Jushuitan store picker.
+- Canonical ownership resolves the old duplicate identity: `pingcan` remains enabled while `pingcan_rpa` is disabled/superseded. Disabled technical profiles stay in authoritative history but never become effective ERP bindings.
+- A targeted roster-sync mode now permits one verified account gap to be resolved without suppressing an unrelated account's full-sync mismatch. Global metadata, set, hash, disabled-account and collision gates still run, and the report explicitly states that full identity validation was not executed.
+- Replace scheduling evolved from manual pipeline invocation to a fixed-date idempotent daily manager plus S4U Windows task and SYSTEM launcher. Business skips and platform prompts remain exception outcomes rather than synthetic success.

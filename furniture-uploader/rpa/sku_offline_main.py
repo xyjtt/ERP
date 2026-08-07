@@ -151,12 +151,22 @@ def main() -> None:
             preview_path = write_preview_report(project_root, preview)
             print_preview(preview, preview_path)
             if args.jushuitan_handoff_out:
+                jushuitan_store_names = build_jushuitan_store_name_map(
+                    system_config,
+                    list(preview.get("selected_tasks", [])),
+                )
                 write_jushuitan_handoff(
                     Path(args.jushuitan_handoff_out),
                     (
-                        build_jushuitan_sync_records(preview)
+                        build_jushuitan_sync_records(
+                            preview,
+                            jushuitan_store_names=jushuitan_store_names,
+                        )
                         if operation == "replace"
-                        else build_jushuitan_handoff_records(preview)
+                        else build_jushuitan_handoff_records(
+                            preview,
+                            jushuitan_store_names=jushuitan_store_names,
+                        )
                     ),
                 )
             return
@@ -337,6 +347,7 @@ def execute_preview(
     ]
     existing_business_skips = list(preview.get("business_skipped_tasks", []))
     store_groups = group_tasks_by_store(selected_tasks)
+    jushuitan_store_names: dict[str, str] = {}
     action_label = "replace" if operation == "replace" else "offline"
     if len(store_groups) > 1 and not bool(execution_config.get("allow_multi_store_batch", False)):
         raise ValueError(
@@ -368,6 +379,10 @@ def execute_preview(
     for store_name, store_tasks in store_groups.items():
         try:
             account_binding = resolve_store_account_binding(system_config, store_name)
+            jushuitan_store_names[store_name] = resolve_jushuitan_store_name(
+                account_binding,
+                store_name,
+            )
             store_operator_config = build_store_operator_config(
                 operator_config,
                 account_binding=account_binding,
@@ -737,6 +752,7 @@ def execute_preview(
         handoff_records = build_jushuitan_handoff_records(
             preview,
             successful_task_statuses=successful_task_statuses,
+            jushuitan_store_names=jushuitan_store_names,
         )
         write_jushuitan_handoff(handoff_path, handoff_records)
         summary["jushuitan_handoff_path"] = str(handoff_path)
@@ -752,6 +768,7 @@ def execute_preview(
         sync_records = build_jushuitan_sync_records(
             preview,
             successful_task_statuses=successful_task_statuses,
+            jushuitan_store_names=jushuitan_store_names,
         )
         write_jushuitan_handoff(sync_path, sync_records)
         summary["jushuitan_handoff_path"] = str(sync_path)
@@ -766,6 +783,7 @@ def build_jushuitan_handoff_records(
     preview: dict[str, Any],
     *,
     successful_task_statuses: dict[tuple[str, str, str], str] | None = None,
+    jushuitan_store_names: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     selected_tasks = list(preview.get("selected_tasks", []))
     selected_keys = {task.dedupe_key for task in selected_tasks}
@@ -796,11 +814,15 @@ def build_jushuitan_handoff_records(
             "".join(str(part).split()).lower() for part in identity_parts
         )
         task_id = hashlib.sha256(normalized_identity.encode("utf-8")).hexdigest()
+        jushuitan_store_name = str(
+            (jushuitan_store_names or {}).get(task.store_name) or task.store_name
+        ).strip()
         records[task_id] = {
             "task_id": task_id,
             "source": "1688_sku_offline",
             "source_status": source_status,
             "store_name": task.store_name,
+            "jushuitan_store_name": jushuitan_store_name,
             "platform": task.platform,
             "product_id": task.product_id,
             "online_sku": task.online_sku,
@@ -817,6 +839,7 @@ def build_jushuitan_sync_records(
     preview: dict[str, Any],
     *,
     successful_task_statuses: dict[tuple[str, str, str], str] | None = None,
+    jushuitan_store_names: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     records: dict[str, dict[str, Any]] = {}
     for task in list(preview.get("selected_tasks", [])):
@@ -835,11 +858,15 @@ def build_jushuitan_sync_records(
             "".join(str(part).split()).lower() for part in identity_parts
         )
         task_id = hashlib.sha256(normalized_identity.encode("utf-8")).hexdigest()
+        jushuitan_store_name = str(
+            (jushuitan_store_names or {}).get(task.store_name) or task.store_name
+        ).strip()
         records[task_id] = {
             "task_id": task_id,
             "source": "1688_sku_replace",
             "source_status": source_status,
             "store_name": task.store_name,
+            "jushuitan_store_name": jushuitan_store_name,
             "platform": task.platform,
             "product_id": task.product_id,
             "online_sku": task.online_sku,
@@ -859,6 +886,39 @@ def write_jushuitan_handoff(path: Path, records: list[dict[str, Any]]) -> Path:
         for record in records:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
     return path
+
+
+def resolve_jushuitan_store_name(
+    account_binding: dict[str, Any],
+    business_store_name: str,
+) -> str:
+    exact_name = str(
+        account_binding.get("jushuitan_store_name")
+        or account_binding.get("store_name")
+        or ""
+    ).strip()
+    if not exact_name.startswith("阿里巴巴-"):
+        raise OfflineAccountMappingError(
+            "No verified exact Jushuitan store mapping configured for "
+            f"'{business_store_name}'."
+        )
+    return exact_name
+
+
+def build_jushuitan_store_name_map(
+    system_config: dict[str, Any],
+    tasks: list[OfflineTask],
+) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for business_store_name in sorted(
+        {str(task.store_name or "").strip() for task in tasks if str(task.store_name or "").strip()}
+    ):
+        binding = resolve_store_account_binding(system_config, business_store_name)
+        result[business_store_name] = resolve_jushuitan_store_name(
+            binding,
+            business_store_name,
+        )
+    return result
 
 
 def resolve_store_account_binding(system_config: dict[str, Any], store_name: str) -> dict[str, Any]:
