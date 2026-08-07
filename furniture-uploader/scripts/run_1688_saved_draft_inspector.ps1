@@ -186,11 +186,21 @@ try {
         $stage = "inspector_running"
         $childStarted = $true
         Write-LauncherMarker "running"
-        & $resolvedPython @pythonArguments 1> $stdoutPath 2> $stderrPath
-        if ($null -eq $LASTEXITCODE) {
+        # Windows PowerShell 5.1 promotes native stderr to ErrorRecord objects.
+        # Keep those diagnostics in the stderr artifact without terminating the
+        # wrapper before the native process has returned its real exit code.
+        $previousErrorActionPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = "Continue"
+            & $resolvedPython @pythonArguments 1> $stdoutPath 2> $stderrPath
+            $nativeExitCode = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
+        if ($null -eq $nativeExitCode) {
             throw "Inspector process exited without an exit code."
         }
-        $exitCode = [int]$LASTEXITCODE
+        $exitCode = [int]$nativeExitCode
         $stage = "inspector_exited"
     } finally {
         Pop-Location

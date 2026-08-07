@@ -250,6 +250,79 @@ class SavedDraftInspectorWrapperTests(unittest.TestCase):
             self.assertFalse(marker["child_started"])
             self.assertFalse(marker["output_exists"])
 
+    def test_native_stderr_does_not_abort_before_real_exit_code_is_recorded(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "ERP Root"
+            scripts = root / "scripts"
+            scripts.mkdir(parents=True)
+            runtime_root = Path(temp_dir) / "Runtime Root"
+            runtime_root.mkdir()
+            payload = root / "payload.json"
+            payload.write_text("{}", encoding="utf-8")
+            output = root / "artifacts" / "inspection.json"
+            (scripts / "inspect_1688_saved_draft.py").write_text(
+                textwrap.dedent(
+                    """
+                    import sys
+
+                    print("Traceback (most recent call last):", file=sys.stderr)
+                    print("RuntimeError: diagnostic retained", file=sys.stderr)
+                    raise SystemExit(7)
+                    """
+                ),
+                encoding="utf-8",
+            )
+            command = [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(WRAPPER),
+                "-ProjectRoot",
+                str(root),
+                "-Payload",
+                str(payload),
+                "-Output",
+                str(output),
+                "-DraftId",
+                "draft-1",
+                "-ExpectedShop",
+                "shop-1",
+                "-SharedRuntimeRoot",
+                str(runtime_root),
+                "-PythonExe",
+                sys.executable,
+            ]
+
+            completed = subprocess.run(
+                command,
+                cwd=PROJECT_ROOT,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=30,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 7)
+            marker = json.loads(
+                Path(f"{output}.launcher.json").read_text(encoding="utf-8-sig")
+            )
+            stderr_bytes = Path(f"{output}.stderr.log").read_bytes()
+            stderr = stderr_bytes.decode(
+                "utf-16" if stderr_bytes.startswith((b"\xff\xfe", b"\xfe\xff")) else "utf-8-sig",
+                errors="replace",
+            )
+            self.assertEqual(marker["status"], "failed")
+            self.assertEqual(marker["stage"], "inspector_exited")
+            self.assertEqual(marker["exit_code"], 7)
+            self.assertEqual(marker["launcher_error"], "")
+            self.assertIn("Traceback (most recent call last):", stderr)
+            self.assertIn("RuntimeError: diagnostic retained", stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
