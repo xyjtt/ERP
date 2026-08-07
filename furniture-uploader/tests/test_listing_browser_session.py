@@ -114,12 +114,14 @@ class ListingBrowserSessionTests(unittest.TestCase):
 
     def test_session_logs_in_then_attaches_and_releases_owned_runtime(self) -> None:
         events: list[str] = []
+        stages: list[str] = []
 
         def login(*args, **kwargs):
             events.append("login")
             self.assertEqual(args[1], "muke_lixiang")
             self.assertEqual(args[2], "木刻理想")
             self.assertTrue(kwargs["keep_browser_open"])
+            self.assertEqual(kwargs["timeout_seconds"], 37)
             return {"status": "success", "browser_runtime_preserved": True}
 
         class RecordingBrowser(FakeBrowser):
@@ -157,6 +159,8 @@ class ListingBrowserSessionTests(unittest.TestCase):
                 shared_runtime_root="D:/runtime",
                 expected_account_key="muke_lixiang",
                 expected_cdp_port=9306,
+                login_timeout_seconds=37,
+                progress_callback=stages.append,
             ) as (browser, binding, identity):
                 self.assertEqual(browser.config["debugger_address"], "127.0.0.1:9306")
                 self.assertEqual(binding.cdp_port, 9306)
@@ -180,6 +184,18 @@ class ListingBrowserSessionTests(unittest.TestCase):
             ],
         )
         self.assertEqual(len(guard.closers), 1)
+        self.assertEqual(
+            stages,
+            [
+                "binding_validated",
+                "account_lock_acquired",
+                "runtime_lease_acquired",
+                "login_subprocess_starting",
+                "login_subprocess_completed",
+                "browser_attach_starting",
+                "browser_attached",
+            ],
+        )
 
     def test_wrong_external_cdp_binding_stops_before_login(self) -> None:
         with (

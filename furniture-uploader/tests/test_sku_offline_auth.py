@@ -43,7 +43,9 @@ class SkuOfflineAuthTests(unittest.TestCase):
         def runner(command, **kwargs):
             captured["command"] = list(command)
             captured["kwargs"] = dict(kwargs)
-            return subprocess.CompletedProcess(command, 0, stdout="sensitive runtime output", stderr="")
+            kwargs["stdout"].write("sensitive runtime output")
+            kwargs["stdout"].flush()
+            return subprocess.CompletedProcess(command, 0)
 
         with tempfile.TemporaryDirectory() as temp_dir:
             runtime_root = self.create_runtime(Path(temp_dir), with_venv_python=True)
@@ -68,6 +70,11 @@ class SkuOfflineAuthTests(unittest.TestCase):
         self.assertEqual(result["status"], "success")
         self.assertNotIn("stdout", result)
         self.assertEqual(captured["kwargs"]["timeout"], 300)
+        self.assertNotIn("capture_output", captured["kwargs"])
+        self.assertIsNot(captured["kwargs"]["stdout"], subprocess.PIPE)
+        self.assertIsNot(captured["kwargs"]["stderr"], subprocess.PIPE)
+        self.assertEqual(captured["kwargs"]["stdin"], subprocess.DEVNULL)
+        self.assertEqual(captured["kwargs"]["env"]["PYTHONUNBUFFERED"], "1")
 
     def test_listing_handoff_keeps_browser_and_accepts_unconfirmed_identity(self) -> None:
         captured: dict = {}
@@ -112,6 +119,18 @@ class SkuOfflineAuthTests(unittest.TestCase):
             )
 
         self.assertEqual(captured["command"][0], sys.executable)
+
+    def test_default_runner_supports_file_backed_subprocess_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_root = self.create_runtime(Path(temp_dir) / "Runtime Root With Spaces")
+            result = ensure_1688_authenticated_session(
+                runtime_root,
+                "gonglai",
+                "常州工莱家具",
+                timeout_seconds=10,
+            )
+
+        self.assertEqual(result["status"], "success")
 
     def test_captcha_exit_code_is_risk_control(self) -> None:
         def runner(command, **_kwargs):
@@ -228,11 +247,13 @@ class SkuOfflineAuthTests(unittest.TestCase):
 
     def test_timeout_is_login_required(self) -> None:
         def runner(command, **kwargs):
+            kwargs["stderr"].write("login worker waiting password=do-not-leak")
+            kwargs["stderr"].flush()
             raise subprocess.TimeoutExpired(command, kwargs["timeout"])
 
         with tempfile.TemporaryDirectory() as temp_dir:
             runtime_root = self.create_runtime(Path(temp_dir))
-            with self.assertRaisesRegex(OfflineLoginRequiredError, "timed out"):
+            with self.assertRaisesRegex(OfflineLoginRequiredError, "timed out") as caught:
                 ensure_1688_authenticated_session(
                     runtime_root,
                     "gonglai",
@@ -240,6 +261,10 @@ class SkuOfflineAuthTests(unittest.TestCase):
                     timeout_seconds=12,
                     command_runner=runner,
                 )
+
+        self.assertIn("login worker waiting", str(caught.exception))
+        self.assertIn("password=<redacted>", str(caught.exception))
+        self.assertNotIn("do-not-leak", str(caught.exception))
 
     def test_runtime_handoff_cleanup_stops_only_the_bound_account_edge(self) -> None:
         captured: dict = {}

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlsplit, urlunsplit
@@ -84,6 +86,22 @@ def extract_login_failure_diagnostic(
     return compact[-max(1, int(max_chars)) :]
 
 
+def _read_capture(stream: Any) -> str:
+    stream.flush()
+    stream.seek(0)
+    return str(stream.read() or "")
+
+
+def _completed_output(value: Any, captured: str) -> str:
+    if value is None:
+        return captured
+    if isinstance(value, bytes):
+        rendered = value.decode("utf-8", errors="replace")
+    else:
+        rendered = str(value)
+    return rendered or captured
+
+
 def ensure_1688_authenticated_session(
     shared_runtime_root: str | Path,
     account_key: str,
@@ -133,24 +151,45 @@ def ensure_1688_authenticated_session(
         command.append("--keep-browser-open")
 
     result: subprocess.CompletedProcess[Any] | None = None
+    result_stdout = ""
+    result_stderr = ""
+    environment = os.environ.copy()
+    environment["PYTHONUTF8"] = "1"
+    environment["PYTHONUNBUFFERED"] = "1"
     for identity_attempt in range(2):
-        try:
-            result = command_runner(
-                command,
-                cwd=str(runtime_root),
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=timeout,
-                check=False,
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise OfflineLoginRequiredError(
-                f"1688 automatic login timed out after {timeout} seconds."
-            ) from exc
-        except OSError as exc:
-            raise OfflineLoginRequiredError("1688 automatic login process could not be started.") from exc
+        with (
+            tempfile.TemporaryFile(mode="w+t", encoding="utf-8", errors="replace") as stdout,
+            tempfile.TemporaryFile(mode="w+t", encoding="utf-8", errors="replace") as stderr,
+        ):
+            try:
+                result = command_runner(
+                    command,
+                    cwd=str(runtime_root),
+                    stdin=subprocess.DEVNULL,
+                    stdout=stdout,
+                    stderr=stderr,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=timeout,
+                    check=False,
+                    env=environment,
+                )
+            except subprocess.TimeoutExpired as exc:
+                diagnostic = extract_login_failure_diagnostic(
+                    _read_capture(stdout),
+                    _read_capture(stderr),
+                )
+                raise OfflineLoginRequiredError(
+                    f"1688 automatic login timed out after {timeout} seconds."
+                    + (f" Diagnostic: {diagnostic}" if diagnostic else "")
+                ) from exc
+            except OSError as exc:
+                raise OfflineLoginRequiredError(
+                    "1688 automatic login process could not be started."
+                ) from exc
+            result_stdout = _completed_output(result.stdout, _read_capture(stdout))
+            result_stderr = _completed_output(result.stderr, _read_capture(stderr))
         if int(result.returncode) != 4 or identity_attempt > 0:
             break
 
@@ -166,13 +205,13 @@ def ensure_1688_authenticated_session(
             "browser_runtime_preserved": bool(keep_browser_open),
         }
     if return_code == 2:
-        diagnostic = extract_login_failure_diagnostic(result.stdout, result.stderr)
+        diagnostic = extract_login_failure_diagnostic(result_stdout, result_stderr)
         raise OfflineRiskControlError(
             "1688 automatic login reached captcha, slider, or platform risk verification."
             + (f" Diagnostic: {diagnostic}" if diagnostic else "")
         )
     if return_code == 3:
-        diagnostic = extract_login_failure_diagnostic(result.stdout, result.stderr)
+        diagnostic = extract_login_failure_diagnostic(result_stdout, result_stderr)
         raise OfflineStoreMismatchError(
             "1688 automatic login succeeded but the member_id or store identity did not match."
             + (f" Diagnostic: {diagnostic}" if diagnostic else "")
@@ -185,12 +224,12 @@ def ensure_1688_authenticated_session(
                 "store_name": normalized_store_name,
                 "browser_runtime_preserved": bool(keep_browser_open),
             }
-        diagnostic = extract_login_failure_diagnostic(result.stdout, result.stderr)
+        diagnostic = extract_login_failure_diagnostic(result_stdout, result_stderr)
         raise OfflineLoginRequiredError(
             "1688 automatic login could not prove the configured member_id and store identity."
             + (f" Diagnostic: {diagnostic}" if diagnostic else "")
         )
-    diagnostic = extract_login_failure_diagnostic(result.stdout, result.stderr)
+    diagnostic = extract_login_failure_diagnostic(result_stdout, result_stderr)
     raise OfflineLoginRequiredError(
         f"1688 automatic login failed with exit code {return_code}; the store was stopped."
         + (f" Diagnostic: {diagnostic}" if diagnostic else "")

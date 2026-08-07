@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 
 
@@ -93,18 +94,161 @@ class SavedDraftInspectorWrapperTests(unittest.TestCase):
                 Path(f"{output}.launcher.json").read_text(encoding="utf-8-sig")
             )
             self.assertNotIn("-c", passed)
+            self.assertIn("-u", marker["arguments"])
             passed_payload = Path(passed[passed.index("--payload") + 1])
             passed_runtime_root = Path(passed[passed.index("--shared-runtime-root") + 1])
             self.assertTrue(os.path.samefile(passed_payload, payload))
             self.assertEqual(passed[passed.index("--output") + 1], str(output.resolve()))
             self.assertTrue(os.path.samefile(passed_runtime_root, runtime_root))
             self.assertIn("--open-from-management", passed)
+            self.assertEqual(
+                passed[passed.index("--login-timeout-seconds") + 1],
+                "300",
+            )
             self.assertIn(" ", str(passed_payload))
             self.assertTrue(passed_payload.drive)
+            self.assertEqual(
+                marker["artifact_version"],
+                "erp_saved_draft_inspector_launcher_v2",
+            )
+            self.assertEqual(marker["status"], "completed")
+            self.assertEqual(marker["stage"], "inspector_exited")
+            self.assertTrue(marker["child_started"])
+            self.assertIsInstance(marker["session_id"], int)
             self.assertEqual(marker["exit_code"], 0)
             self.assertTrue(marker["output_exists"])
             self.assertFalse(marker["draft_saved"])
             self.assertFalse(marker["offer_submitted"])
+
+    def test_running_marker_exists_before_blocking_inspector_returns(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "ERP Root"
+            scripts = root / "scripts"
+            scripts.mkdir(parents=True)
+            runtime_root = Path(temp_dir) / "Runtime Root"
+            runtime_root.mkdir()
+            payload = root / "payload.json"
+            payload.write_text("{}", encoding="utf-8")
+            output = root / "artifacts" / "inspection.json"
+            (scripts / "inspect_1688_saved_draft.py").write_text(
+                textwrap.dedent(
+                    """
+                    import json
+                    from pathlib import Path
+                    import sys
+                    import time
+
+                    args = sys.argv[1:]
+                    time.sleep(1.5)
+                    output = Path(args[args.index("--output") + 1])
+                    output.write_text(json.dumps({"status": "done"}), encoding="utf-8")
+                    """
+                ),
+                encoding="utf-8",
+            )
+            command = [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(WRAPPER),
+                "-ProjectRoot",
+                str(root),
+                "-Payload",
+                str(payload),
+                "-Output",
+                str(output),
+                "-DraftId",
+                "draft-1",
+                "-ExpectedShop",
+                "木刻理想",
+                "-SharedRuntimeRoot",
+                str(runtime_root),
+                "-PythonExe",
+                sys.executable,
+            ]
+            process = subprocess.Popen(
+                command,
+                cwd=PROJECT_ROOT,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            marker_path = Path(f"{output}.launcher.json")
+            running_marker = None
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if marker_path.is_file():
+                    candidate = json.loads(marker_path.read_text(encoding="utf-8-sig"))
+                    if candidate.get("stage") == "inspector_running":
+                        running_marker = candidate
+                        break
+                time.sleep(0.05)
+
+            self.assertIsNotNone(running_marker)
+            self.assertEqual(running_marker["status"], "running")
+            self.assertIsNone(running_marker["finished_at"])
+            self.assertTrue(running_marker["child_started"])
+            stdout, stderr = process.communicate(timeout=10)
+            self.assertEqual(process.returncode, 0, stderr or stdout)
+            final_marker = json.loads(marker_path.read_text(encoding="utf-8-sig"))
+            self.assertEqual(final_marker["status"], "completed")
+            self.assertEqual(final_marker["stage"], "inspector_exited")
+
+    def test_preflight_failure_updates_existing_launcher_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            runtime_root = root / "Runtime"
+            runtime_root.mkdir()
+            payload = root / "payload.json"
+            payload.write_text("{}", encoding="utf-8")
+            output = root / "artifacts" / "inspection.json"
+            command = [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(WRAPPER),
+                "-ProjectRoot",
+                str(root / "missing project"),
+                "-Payload",
+                str(payload),
+                "-Output",
+                str(output),
+                "-DraftId",
+                "draft-1",
+                "-ExpectedShop",
+                "木刻理想",
+                "-SharedRuntimeRoot",
+                str(runtime_root),
+                "-PythonExe",
+                sys.executable,
+            ]
+            completed = subprocess.run(
+                command,
+                cwd=PROJECT_ROOT,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=30,
+                check=False,
+            )
+
+            self.assertNotEqual(completed.returncode, 0)
+            marker = json.loads(
+                Path(f"{output}.launcher.json").read_text(encoding="utf-8-sig")
+            )
+            self.assertEqual(marker["status"], "failed")
+            self.assertEqual(marker["stage"], "preflight_failed")
+            self.assertFalse(marker["child_started"])
+            self.assertFalse(marker["output_exists"])
 
 
 if __name__ == "__main__":
