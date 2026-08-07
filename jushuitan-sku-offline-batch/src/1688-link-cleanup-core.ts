@@ -83,11 +83,60 @@ function normalizedHeader(value: string): string {
 }
 
 const rowIdentityHeaderAliases = {
-  store_name: ["店铺名称", "店铺", "平台店铺", "平台/店铺"],
-  product_id: ["商品ID", "平台商品ID"],
-  online_sku: ["线上商品编码", "线上编码", "线上SKU"],
-  platform_store_item_code: ["平台店铺商品编码", "平台商品编码", "平台店铺商品ID"],
+  store_name: [
+    "店铺名称",
+    "店铺",
+    "平台店铺",
+    "平台/店铺",
+    "平台/店铺名称",
+    "平台店铺名称",
+  ],
+  product_id: ["商品ID", "商品 ID", "平台商品ID", "平台商品 ID", "商品信息"],
+  online_sku: ["线上商品编码", "线上编码", "线上SKU", "线上 SKU"],
+  platform_store_item_code: [
+    "平台店铺商品编码",
+    "平台商品编码",
+    "平台店铺商品ID",
+    "店铺商品编码",
+    "店铺商品ID",
+    "店铺商品 ID",
+  ],
 } as const;
+
+function extractStoreName(value: string): string {
+  const lines = value
+    .split(/\r?\n/)
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+  const exactAlibabaStore = lines.find((line) => /^阿里巴巴[-—–]/.test(line));
+  return exactAlibabaStore ?? (lines.length === 1 ? lines[0] : "");
+}
+
+function extractProductId(value: string): string {
+  const labeled = value.match(/(?:商品|平台商品)\s*ID\s*[：:]\s*([A-Za-z0-9][A-Za-z0-9_-]*)/i);
+  if (labeled?.[1]) {
+    return labeled[1].trim();
+  }
+  const direct = value.replace(/\s+/g, " ").trim();
+  return /^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(direct) ? direct : "";
+}
+
+function extractIdentityColumnValue(
+  field: keyof typeof rowIdentityHeaderAliases,
+  value: string,
+): string {
+  switch (field) {
+    case "store_name":
+      return extractStoreName(value);
+    case "product_id":
+      return extractProductId(value);
+    case "online_sku":
+    case "platform_store_item_code":
+      return value.replace(/\s+/g, " ").trim();
+    default:
+      return value.trim();
+  }
+}
 
 export function buildStructuredRowEvidence(
   index: number,
@@ -96,19 +145,27 @@ export function buildStructuredRowEvidence(
   cells: string[],
 ): RowEvidence {
   const normalizedHeaders = headers.map(normalizedHeader);
-  const valueFor = (aliases: readonly string[]): string => {
+  const valueFor = (
+    field: keyof typeof rowIdentityHeaderAliases,
+    aliases: readonly string[],
+  ): string => {
     const accepted = new Set(aliases.map(normalizedHeader));
     const columnIndex = normalizedHeaders.findIndex((header) => accepted.has(header));
-    return columnIndex >= 0 ? (cells[columnIndex] ?? "").trim() : "";
+    return columnIndex >= 0
+      ? extractIdentityColumnValue(field, cells[columnIndex] ?? "")
+      : "";
   };
   return {
     index,
     text,
     columns: {
-      store_name: valueFor(rowIdentityHeaderAliases.store_name),
-      product_id: valueFor(rowIdentityHeaderAliases.product_id),
-      online_sku: valueFor(rowIdentityHeaderAliases.online_sku),
-      platform_store_item_code: valueFor(rowIdentityHeaderAliases.platform_store_item_code),
+      store_name: valueFor("store_name", rowIdentityHeaderAliases.store_name),
+      product_id: valueFor("product_id", rowIdentityHeaderAliases.product_id),
+      online_sku: valueFor("online_sku", rowIdentityHeaderAliases.online_sku),
+      platform_store_item_code: valueFor(
+        "platform_store_item_code",
+        rowIdentityHeaderAliases.platform_store_item_code,
+      ),
     },
   };
 }

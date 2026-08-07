@@ -86,6 +86,51 @@ test("row matching requires store, product, SKU and platform code", () => {
   assert.deepEqual(rows.map((row) => row.index), [0]);
 });
 
+test("real Jushuitan row fixture survives composite cells and header reordering", async () => {
+  const fixturePath = path.join(process.cwd(), "tests", "fixtures", "wolai-jushuitan-row.json");
+  const fixture = JSON.parse(await fs.readFile(fixturePath, "utf8")) as {
+    source_evidence: {
+      sha256: string;
+      fields: {
+        store_name: string;
+        product_id: string;
+        platform_store_item_code: string;
+        online_sku: string;
+        status: string;
+        inventory_sync: string;
+      };
+    };
+    snapshots: Array<{ headers: string[]; cells: string[]; row_text: string }>;
+  };
+  const task = parseCleanupTask({
+    ...rawTask,
+    store_name: fixture.source_evidence.fields.store_name,
+    product_id: fixture.source_evidence.fields.product_id,
+    platform_store_item_code: fixture.source_evidence.fields.platform_store_item_code,
+    online_sku: fixture.source_evidence.fields.online_sku,
+  });
+
+  assert.equal(
+    fixture.source_evidence.sha256,
+    "ED4C6DF9E04900C8754C3B8CD03C7BA9B5C111AE357D069822A20F8346F07AF4",
+  );
+  assert.equal(fixture.source_evidence.fields.status, "上架");
+  assert.match(fixture.source_evidence.fields.inventory_sync, /已开启同步/);
+
+  for (const snapshot of fixture.snapshots) {
+    const row = buildStructuredRowEvidence(0, snapshot.row_text, snapshot.headers, snapshot.cells);
+    assert.deepEqual(row.columns, {
+      store_name: fixture.source_evidence.fields.store_name,
+      product_id: fixture.source_evidence.fields.product_id,
+      online_sku: fixture.source_evidence.fields.online_sku,
+      platform_store_item_code: fixture.source_evidence.fields.platform_store_item_code,
+    }, snapshot.headers.join(" / "));
+    assert.deepEqual(findMatchingRows(task, [row]).map((item) => item.index), [0]);
+    assert.match(row.text, /上架/);
+    assert.match(row.text, /已开启同步/);
+  }
+});
+
 test("identity siblings prove the query loaded while the target platform code is absent", () => {
   const task = parseCleanupTask(rawTask);
   const headers = ["店铺名称", "商品ID", "平台店铺商品编码", "线上商品编码"];

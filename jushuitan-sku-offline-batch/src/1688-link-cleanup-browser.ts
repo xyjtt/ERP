@@ -72,6 +72,8 @@ const resultRowSelector = [
   ".art-table-body tbody tr:has(td:first-child input.ant-checkbox-input)",
   ".ant-table-tbody > tr:has(td:first-child input.ant-checkbox-input)",
   "tbody tr:has(td:first-child input[type='checkbox'])",
+  ".art-table-body [role='row']:has([role='gridcell'])",
+  ".ant-table-tbody [role='row']:has([role='gridcell'])",
 ].join(",");
 
 function now(): string {
@@ -156,21 +158,39 @@ export function isVerifiedEmptyCleanupQuery(
   );
 }
 
-async function collectRows(target: Target): Promise<{ locator: Locator; rows: RowEvidence[] }> {
-  const locator = target.locator(resultRowSelector);
-  const count = await locator.count().catch(() => 0);
-  const rows: RowEvidence[] = [];
-  const headerRows = target.locator(
-    ".art-table-header thead tr, .ant-table-header thead tr, table thead tr",
+async function readHeadersForRow(target: Target, row: Locator): Promise<string[]> {
+  const tableRoot = row.locator(
+    "xpath=ancestor::*[self::table or contains(concat(' ', normalize-space(@class), ' '), ' art-table ') or contains(concat(' ', normalize-space(@class), ' '), ' ant-table-wrapper ')][1]",
+  ).first();
+  const scopedHeaderRows = tableRoot.locator(
+    ".art-table-header thead tr, .ant-table-header thead tr, thead tr, [role='row']:has([role='columnheader'])",
   );
+  const fallbackHeaderRows = target.locator(
+    ".art-table-header thead tr, .ant-table-header thead tr, table thead tr, [role='row']:has([role='columnheader'])",
+  );
+  const headerRows = (await scopedHeaderRows.count().catch(() => 0)) > 0
+    ? scopedHeaderRows
+    : fallbackHeaderRows;
   let visibleHeaders: string[] = [];
   const headerRowCount = await headerRows.count().catch(() => 0);
   for (let index = 0; index < headerRowCount; index += 1) {
-    const headers = await headerRows.nth(index).locator("th").allInnerTexts().catch(() => []);
+    const headerRow = headerRows.nth(index);
+    if (!(await headerRow.isVisible().catch(() => false))) {
+      continue;
+    }
+    const headers = await headerRow.locator(":scope > th, :scope > [role='columnheader']").allInnerTexts()
+      .catch(() => []);
     if (headers.length > visibleHeaders.length) {
       visibleHeaders = headers;
     }
   }
+  return visibleHeaders;
+}
+
+async function collectRows(target: Target): Promise<{ locator: Locator; rows: RowEvidence[] }> {
+  const locator = target.locator(resultRowSelector);
+  const count = await locator.count().catch(() => 0);
+  const rows: RowEvidence[] = [];
   for (let index = 0; index < count; index += 1) {
     const row = locator.nth(index);
     if (!(await row.isVisible().catch(() => false))) {
@@ -181,8 +201,10 @@ async function collectRows(target: Target): Promise<{ locator: Locator; rows: Ro
     }
     const text = (await row.innerText().catch(() => "")).trim();
     if (text) {
-      const cells = await row.locator(":scope > td").allInnerTexts().catch(() => []);
-      rows.push(buildStructuredRowEvidence(index, text, visibleHeaders, cells));
+      const headers = await readHeadersForRow(target, row);
+      const cells = await row.locator(":scope > td, :scope > [role='gridcell']").allInnerTexts()
+        .catch(() => []);
+      rows.push(buildStructuredRowEvidence(index, text, headers, cells));
     }
   }
   return { locator, rows };
