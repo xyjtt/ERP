@@ -332,3 +332,10 @@
 - 精确恢复必须在同一事务中先锁定全部批准 key，再核对源 Saga、唯一源 Item、Outbox 和所有历史成功 Item。只有全体仍为 `failed_terminal/interrupted_executor_process` 且无 `success/already_offline` 时才切换到新 run。
 - 审批文件必须同时绑定源 run 和目标 run。只绑定 CSV 数量、`--limit` 或源 run 会允许同一审批被错误复用。
 - CSV 哈希要在资源等待后和页面启动前再次验证；恢复模式的资源等待值必须为零。资源忙或单次聚水潭执行失败时保留精确证据并停止，不做宽范围重排或长时间重复探测。
+
+## 2026-08-08 业务店铺名与聚水潭选择器必须分离
+
+- 真实页面证明 `xinbaiguang_shanzhu` 的任务/结果行业务名是 `新佰广1688`，聚水潭下拉选择器名是 `阿里巴巴-新佰广`。把任一名称覆盖另一个都会破坏任务身份或页面选择。
+- `store_name` 必须贯穿 task、Saga、operation key、handoff task id 和聚水潭结果行精确匹配；`jushuitan_store_name` 只能用于店铺下拉选择。两者同时写入 handoff 和证据，便于审计。
+- 非 `阿里巴巴-` 前缀业务名没有显式、带哈希的聚水潭映射时，必须在 1688 浏览器动作前 fail closed。错误不能在全店循环外直接抛弃，应记录 `account_mapping` 并继续不相关店铺。
+- 定向同步不是全量门禁豁免。报告必须标记 `sync_scope=targeted`、目标账号和未验证全量状态；以后全量同步仍应暴露 `muke_lixiang` 等非目标身份漂移。

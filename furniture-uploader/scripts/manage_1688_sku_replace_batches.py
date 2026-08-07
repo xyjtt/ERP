@@ -20,6 +20,7 @@ BUSINESS_TERMINAL_CATEGORIES = {
     "replacement_verification_failed",
     "sku_not_found",
     "sole_sku_requires_product_offline",
+    "system_prompt",
     "submit_blocked_before_request",
     "task_not_found",
 }
@@ -64,6 +65,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--source-database", default="JSReportReplica")
     parser.add_argument("--source-table", default="app.op_stop_sale")
+    parser.add_argument("--crawler-worker-task-name", default="YYDD-1688-Crawler-Worker")
     parser.add_argument("--pipeline-script", default=str(DEFAULT_PIPELINE))
     parser.add_argument("--state-path", default="")
     parser.add_argument("--log-dir", default="")
@@ -251,6 +253,8 @@ def build_pipeline_command(
         str(args.jushuitan_lock_wait_seconds),
         "--crawler-task-wait-seconds",
         str(args.crawler_task_wait_seconds),
+        "--crawler-worker-task-name",
+        str(args.crawler_worker_task_name),
         "--1688-timeout-seconds",
         str(args.timeout_1688_seconds),
         "--jushuitan-timeout-seconds",

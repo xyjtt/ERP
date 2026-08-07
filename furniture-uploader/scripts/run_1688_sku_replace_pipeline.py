@@ -33,7 +33,7 @@ from cross_project_runtime import (
 )
 from operation_saga import OperationSagaRepository
 from sku_operation_saga import build_saga_operations, persist_ali1688_results
-from sku_offline_main import resolve_store_account_binding
+from sku_offline_main import resolve_jushuitan_store_name, resolve_store_account_binding
 from sku_offline_tasks import (
     COMBINATION_SKU_REASON,
     build_combination_sku_skip_record,
@@ -379,6 +379,7 @@ def run(args: argparse.Namespace) -> int:
             PROJECT_ROOT / "config" / "systems" / "1688_sku_replace.json"
         )
         store_binding = resolve_store_account_binding(system_config, store_name)
+        jushuitan_store_name = resolve_jushuitan_store_name(store_binding, store_name)
         binding = resolve_executor_binding(
             account_key,
             fallback_profile_ref=str(store_binding.get("browser_profile_dir") or ""),
@@ -397,6 +398,7 @@ def run(args: argparse.Namespace) -> int:
             run_id,
             account_key,
             audit_tasks,
+            jushuitan_store_names={store_name: jushuitan_store_name},
         )
         runtime_guard = RuntimeLeaseGuard(
             RuntimeLeaseRepository(audit_config),

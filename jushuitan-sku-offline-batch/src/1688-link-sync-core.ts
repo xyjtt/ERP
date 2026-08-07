@@ -9,6 +9,7 @@ const syncTaskSchema = z.object({
   source: z.literal("1688_sku_replace").default("1688_sku_replace"),
   source_status: z.enum(["pending_1688", "success", "already_replaced"]),
   store_name: z.string().trim().min(1),
+  jushuitan_store_name: z.string().trim().optional().default(""),
   platform: z.string().trim().min(1),
   product_id: z.string().trim().min(1),
   online_sku: z.string().trim().min(1),
@@ -24,6 +25,7 @@ export type SyncMode = "preview" | "execute";
 
 export interface SyncTask extends z.infer<typeof syncTaskSchema> {
   task_id: string;
+  jushuitan_store_name: string;
 }
 
 export type SyncStatus = "preview" | "success" | "already_synced" | "failed";
@@ -32,6 +34,7 @@ export interface SyncResult {
   task_id: string;
   status: SyncStatus;
   store_name: string;
+  jushuitan_store_name?: string;
   product_id: string;
   online_sku: string;
   replacement_sku: string;
@@ -62,14 +65,15 @@ export function parseSyncTask(raw: unknown): SyncTask {
   if (parsed.platform.toLowerCase() !== "alibaba") {
     throw new Error(`Only Alibaba sync tasks are allowed: ${parsed.platform}`);
   }
-  if (!parsed.store_name.startsWith("阿里巴巴-")) {
-    throw new Error(`Jushuitan store must be an exact Alibaba store name: ${parsed.store_name}`);
+  const jushuitanStoreName = parsed.jushuitan_store_name || parsed.store_name;
+  if (!jushuitanStoreName.startsWith("阿里巴巴-")) {
+    throw new Error(`Jushuitan store must be an exact Alibaba store name: ${jushuitanStoreName}`);
   }
   const generatedTaskId = buildSyncTaskId(parsed);
   if (parsed.task_id && parsed.task_id !== generatedTaskId) {
     throw new Error(`Task identity mismatch for ${parsed.product_id}/${parsed.online_sku}`);
   }
-  return {...parsed, task_id: generatedTaskId};
+  return {...parsed, jushuitan_store_name: jushuitanStoreName, task_id: generatedTaskId};
 }
 
 export async function loadSyncTasks(filePath: string): Promise<SyncTask[]> {
@@ -108,6 +112,7 @@ export function assertSyncTasksAllowed(mode: SyncMode, tasks: SyncTask[]): void 
 
 export interface StoreSyncGroup {
   store_name: string;
+  jushuitan_store_name: string;
   batch_index: number;
   product_ids: string[];
   tasks: SyncTask[];
@@ -119,18 +124,22 @@ export function groupSyncTasksByStore(tasks: SyncTask[], maxProductIds = 50): St
   }
   const groups = new Map<string, SyncTask[]>();
   for (const task of tasks) {
-    const current = groups.get(task.store_name) ?? [];
+    const groupKey = JSON.stringify([task.store_name, task.jushuitan_store_name]);
+    const current = groups.get(groupKey) ?? [];
     current.push(task);
-    groups.set(task.store_name, current);
+    groups.set(groupKey, current);
   }
   const batches: StoreSyncGroup[] = [];
-  for (const [store_name, storeTasks] of groups.entries()) {
+  for (const storeTasks of groups.values()) {
+    const store_name = storeTasks[0].store_name;
+    const jushuitan_store_name = storeTasks[0].jushuitan_store_name;
     const productIds = [...new Set(storeTasks.map((task) => task.product_id))];
     for (let offset = 0; offset < productIds.length; offset += maxProductIds) {
       const batchProductIds = productIds.slice(offset, offset + maxProductIds);
       const included = new Set(batchProductIds);
       batches.push({
         store_name,
+        jushuitan_store_name,
         batch_index: Math.floor(offset / maxProductIds) + 1,
         product_ids: batchProductIds,
         tasks: storeTasks.filter((task) => included.has(task.product_id)),

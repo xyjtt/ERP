@@ -440,6 +440,16 @@
 - Launcher 现在使用同卷临时文件加 `System.IO.File.Replace`（带短生命周期备份）更新已有 marker，首次写入使用 `File.Move`；这保持了 running/terminal marker 的可读性，不改变 Draft/Offer 业务幂等规则。
 - 聚焦 wrapper 回归 `3/3`，12 次连续 stress `12/12`；执行机上一轮 `747` 回归的唯一错误已定位为该竞态，修复后需重新部署并完成全量执行机回归。
 
+## 2026-08-08 下架/替换账号身份与 Replace 日度调度
+
+- ERP 有效 `execution.store_accounts` 已从 17 家扩展到 19 家。`pingcan` 是唯一 canonical owner：业务店铺名 `阿里巴巴-常州平灿家居有限公司`、登录名 `平灿家居`、member `b2b-2221733989984a3731`；`pingcan_rpa` 为 disabled/superseded 历史技术账号，不进入 ERP 调度。
+- `xinbaiguang_shanzhu` 保留任务业务名 `新佰广1688`，聚水潭选择器独立为 `阿里巴巴-新佰广`。Saga、operation key、task id 和聚水潭结果行匹配继续使用业务名，只有聚水潭店铺选择器使用 `jushuitan_store_name`。
+- 新佰广映射来自执行机真实聚水潭只读 Probe：选择器精确命中 `阿里巴巴-新佰广`，查询结果行店铺名为 `新佰广1688`；证据固化在 `docs/operations/1688_XINBAIGUANG_JUSHUITAN_IDENTITY_EVIDENCE_2026-08-08.json` 并由 policy SHA-256 门禁校验。
+- roster 全量同步仍因既有 `muke_lixiang` 下划线/连字符身份漂移 fail closed。同步器新增显式 `--account-key` 定向模式；它仍校验 accounts revision/hash、enabled/disabled 集合、Preview 只读标志、文件 hash、目标 member/profile/source/Jushuitan 证据及跨账号碰撞，只保留非目标 binding，不放宽全量门禁。
+- 新增 `manage_1688_sku_replace_daily.py` 与 `manage_1688_sku_replace_daily_task.ps1`。正式任务名 `YYDD-1688-Replace-Daily`，默认每天 `14:00`，S4U、`IgnoreNew`，SYSTEM Launcher 为 `YYDD-1688-Replace-Daily-Launcher`；业务日期终态 Summary 阻止重复执行。
+- `运营自行组合替换` 在租约、Saga 和浏览器前归类 `business_skipped/组合货号`。`system_prompt` 保存平台原文、当前 SKU 失败并继续，不算成功且不产生聚水潭 handoff。
+- 本节记录的是开发实现和真实只读身份 Probe。Replace 计划任务部署、真实旧 SKU 到新 SKU 写入 Canary、1688 持久化、Saga/Outbox 和聚水潭同步终态仍需单独生产验收；不得重做已成功的下架动作。
+
 ## 2026-08-07 下架中断项精确定向恢复门禁
 
 - `run_1688_stop_sale_pipeline.py` 新增版本 1 恢复审批入口，只接受审批文件 SHA-256、输入 CSV SHA-256、源 child run、新 recovery run、单一账号和完整 operation-key 集合全部一致的 `failed_terminal/interrupted_executor_process` 范围。

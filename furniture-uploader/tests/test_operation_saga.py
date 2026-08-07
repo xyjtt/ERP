@@ -80,6 +80,20 @@ class OperationSagaTests(unittest.TestCase):
         self.assertEqual(result["outbox_payload"]["operation_key"], operation.operation_key)
         self.assertEqual(result["account_fencing_token"], 9)
 
+    def test_outbox_keeps_business_operation_key_and_exact_jushuitan_store(self) -> None:
+        task = self.task(replacement_sku="NEW-1")
+        task.store_name = "新佰广1688"
+        operation = build_saga_operation(
+            "sku_replace",
+            "run-xin",
+            "xinbaiguang_shanzhu",
+            task,
+            jushuitan_store_name="阿里巴巴-新佰广",
+        )
+        self.assertEqual(operation.payload["store_name"], "新佰广1688")
+        self.assertEqual(operation.payload["jushuitan_store_name"], "阿里巴巴-新佰广")
+        self.assertEqual(operation.operation_key, task_operation_key("sku_replace", task))
+
     def test_erp_ddl_owns_only_saga_and_outbox(self) -> None:
         ddl = (PROJECT_ROOT / "sql" / "362_ali1688_operation_saga_outbox.sql").read_text(
             encoding="utf-8"

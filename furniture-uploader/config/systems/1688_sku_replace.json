@@ -18,6 +18,7 @@
       "replacement_verification_failed",
       "campaign_restriction",
       "delivery_service_backfill_failed",
+      "system_prompt",
       "submit_blocked_before_request"
     ],
     "auto_login_fallback": {

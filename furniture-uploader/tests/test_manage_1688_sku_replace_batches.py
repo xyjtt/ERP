@@ -50,6 +50,32 @@ def test_classify_pipeline_summary_accepts_business_terminal(tmp_path: Path) -> 
     ) == "business_terminal"
 
 
+def test_system_prompt_is_a_non_success_business_terminal(tmp_path: Path) -> None:
+    report_path = tmp_path / "replace.jsonl"
+    report_path.write_text(
+        json.dumps(
+            {
+                "status": "failed",
+                "error_category": "system_prompt",
+                "system_prompt": "毛重必须为数字",
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert classify_pipeline_summary(
+        {
+            "status": "failed",
+            "replace_report_path": str(report_path),
+            "replace_counts": {"failed": 1},
+            "replace_return_code": 0,
+            "notification_sent": True,
+        }
+    ) == "business_terminal"
+
+
 def test_classify_pipeline_summary_retries_process_failure() -> None:
     assert classify_pipeline_summary(
         {
@@ -173,6 +199,7 @@ def test_build_pipeline_command_includes_account_locks_and_timeouts(tmp_path: Pa
         crawler_task_wait_seconds=4800,
         timeout_1688_seconds=3600,
         timeout_jushuitan_seconds=1800,
+        crawler_worker_task_name="YYDD-1688-Crawler-Worker",
         source_database="JSReportReplica",
         source_table="app.op_stop_sale",
     )
@@ -184,3 +211,4 @@ def test_build_pipeline_command_includes_account_locks_and_timeouts(tmp_path: Pa
     assert command[command.index("--lock-wait-seconds") + 1] == "3600"
     assert command[command.index("--jushuitan-lock-wait-seconds") + 1] == "3600"
     assert command[command.index("--source-table") + 1] == "app.op_stop_sale"
+    assert command[command.index("--crawler-worker-task-name") + 1] == "YYDD-1688-Crawler-Worker"

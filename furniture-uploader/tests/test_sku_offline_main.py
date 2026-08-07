@@ -14,6 +14,7 @@ if str(RPA_ROOT) not in sys.path:
     sys.path.insert(0, str(RPA_ROOT))
 
 from exceptions import (
+    OfflineAccountMappingError,
     OfflineLoginRequiredError,
     OfflineRiskControlError,
     PublishSubmitError,
@@ -21,6 +22,7 @@ from exceptions import (
 )
 from sku_offline_main import (
     build_jushuitan_handoff_records,
+    build_jushuitan_store_name_map,
     build_jushuitan_sync_records,
     build_store_operator_config,
     build_failure_notification_content,
@@ -30,6 +32,7 @@ from sku_offline_main import (
     localize_error_category,
     requires_browser_recovery,
     resolve_store_account_binding,
+    resolve_jushuitan_store_name,
     should_retry_offline_error,
     should_stop_store_on_error,
     execute_preview,
@@ -89,6 +92,73 @@ class SkuOfflineMainTests(unittest.TestCase):
         self.assertEqual(records[0]["replacement_sku"], "NEW")
         self.assertEqual(records[0]["source_status"], "success")
 
+    def test_handoff_separates_business_and_jushuitan_store_identity(self) -> None:
+        task = OfflineTask(
+            source_file="replace.csv",
+            source_sheet="CSV",
+            source_row_number=2,
+            store_name="新佰广1688",
+            platform="Alibaba",
+            product_id="926805014623",
+            online_sku="BG003124N113V01",
+            handling="全渠道替换",
+            replacement_sku="BG003124N113V02",
+            change_image="",
+            platform_store_item_code="5976099823638",
+            raw={},
+        )
+        mapping = {"新佰广1688": "阿里巴巴-新佰广"}
+        record = build_jushuitan_sync_records(
+            {"selected_tasks": [task]},
+            successful_task_statuses={task.dedupe_key: "success"},
+            jushuitan_store_names=mapping,
+        )[0]
+
+        self.assertEqual(record["store_name"], "新佰广1688")
+        self.assertEqual(record["jushuitan_store_name"], "阿里巴巴-新佰广")
+        self.assertEqual(
+            record["task_id"],
+            build_jushuitan_sync_records(
+                {"selected_tasks": [task]},
+                successful_task_statuses={task.dedupe_key: "success"},
+            )[0]["task_id"],
+        )
+
+    def test_non_prefixed_business_store_requires_explicit_jushuitan_mapping(self) -> None:
+        binding = {"store_name": "新佰广1688", "account_key": "xinbaiguang_shanzhu"}
+        with self.assertRaisesRegex(
+            OfflineAccountMappingError,
+            "No verified exact Jushuitan store mapping",
+        ):
+            resolve_jushuitan_store_name(binding, "新佰广1688")
+        binding["jushuitan_store_name"] = "阿里巴巴-新佰广"
+        self.assertEqual(
+            resolve_jushuitan_store_name(binding, "新佰广1688"),
+            "阿里巴巴-新佰广",
+        )
+
+    def test_store_name_map_uses_authoritative_binding_without_rewriting_task(self) -> None:
+        task = OfflineTask(
+            source_file="replace.csv", source_sheet="CSV", source_row_number=2,
+            store_name="新佰广1688", platform="Alibaba", product_id="1",
+            online_sku="OLD", handling="全渠道替换", replacement_sku="NEW",
+            change_image="", platform_store_item_code="CODE", raw={},
+        )
+        config = {
+            "execution": {
+                "require_store_account_mapping": True,
+                "store_accounts": [{
+                    "store_name": "新佰广1688",
+                    "account_key": "xinbaiguang_shanzhu",
+                    "jushuitan_store_name": "阿里巴巴-新佰广",
+                }],
+            }
+        }
+        self.assertEqual(
+            build_jushuitan_store_name_map(config, [task]),
+            {"新佰广1688": "阿里巴巴-新佰广"},
+        )
+
     def test_execute_preview_dispatches_replacement_and_writes_sync_handoff(self) -> None:
         task = OfflineTask(
             source_file="replace.csv", source_sheet="CSV", source_row_number=2,
@@ -116,7 +186,11 @@ class SkuOfflineMainTests(unittest.TestCase):
             "execution": {
                 "operation": "replace",
                 "require_store_account_mapping": True,
-                "store_accounts": [{"store_name": "STORE-A", "account_key": "store_a"}],
+                "store_accounts": [{
+                    "store_name": "STORE-A",
+                    "jushuitan_store_name": "阿里巴巴-STORE-A",
+                    "account_key": "store_a",
+                }],
             },
             "notifications": {"dingtalk": {"enabled": False}},
         }
@@ -555,6 +629,7 @@ class SkuOfflineMainTests(unittest.TestCase):
                 "store_accounts": [
                     {
                         "store_name": "STORE-A",
+                        "jushuitan_store_name": "阿里巴巴-STORE-A",
                         "account_key": "store_a",
                     }
                 ],
@@ -628,7 +703,11 @@ class SkuOfflineMainTests(unittest.TestCase):
         system_config = {
             "execution": {
                 "require_store_account_mapping": True,
-                "store_accounts": [{"store_name": "STORE-A", "account_key": "store_a"}],
+                "store_accounts": [{
+                    "store_name": "STORE-A",
+                    "jushuitan_store_name": "阿里巴巴-STORE-A",
+                    "account_key": "store_a",
+                }],
                 "stop_store_on_error_categories": ["login_required"],
                 "auto_login_fallback": {"enabled": False},
             },
@@ -699,7 +778,11 @@ class SkuOfflineMainTests(unittest.TestCase):
         system_config = {
             "execution": {
                 "require_store_account_mapping": True,
-                "store_accounts": [{"store_name": "STORE-A", "account_key": "store_a"}],
+                "store_accounts": [{
+                    "store_name": "STORE-A",
+                    "jushuitan_store_name": "阿里巴巴-STORE-A",
+                    "account_key": "store_a",
+                }],
                 "stop_store_on_error_categories": ["store_mismatch"],
                 "auto_login_fallback": {"enabled": False},
             },
@@ -772,7 +855,11 @@ class SkuOfflineMainTests(unittest.TestCase):
         system_config = {
             "execution": {
                 "require_store_account_mapping": True,
-                "store_accounts": [{"store_name": "STORE-A", "account_key": "store_a"}],
+                "store_accounts": [{
+                    "store_name": "STORE-A",
+                    "jushuitan_store_name": "阿里巴巴-STORE-A",
+                    "account_key": "store_a",
+                }],
                 "stop_store_on_error_categories": ["login_required", "risk_control"],
                 "auto_login_fallback": {
                     "enabled": True,
@@ -854,7 +941,11 @@ class SkuOfflineMainTests(unittest.TestCase):
         system_config = {
             "execution": {
                 "require_store_account_mapping": True,
-                "store_accounts": [{"store_name": "STORE-A", "account_key": "store_a"}],
+                "store_accounts": [{
+                    "store_name": "STORE-A",
+                    "jushuitan_store_name": "阿里巴巴-STORE-A",
+                    "account_key": "store_a",
+                }],
                 "stop_store_on_error_categories": ["login_required", "risk_control"],
                 "auto_login_fallback": {"enabled": True, "max_attempts_per_store": 1},
             },
@@ -948,7 +1039,11 @@ class SkuOfflineMainTests(unittest.TestCase):
             "execution": {
                 "max_retry": 0,
                 "require_store_account_mapping": True,
-                "store_accounts": [{"store_name": "STORE-A", "account_key": "store_a"}],
+                "store_accounts": [{
+                    "store_name": "STORE-A",
+                    "jushuitan_store_name": "阿里巴巴-STORE-A",
+                    "account_key": "store_a",
+                }],
                 "stop_store_on_error_categories": ["login_required", "risk_control"],
                 "auto_login_fallback": {
                     "enabled": True,
@@ -1047,7 +1142,11 @@ class SkuOfflineMainTests(unittest.TestCase):
             "execution": {
                 "max_retry": 1,
                 "require_store_account_mapping": True,
-                "store_accounts": [{"store_name": "STORE-A", "account_key": "store_a"}],
+                "store_accounts": [{
+                    "store_name": "STORE-A",
+                    "jushuitan_store_name": "阿里巴巴-STORE-A",
+                    "account_key": "store_a",
+                }],
                 "auto_login_fallback": {"enabled": False},
             },
             "notifications": {"dingtalk": {"enabled": False}},
@@ -1126,7 +1225,11 @@ class SkuOfflineMainTests(unittest.TestCase):
             "execution": {
                 "max_retry": 1,
                 "require_store_account_mapping": True,
-                "store_accounts": [{"store_name": "STORE-A", "account_key": "store_a"}],
+                "store_accounts": [{
+                    "store_name": "STORE-A",
+                    "jushuitan_store_name": "阿里巴巴-STORE-A",
+                    "account_key": "store_a",
+                }],
                 "auto_login_fallback": {"enabled": False},
             },
             "notifications": {"dingtalk": {"enabled": False}},

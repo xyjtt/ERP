@@ -9,6 +9,7 @@ const cleanupTaskSchema = z.object({
   source: z.string().trim().default("1688_sku_offline"),
   source_status: z.enum(["pending_1688", "success", "already_offline"]),
   store_name: z.string().trim().min(1),
+  jushuitan_store_name: z.string().trim().optional().default(""),
   platform: z.string().trim().min(1),
   product_id: z.string().trim().min(1),
   online_sku: z.string().trim().min(1),
@@ -22,6 +23,7 @@ export type CleanupMode = "preview" | "probe" | "execute";
 
 export interface CleanupTask extends z.infer<typeof cleanupTaskSchema> {
   task_id: string;
+  jushuitan_store_name: string;
 }
 
 export type CleanupStatus =
@@ -35,6 +37,7 @@ export interface CleanupResult {
   task_id: string;
   status: CleanupStatus;
   store_name: string;
+  jushuitan_store_name?: string;
   product_id: string;
   online_sku: string;
   platform_store_item_code: string;
@@ -235,15 +238,16 @@ export function parseCleanupTask(raw: unknown): CleanupTask {
   if (parsed.handling !== "全渠道下架") {
     throw new Error(`Unsupported handling value: ${parsed.handling}`);
   }
-  if (!parsed.store_name.startsWith("阿里巴巴-")) {
-    throw new Error(`Jushuitan store must be an exact Alibaba store name: ${parsed.store_name}`);
+  const jushuitanStoreName = parsed.jushuitan_store_name || parsed.store_name;
+  if (!jushuitanStoreName.startsWith("阿里巴巴-")) {
+    throw new Error(`Jushuitan store must be an exact Alibaba store name: ${jushuitanStoreName}`);
   }
 
   const generatedTaskId = buildTaskId(parsed);
   if (parsed.task_id && parsed.task_id !== generatedTaskId) {
     throw new Error(`Task identity mismatch for ${parsed.product_id}/${parsed.online_sku}`);
   }
-  return { ...parsed, task_id: generatedTaskId };
+  return { ...parsed, jushuitan_store_name: jushuitanStoreName, task_id: generatedTaskId };
 }
 
 export async function loadCleanupTasks(filePath: string): Promise<CleanupTask[]> {

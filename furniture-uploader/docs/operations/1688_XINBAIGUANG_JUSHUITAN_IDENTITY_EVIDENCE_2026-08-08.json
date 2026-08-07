@@ -1,0 +1,43 @@
+{
+  "artifact_type": "xinbaiguang_jushuitan_store_identity_evidence",
+  "artifact_version": "2026-08-08.v1",
+  "status": "accepted_mapping_evidence",
+  "captured_at": "2026-08-08T04:04:38+08:00",
+  "executor": "PC-20210622ARIU",
+  "erp_head": "5654df1cece008a13ca098a3aa933b24e50a982e",
+  "mode": "jushuitan_probe_read_only",
+  "business_write_executed": false,
+  "browser_write_action_executed": false,
+  "account_key": "xinbaiguang_shanzhu",
+  "expected_member_id": "b2b-2207895056366baaa8",
+  "business_store_name": "新佰广1688",
+  "jushuitan_store_name": "阿里巴巴-新佰广",
+  "jushuitan_row_store_name": "新佰广1688",
+  "selector_exact_match": true,
+  "row_store_matches_business_store": true,
+  "probe": {
+    "run_id": "xinbaiguang-jst-store-discovery-20260808",
+    "product_id": "926805014623",
+    "online_sku": "BG003124N113V01",
+    "platform_store_item_code": "5976099823638",
+    "query_row_count": 2,
+    "exact_business_row_count": 1,
+    "query_stage_reached": true,
+    "result_category": "task_not_found",
+    "result_category_explanation": "The discovery probe deliberately used the exact selector name as store_name. The selector succeeded and returned rows, while the row identity correctly remained the business store name. Production code must carry both identities separately."
+  },
+  "source_artifacts": {
+    "executor_root": "E:/1688/ERP-final-75368f8/artifacts/xinbaiguang_jushuitan_identity_probe_20260808",
+    "result_jsonl_sha256": "68bf20f6c9d95defeeee3e6c1985b12ef6326bf9db647092d440d09c3ffb5e7e",
+    "result_summary_sha256": "387265d3cb5113953982cd2e7bcc49de4483eeb68a6f8188752882def7c63fdd",
+    "query_evidence_json_sha256": "05a6094863d10c865bee417d9372f1bd71d2b30f39b8515c5c4577d2399d43e4",
+    "query_screenshot_sha256": "9606b7d4324018eb44af9d96cd563c3c56de73d37f26aedd5e4ee97ff2c572a8"
+  },
+  "identity_contract": {
+    "task_store_name_unchanged": true,
+    "saga_and_operation_key_use_business_store_name": true,
+    "jushuitan_selector_uses_jushuitan_store_name": true,
+    "jushuitan_row_matching_uses_business_store_name": true,
+    "platform_display_name_does_not_override_task_store_name": true
+  }
+}

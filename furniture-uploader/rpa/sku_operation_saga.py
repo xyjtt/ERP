@@ -45,13 +45,21 @@ def record_operation_key(task_type: str, record: Mapping[str, Any]) -> str:
     return task_operation_key(task_type, task)
 
 
-def build_saga_operation(task_type: str, run_id: str, account_key: str, task: Any) -> SagaOperation:
+def build_saga_operation(
+    task_type: str,
+    run_id: str,
+    account_key: str,
+    task: Any,
+    *,
+    jushuitan_store_name: str = "",
+) -> SagaOperation:
     operation_key = task_operation_key(task_type, task)
     payload = {
         "task_id": operation_key,
         "operation_key": operation_key,
         "source": "1688_sku_offline" if task_type == "stop_sale" else "1688_sku_replace",
         "store_name": str(getattr(task, "store_name", "") or ""),
+        "jushuitan_store_name": str(jushuitan_store_name or getattr(task, "store_name", "") or ""),
         "platform": str(getattr(task, "platform", "") or ""),
         "product_id": str(getattr(task, "product_id", "") or ""),
         "online_sku": str(getattr(task, "online_sku", "") or ""),
@@ -88,11 +96,25 @@ def build_saga_operations(
     run_id: str,
     account_key: str,
     tasks: Iterable[Any],
+    *,
+    jushuitan_store_names: Mapping[str, str] | None = None,
 ) -> list[SagaOperation]:
     by_key = {
         operation.operation_key: operation
         for operation in (
-            build_saga_operation(task_type, run_id, account_key, task) for task in tasks
+            build_saga_operation(
+                task_type,
+                run_id,
+                account_key,
+                task,
+                jushuitan_store_name=str(
+                    (jushuitan_store_names or {}).get(
+                        str(getattr(task, "store_name", "") or "")
+                    )
+                    or ""
+                ),
+            )
+            for task in tasks
         )
     }
     return list(by_key.values())

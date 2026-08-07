@@ -233,6 +233,7 @@ async function saveTaskEvidence(
       {
         task_id: task.task_id,
         store_name: task.store_name,
+        jushuitan_store_name: task.jushuitan_store_name,
         product_id: task.product_id,
         online_sku: task.online_sku,
         platform_store_item_code: task.platform_store_item_code,
@@ -274,7 +275,7 @@ async function queryTaskRows(
     await page.waitForTimeout(600);
     await dismissVisibleModals(page);
     try {
-      await selectExactStore(page, target, task.store_name);
+      await selectExactStore(page, target, task.jushuitan_store_name);
     } catch (error) {
       const normalized = normalizeStoreSelectionError(error);
       const selectionDiagnostics = await collectStorePickerDiagnostics(page, target).catch(() => null);
@@ -510,6 +511,7 @@ async function processTask(
         task_id: task.task_id,
         status: "already_cleared",
         store_name: task.store_name,
+        jushuitan_store_name: task.jushuitan_store_name,
         product_id: task.product_id,
         online_sku: task.online_sku,
         platform_store_item_code: task.platform_store_item_code,
@@ -536,6 +538,7 @@ async function processTask(
       task_id: task.task_id,
       status: "found",
       store_name: task.store_name,
+      jushuitan_store_name: task.jushuitan_store_name,
       product_id: task.product_id,
       online_sku: task.online_sku,
       platform_store_item_code: task.platform_store_item_code,
@@ -564,6 +567,7 @@ async function processTask(
     task_id: task.task_id,
     status: "success",
     store_name: task.store_name,
+    jushuitan_store_name: task.jushuitan_store_name,
     product_id: task.product_id,
     online_sku: task.online_sku,
     platform_store_item_code: task.platform_store_item_code,
@@ -579,6 +583,7 @@ function failureResult(task: CleanupTask, error: unknown, evidencePath = ""): Cl
     task_id: task.task_id,
     status: "failed",
     store_name: task.store_name,
+    jushuitan_store_name: task.jushuitan_store_name,
     product_id: task.product_id,
     online_sku: task.online_sku,
     platform_store_item_code: task.platform_store_item_code,

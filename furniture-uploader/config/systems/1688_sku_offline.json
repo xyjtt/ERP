@@ -75,6 +75,24 @@
         "browser_profile_dir": "C:/ProgramData/YYDD/1688-crawler/profiles/muke_lixiang"
       },
       {
+        "store_name": "阿里巴巴-常州平灿家居有限公司",
+        "store_aliases": [
+          "平灿家居",
+          "阿里巴巴-平灿家居有限公司",
+          "平灿家居有限公司",
+          "常州平灿家居有限公司",
+          "平灿家居:RPA"
+        ],
+        "account_key": "pingcan",
+        "login_name": "平灿家居",
+        "expected_member_id": "b2b-2221733989984a3731",
+        "superseded_account_keys": [
+          "pingcan_rpa"
+        ],
+        "browser_type": "edge",
+        "browser_profile_dir": "C:/ProgramData/YYDD/1688-crawler/profiles/pingcan"
+      },
+      {
         "store_name": "阿里巴巴-广州沃来贸易有限公司",
         "store_aliases": [
           "阿里巴巴_广州沃来贸易有限公司",
@@ -231,6 +249,18 @@
         "account_key": "qianzhishang_qiyiguo",
         "browser_type": "edge",
         "browser_profile_dir": "C:/ProgramData/YYDD/1688-crawler/profiles/qianzhishang_qiyiguo"
+      },
+      {
+        "store_name": "新佰广1688",
+        "store_aliases": [
+          "常州新佰广家居有限公司",
+          "常州新佰广家居有限公司:山竹"
+        ],
+        "account_key": "xinbaiguang_shanzhu",
+        "browser_type": "edge",
+        "browser_profile_dir": "C:/ProgramData/YYDD/1688-crawler/profiles/xinbaiguang_shanzhu",
+        "expected_member_id": "b2b-2207895056366baaa8",
+        "jushuitan_store_name": "阿里巴巴-新佰广"
       }
     ]
   },
