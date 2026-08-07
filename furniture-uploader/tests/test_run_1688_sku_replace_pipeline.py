@@ -122,6 +122,42 @@ class Run1688SkuReplacePipelineTests(unittest.TestCase):
         self.assertIn('"failed": 1', content)
         self.assertIn("summary.json", content)
 
+    def test_preview_skips_jushuitan_even_when_handoff_is_present(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "furniture-uploader"
+            jushuitan_root = Path(temp_dir) / "jushuitan"
+            jushuitan_root.mkdir(parents=True)
+            (jushuitan_root / "package.json").write_text("{}", encoding="utf-8")
+            args = build_argument_parser().parse_args([
+                "--file", "replace.csv",
+                "--mode", "preview",
+                "--run-id", "preview-skip-jushuitan",
+                "--jushuitan-root", str(jushuitan_root),
+            ])
+            with (
+                patch("run_1688_sku_replace_pipeline.PROJECT_ROOT", project_root),
+                patch("run_1688_sku_replace_pipeline.count_handoff_records", return_value=1),
+                patch(
+                    "run_1688_sku_replace_pipeline.run_stage_command",
+                    return_value=SimpleNamespace(returncode=0),
+                ) as run_stage,
+            ):
+                return_code = run(args)
+            summary = json.loads(
+                (
+                    project_root
+                    / "logs"
+                    / "sku_replace"
+                    / "pipelines"
+                    / "preview-skip-jushuitan.summary.json"
+                ).read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(return_code, 0)
+        self.assertEqual(summary["status"], "preview_only")
+        self.assertIsNone(summary["jushuitan_return_code"])
+        run_stage.assert_called_once()
+
     def test_combination_sku_exits_before_lease_saga_browser_and_jushuitan(self) -> None:
         task = OfflineTask(
             source_file="replace.csv", source_sheet="CSV", source_row_number=2,

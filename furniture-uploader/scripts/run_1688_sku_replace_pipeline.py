@@ -543,7 +543,13 @@ def run(args: argparse.Namespace) -> int:
                 return_1688 = stage_1688.returncode
             emit_pipeline_event(run_id, "1688_replace_stage_finished", return_code=return_1688)
             handoff_count = count_handoff_records(handoff_path)
-            if handoff_count > 0:
+            if args.mode == "preview":
+                emit_pipeline_event(
+                    run_id,
+                    "jushuitan_sync_stage_skipped",
+                    reason="preview_mode",
+                )
+            elif handoff_count > 0:
                 emit_pipeline_event(
                     run_id,
                     "jushuitan_lock_wait_started",
