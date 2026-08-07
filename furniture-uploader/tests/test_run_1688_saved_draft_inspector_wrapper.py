@@ -243,7 +243,13 @@ class SavedDraftInspectorWrapperTests(unittest.TestCase):
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline:
                 if marker_path.is_file():
-                    candidate = json.loads(marker_path.read_text(encoding="utf-8-sig"))
+                    try:
+                        candidate = json.loads(
+                            marker_path.read_text(encoding="utf-8-sig")
+                        )
+                    except (OSError, json.JSONDecodeError):
+                        time.sleep(0.05)
+                        continue
                     if candidate.get("stage") == "inspector_running":
                         running_marker = candidate
                         break
