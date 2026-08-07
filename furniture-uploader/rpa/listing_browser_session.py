@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import re
 import sys
-from typing import Any, Iterator, Mapping, Type
+from typing import Any, Callable, Iterator, Mapping, Type
 import uuid
 
 from cross_project_runtime import (
@@ -29,6 +29,9 @@ from stop_sale_audit import resolve_stop_sale_app_config
 class ListingBrowserIdentity:
     account_key: str
     shop_name: str
+
+
+ProgressCallback = Callable[[str], None]
 
 
 def resolve_listing_browser_identity(
@@ -116,7 +119,13 @@ def open_account_bound_listing_browser(
     lock_poll_seconds: float = 5.0,
     runtime_lease_wait_seconds: float = 0,
     runtime_lease_poll_seconds: float = 5.0,
+    login_timeout_seconds: int = 300,
+    progress_callback: ProgressCallback | None = None,
 ) -> Iterator[tuple[Any, ExecutorBinding, ListingBrowserIdentity]]:
+    def report_progress(stage: str) -> None:
+        if progress_callback is not None:
+            progress_callback(stage)
+
     identity = resolve_listing_browser_identity(
         payload,
         expected_account_key=expected_account_key,
@@ -132,6 +141,9 @@ def open_account_bound_listing_browser(
         raise OfflineLoginRequiredError(
             f"Account browser profile directory is missing: account_key={identity.account_key}."
         )
+    if int(login_timeout_seconds) <= 0:
+        raise ValueError("login_timeout_seconds must be greater than zero")
+    report_progress("binding_validated")
 
     run_id = f"{task_type}_{uuid.uuid4().hex}"
     project_path = Path(project_root).resolve()
@@ -148,6 +160,7 @@ def open_account_bound_listing_browser(
                 poll_interval_seconds=lock_poll_seconds,
             )
         )
+        report_progress("account_lock_acquired")
         runtime_guard = stack.enter_context(
             RuntimeLeaseGuard(
                 RuntimeLeaseRepository(app_config),
@@ -165,13 +178,17 @@ def open_account_bound_listing_browser(
         opened = False
         try:
             runtime_guard.assert_active()
+            report_progress("runtime_lease_acquired")
+            report_progress("login_subprocess_starting")
             login_result = ensure_1688_authenticated_session(
                 shared_runtime_root,
                 identity.account_key,
                 identity.shop_name,
                 keep_browser_open=True,
                 allow_unconfirmed_identity=True,
+                timeout_seconds=login_timeout_seconds,
             )
+            report_progress("login_subprocess_completed")
             if str(login_result.get("status") or "") not in {"success", "identity_unconfirmed"}:
                 raise OfflineLoginRequiredError("1688 automatic login did not return a usable session.")
             if not login_result.get("browser_runtime_preserved"):
@@ -179,6 +196,7 @@ def open_account_bound_listing_browser(
                     "1688 automatic login did not preserve the account browser runtime."
                 )
 
+            report_progress("browser_attach_starting")
             browser = browser_class(
                 build_account_bound_browser_config(operator_config, binding),
                 project_path,
@@ -188,6 +206,7 @@ def open_account_bound_listing_browser(
             runtime_guard.register_owned_browser_closer(browser.close)
             browser.open()
             opened = True
+            report_progress("browser_attached")
             runtime_guard.assert_active()
             yield browser, binding, identity
         finally:

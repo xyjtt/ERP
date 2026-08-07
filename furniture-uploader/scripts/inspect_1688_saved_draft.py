@@ -38,10 +38,41 @@ from cross_project_runtime import resolve_build_sha
 from sku_offline_browser import SkuOfflineBrowser
 
 
+class InspectionProgressArtifact:
+    def __init__(self, path: Path, *, output_path: Path) -> None:
+        self.path = path
+        self.output_path = output_path
+        self.started_at = datetime.now(timezone.utc).isoformat()
+
+    def write(self, stage: str, *, status: str = "running", **extra: object) -> None:
+        updated_at = datetime.now(timezone.utc).isoformat()
+        artifact = {
+            "artifact_version": "erp_saved_draft_inspector_progress_v1",
+            "status": status,
+            "stage": stage,
+            "started_at": self.started_at,
+            "updated_at": updated_at,
+            "finished_at": updated_at if status != "running" else None,
+            "inspector_pid": os.getpid(),
+            "output": str(self.output_path),
+            "draft_saved": False,
+            "offer_submitted": False,
+            **extra,
+        }
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = self.path.with_name(f".{self.path.name}.{os.getpid()}.tmp")
+        temporary_path.write_text(
+            json.dumps(artifact, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary_path, self.path)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Read-only independent refresh check for one 1688 draft.")
     parser.add_argument("--payload", required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--progress-output", default="")
     parser.add_argument(
         "--draft-id",
         default="",
@@ -72,6 +103,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--expected-cdp-port", type=int, default=9306)
     parser.add_argument("--lock-wait-seconds", type=int, default=0)
     parser.add_argument("--runtime-lease-wait-seconds", type=float, default=0)
+    parser.add_argument("--login-timeout-seconds", type=int, default=300)
     parser.add_argument(
         "--shared-runtime-root",
         default=os.getenv("YYDD_1688_RUNTIME_ROOT", "D:/script_1688"),
@@ -531,6 +563,14 @@ def main() -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     args = build_parser().parse_args()
+    output_path = Path(args.output).resolve()
+    progress_path = (
+        Path(args.progress_output).resolve()
+        if args.progress_output
+        else Path(f"{output_path}.progress.json")
+    )
+    progress = InspectionProgressArtifact(progress_path, output_path=output_path)
+    progress.write("inspector_started")
     payload = json.loads(Path(args.payload).read_text(encoding="utf-8-sig"))
     expected_draft_id = _resolve_inspection_draft_id(payload, args.draft_id)
     expected_detail_count = len(list(((payload.get("images") or {}).get("detail_urls") or [])))
@@ -557,7 +597,6 @@ def main() -> int:
     config_dir = PROJECT_ROOT / "config"
     operator_config = load_json_with_local_override(config_dir / "operator_config.json")
     system_config = load_json_with_local_override(config_dir / "systems" / "1688_sku_offline.json")
-    output_path = Path(args.output)
     offer_url, expected_offer_id = _resolve_offer_target(args.offer_url, args.offer_id)
     publish_url = ""
     entry_evidence: dict[str, object] = {"entry_mode": "direct_draft_url"}
@@ -579,6 +618,7 @@ def main() -> int:
                 "publish_url": publish_url,
             }
     browser_class = SkuOfflineBrowser if args.open_from_management else BrowserRPA
+    progress.write("preflight_complete")
     with open_account_bound_listing_browser(
         payload=payload,
         browser_class=browser_class,
@@ -592,6 +632,8 @@ def main() -> int:
         task_type="listing",
         lock_wait_seconds=args.lock_wait_seconds,
         runtime_lease_wait_seconds=args.runtime_lease_wait_seconds,
+        login_timeout_seconds=args.login_timeout_seconds,
+        progress_callback=progress.write,
     ) as (browser, binding, identity):
         boot_network_probe_installed = _install_draft_boot_network_probe(browser)
         if args.open_from_management:
@@ -668,6 +710,12 @@ def main() -> int:
                 encoding="utf-8",
             )
             print(json.dumps(evidence, ensure_ascii=False, indent=2))
+            progress.write(
+                "inspection_unavailable",
+                status="completed",
+                exit_code=3,
+                inspection_status="unavailable",
+            )
             return 3
         browser._pause(2.0)
         current_url = str(browser.driver.current_url or "").strip()
@@ -829,7 +877,14 @@ def main() -> int:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(rendered + "\n", encoding="utf-8")
     print(rendered)
-    return 0 if evidence["status"] == "passed" else 2
+    exit_code = 0 if evidence["status"] == "passed" else 2
+    progress.write(
+        "inspection_completed",
+        status="completed",
+        exit_code=exit_code,
+        inspection_status=evidence["status"],
+    )
+    return exit_code
 
 
 if __name__ == "__main__":

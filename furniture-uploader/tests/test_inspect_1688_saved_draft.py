@@ -62,8 +62,15 @@ class FakeBrowser:
 
 @contextmanager
 def fake_account_browser_session(**kwargs):
+    if kwargs["login_timeout_seconds"] != 300:
+        raise AssertionError("unexpected login timeout")
+    progress_callback = kwargs.get("progress_callback")
+    if progress_callback is not None:
+        progress_callback("login_subprocess_starting")
     browser = kwargs["browser_class"]({}, Path.cwd())
     browser.open()
+    if progress_callback is not None:
+        progress_callback("browser_attached")
     try:
         yield (
             browser,
@@ -382,12 +389,20 @@ class InspectSavedDraftTests(unittest.TestCase):
                 exit_code = inspector.main()
 
             evidence = json.loads(output_path.read_text(encoding="utf-8"))
+            progress = json.loads(
+                Path(f"{output_path}.progress.json").read_text(encoding="utf-8")
+            )
             self.assertEqual(exit_code, 3)
             self.assertEqual(evidence["status"], "unavailable")
             self.assertEqual(evidence["current_url"], "https://offer.1688.com/error")
             self.assertFalse(evidence["sell_publish_sdk_present"])
             self.assertFalse(evidence["draft_saved"])
             self.assertFalse(evidence["offer_submitted"])
+            self.assertEqual(progress["status"], "completed")
+            self.assertEqual(progress["stage"], "inspection_unavailable")
+            self.assertEqual(progress["exit_code"], 3)
+            self.assertFalse(progress["draft_saved"])
+            self.assertFalse(progress["offer_submitted"])
 
     def test_management_entry_is_recorded_when_runtime_is_unavailable(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -18,6 +18,7 @@ param(
     [string]$PublishUrl = "",
     [int]$LockWaitSeconds = 0,
     [double]$RuntimeLeaseWaitSeconds = 0,
+    [int]$LoginTimeoutSeconds = 300,
     [string]$PythonExe = "",
     [switch]$OpenFromManagement
 )
@@ -48,99 +49,155 @@ function Resolve-OutputPath([string]$PathValue) {
     return [System.IO.Path]::GetFullPath((Join-Path (Get-Location).Path $PathValue))
 }
 
-$resolvedProjectRoot = Resolve-RequiredDirectory $ProjectRoot "ProjectRoot"
-$resolvedPayload = Resolve-RequiredFile $Payload "Payload"
 $resolvedOutput = Resolve-OutputPath $Output
-$resolvedSharedRuntimeRoot = Resolve-RequiredDirectory $SharedRuntimeRoot "SharedRuntimeRoot"
-$inspectorPath = Resolve-RequiredFile (
-    Join-Path $resolvedProjectRoot "scripts\inspect_1688_saved_draft.py"
-) "Inspector"
-
-if ($PythonExe) {
-    $resolvedPython = Resolve-RequiredFile $PythonExe "PythonExe"
-} else {
-    $venvPython = Join-Path $resolvedProjectRoot ".venv\Scripts\python.exe"
-    if (Test-Path -LiteralPath $venvPython -PathType Leaf) {
-        $resolvedPython = (Resolve-Path -LiteralPath $venvPython).Path
-    } else {
-        $pythonCommand = Get-Command python.exe -ErrorAction Stop
-        $resolvedPython = $pythonCommand.Source
-    }
-}
-
 $outputDirectory = Split-Path -Parent $resolvedOutput
 New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null
 $stdoutPath = "$resolvedOutput.stdout.log"
 $stderrPath = "$resolvedOutput.stderr.log"
 $markerPath = "$resolvedOutput.launcher.json"
-
-$pythonArguments = @(
-    "-X", "utf8",
-    $inspectorPath,
-    "--payload", $resolvedPayload,
-    "--output", $resolvedOutput,
-    "--draft-id", $DraftId,
-    "--expected-shop", $ExpectedShop,
-    "--account-key", $AccountKey,
-    "--expected-cdp-port", ([string]$ExpectedCdpPort),
-    "--shared-runtime-root", $resolvedSharedRuntimeRoot,
-    "--lock-wait-seconds", ([string]$LockWaitSeconds),
-    "--runtime-lease-wait-seconds", $RuntimeLeaseWaitSeconds.ToString(
-        [System.Globalization.CultureInfo]::InvariantCulture
-    )
-)
-if ($OpenFromManagement) {
-    $pythonArguments += "--open-from-management"
-}
-if ($PublishUrl) {
-    $pythonArguments += @("--publish-url", $PublishUrl)
-}
-if ($OfferId) {
-    $pythonArguments += @("--offer-id", $OfferId)
-}
-if ($OfferUrl) {
-    $pythonArguments += @("--offer-url", $OfferUrl)
-}
+$progressPath = "$resolvedOutput.progress.json"
 
 $startedAt = (Get-Date).ToString("o")
-$exitCode = 1
+$resolvedProjectRoot = ""
+$resolvedPayload = ""
+$resolvedSharedRuntimeRoot = ""
+$inspectorPath = ""
+$resolvedPython = ""
+$pythonArguments = @()
+$exitCode = $null
 $launcherError = ""
-try {
-    $env:PYTHONUTF8 = "1"
-    Push-Location $resolvedProjectRoot
-    try {
-        & $resolvedPython @pythonArguments 1> $stdoutPath 2> $stderrPath
-        $exitCode = $LASTEXITCODE
-    } finally {
-        Pop-Location
-    }
-} catch {
-    $launcherError = $_.Exception.Message
-    [System.IO.File]::WriteAllText($stderrPath, $launcherError + [Environment]::NewLine)
-} finally {
+$stage = "launcher_started"
+$childStarted = $false
+$terminal = $false
+
+function Write-LauncherMarker([string]$Status) {
     $marker = [ordered]@{
-        artifact_version = "erp_saved_draft_inspector_launcher_v1"
+        artifact_version = "erp_saved_draft_inspector_launcher_v2"
+        status = $Status
+        stage = $stage
         started_at = $startedAt
-        finished_at = (Get-Date).ToString("o")
+        updated_at = (Get-Date).ToString("o")
+        finished_at = if ($terminal) { (Get-Date).ToString("o") } else { $null }
+        launcher_pid = $PID
+        session_id = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
+        principal = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+        user_interactive = [Environment]::UserInteractive
         project_root = $resolvedProjectRoot
+        requested_project_root = $ProjectRoot
         python_exe = $resolvedPython
         inspector = $inspectorPath
         arguments = $pythonArguments
+        child_started = $childStarted
         exit_code = $exitCode
         launcher_error = $launcherError
         output = $resolvedOutput
         output_exists = Test-Path -LiteralPath $resolvedOutput -PathType Leaf
+        progress = $progressPath
+        progress_exists = Test-Path -LiteralPath $progressPath -PathType Leaf
         stdout = $stdoutPath
         stderr = $stderrPath
         draft_saved = $false
         offer_submitted = $false
     }
     $renderedMarker = $marker | ConvertTo-Json -Depth 6
+    $temporaryMarkerPath = "$markerPath.$PID.tmp"
     [System.IO.File]::WriteAllText(
-        $markerPath,
+        $temporaryMarkerPath,
         $renderedMarker + [Environment]::NewLine,
         (New-Object System.Text.UTF8Encoding($false))
     )
+    Move-Item -LiteralPath $temporaryMarkerPath -Destination $markerPath -Force
+}
+
+Write-LauncherMarker "running"
+
+try {
+    $stage = "preflight"
+    if ($LoginTimeoutSeconds -le 0) {
+        throw "LoginTimeoutSeconds must be greater than zero."
+    }
+    $resolvedProjectRoot = Resolve-RequiredDirectory $ProjectRoot "ProjectRoot"
+    $resolvedPayload = Resolve-RequiredFile $Payload "Payload"
+    $resolvedSharedRuntimeRoot = Resolve-RequiredDirectory $SharedRuntimeRoot "SharedRuntimeRoot"
+    $inspectorPath = Resolve-RequiredFile (
+        Join-Path $resolvedProjectRoot "scripts\inspect_1688_saved_draft.py"
+    ) "Inspector"
+
+    if ($PythonExe) {
+        $resolvedPython = Resolve-RequiredFile $PythonExe "PythonExe"
+    } else {
+        $venvPython = Join-Path $resolvedProjectRoot ".venv\Scripts\python.exe"
+        if (Test-Path -LiteralPath $venvPython -PathType Leaf) {
+            $resolvedPython = (Resolve-Path -LiteralPath $venvPython).Path
+        } else {
+            $pythonCommand = Get-Command python.exe -ErrorAction Stop
+            $resolvedPython = $pythonCommand.Source
+        }
+    }
+
+    $pythonArguments = @(
+        "-u",
+        "-X", "utf8",
+        $inspectorPath,
+        "--payload", $resolvedPayload,
+        "--output", $resolvedOutput,
+        "--progress-output", $progressPath,
+        "--draft-id", $DraftId,
+        "--expected-shop", $ExpectedShop,
+        "--account-key", $AccountKey,
+        "--expected-cdp-port", ([string]$ExpectedCdpPort),
+        "--shared-runtime-root", $resolvedSharedRuntimeRoot,
+        "--lock-wait-seconds", ([string]$LockWaitSeconds),
+        "--runtime-lease-wait-seconds", $RuntimeLeaseWaitSeconds.ToString(
+            [System.Globalization.CultureInfo]::InvariantCulture
+        ),
+        "--login-timeout-seconds", ([string]$LoginTimeoutSeconds)
+    )
+    if ($OpenFromManagement) {
+        $pythonArguments += "--open-from-management"
+    }
+    if ($PublishUrl) {
+        $pythonArguments += @("--publish-url", $PublishUrl)
+    }
+    if ($OfferId) {
+        $pythonArguments += @("--offer-id", $OfferId)
+    }
+    if ($OfferUrl) {
+        $pythonArguments += @("--offer-url", $OfferUrl)
+    }
+
+    $stage = "preflight_complete"
+    Write-LauncherMarker "running"
+    $env:PYTHONUTF8 = "1"
+    $env:PYTHONUNBUFFERED = "1"
+    Push-Location $resolvedProjectRoot
+    try {
+        $stage = "inspector_running"
+        $childStarted = $true
+        Write-LauncherMarker "running"
+        & $resolvedPython @pythonArguments 1> $stdoutPath 2> $stderrPath
+        if ($null -eq $LASTEXITCODE) {
+            throw "Inspector process exited without an exit code."
+        }
+        $exitCode = [int]$LASTEXITCODE
+        $stage = "inspector_exited"
+    } finally {
+        Pop-Location
+    }
+} catch {
+    $launcherError = $_.Exception.Message
+    if ($null -eq $exitCode) {
+        $exitCode = 1
+    }
+    $stage = if ($childStarted) { "launcher_failed" } else { "preflight_failed" }
+    [System.IO.File]::AppendAllText(
+        $stderrPath,
+        "LAUNCHER_ERROR: " + $launcherError + [Environment]::NewLine
+    )
+} finally {
+    $terminal = $true
+    $status = if ($launcherError -or [int]$exitCode -ne 0) { "failed" } else { "completed" }
+    Write-LauncherMarker $status
 }
 
 if ($launcherError) {
