@@ -3589,6 +3589,13 @@ class SkuOfflineBrowser(BrowserRPA):
 
         if not bool(state_before.get("exists")):
             return {"label": "配送服务", "status": "skipped", "reason": "not_found"}
+        if not bool(state_before.get("active", True)):
+            return {
+                "label": "配送服务",
+                "status": "skipped",
+                "reason": "inactive_component",
+                "detail": str(state_before.get("inactive_reason", "")).strip(),
+            }
         if bool(state_before.get("selected")):
             return {
                 "label": "配送服务",
@@ -3684,6 +3691,20 @@ class SkuOfflineBrowser(BrowserRPA):
                   return { exists: false };
                 }
 
+                const targetVisible = isVisible(target);
+                if (!targetVisible) {
+                  return {
+                    exists: true,
+                    active: false,
+                    selected: false,
+                    selected_options: [],
+                    option_count: 0,
+                    auto_switch_checked: false,
+                    message_text: '',
+                    inactive_reason: 'hidden',
+                  };
+                }
+
                 const labels = Array.from(target.querySelectorAll('label.ant-checkbox-wrapper')).filter(isVisible);
                 const autoSwitch = target.querySelector('button.default-config-switch');
                 const autoSwitchChecked = autoSwitch ? String(autoSwitch.getAttribute('aria-checked') || '') === 'true' : false;
@@ -3702,6 +3723,7 @@ class SkuOfflineBrowser(BrowserRPA):
                 const messageText = norm(messageNode ? messageNode.innerText || messageNode.textContent || '' : '');
                 return {
                   exists: true,
+                  active: true,
                   selected: selectedOptions.length > 0,
                   selected_options: selectedOptions,
                   option_count: labels.length,
@@ -3719,11 +3741,13 @@ class SkuOfflineBrowser(BrowserRPA):
             selected_options = []
         return {
             "exists": bool(state.get("exists", False)),
+            "active": bool(state.get("active", state.get("exists", False))),
             "selected": bool(state.get("selected", False)),
             "selected_options": [str(item).strip() for item in selected_options if str(item).strip()],
             "option_count": int(state.get("option_count", 0) or 0),
             "auto_switch_checked": bool(state.get("auto_switch_checked", False)),
             "message_text": str(state.get("message_text", "")).strip(),
+            "inactive_reason": str(state.get("inactive_reason", "")).strip(),
         }
 
     def _enable_delivery_service_auto_switch(self) -> bool:

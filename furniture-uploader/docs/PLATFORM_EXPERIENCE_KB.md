@@ -107,6 +107,12 @@
 - Practical limitation observed:
   - some products still show `submitted but still online` after execute, meaning submit-state confirmation may need extra page-level success signals beyond current toast selectors.
 
+## 2026-08-08 Hidden Delivery-Service Component
+
+- A live Gutu replace canary showed `#guid-customExtraService` in the DOM with `style="display: none"`; its unchecked delivery-service controls were therefore inactive, while the page assist board reported the services section complete.
+- DOM presence alone is not a required-field signal. Delivery-service backfill must click only a visible `.special-service-wrapper`; a hidden wrapper is recorded as `skipped/inactive_component` and the normal submit validation remains authoritative.
+- This distinction prevents a synthetic `delivery_service_not_clickable` failure from blocking products where the platform intentionally disables the component. It does not turn a submit failure into success and does not authorize retrying an already terminal task key.
+
 更新时间：2026-03-26
 
 ## 用途

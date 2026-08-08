@@ -1866,6 +1866,38 @@ class SkuOfflineBrowserTests(unittest.TestCase):
         self.assertEqual(action["status"], "applied")
         self.assertIn("市区物流点自提", action["value"])
 
+    def test_ensure_required_delivery_service_skips_hidden_component(self) -> None:
+        class HiddenDeliveryBrowser(SkuOfflineBrowser):
+            def __init__(self) -> None:
+                super().__init__({}, PROJECT_ROOT)
+                self.driver = object()
+
+            def _read_delivery_service_state(self) -> dict[str, object]:
+                return {
+                    "exists": True,
+                    "active": False,
+                    "selected": False,
+                    "selected_options": [],
+                    "option_count": 0,
+                    "inactive_reason": "hidden",
+                }
+
+            def _select_first_delivery_service_option(self) -> bool:
+                raise AssertionError("hidden delivery service must not be clicked")
+
+            def _enable_delivery_service_auto_switch(self) -> bool:
+                raise AssertionError("hidden delivery service switch must not be clicked")
+
+        browser = HiddenDeliveryBrowser()
+        context: dict[str, object] = {}
+
+        action = browser._ensure_required_delivery_service(context)
+
+        self.assertEqual(action["status"], "skipped")
+        self.assertEqual(action["reason"], "inactive_component")
+        self.assertEqual(action["detail"], "hidden")
+        self.assertFalse(context["delivery_service_state_before"]["active"])
+
     def test_ensure_required_delivery_service_marks_failed_when_still_empty(self) -> None:
         class DeliveryFailBrowser(SkuOfflineBrowser):
             def __init__(self) -> None:
