@@ -370,9 +370,16 @@ class OperationSagaTaskNotFoundTerminalizeTests(unittest.TestCase):
 
 
 class _ExactClaimCursor:
-    def __init__(self, keys: list[str], *, invalid_key: str = "") -> None:
+    def __init__(
+        self,
+        keys: list[str],
+        *,
+        invalid_key: str = "",
+        topic: str = "jushuitan.cleanup_1688_link",
+    ) -> None:
         self.keys = keys
         self.invalid_key = invalid_key
+        self.topic = topic
         self.stage = ""
         self.executed: list[tuple] = []
 
@@ -391,12 +398,12 @@ class _ExactClaimCursor:
     def fetchall(self):
         if self.stage == "validate":
             return [
-                (key, 1, "failed_retryable", "jushuitan.cleanup_1688_link", "run-1", 0 if key == self.invalid_key else 1)
+                (key, 1, "failed_retryable", self.topic, "run-1", 0 if key == self.invalid_key else 1)
                 for key in self.keys
             ]
         if self.stage == "claim":
             return [
-                (index + 1, key, "jushuitan.cleanup_1688_link", "{}", 2, "c" * 32)
+                (index + 1, key, self.topic, "{}", 2, "c" * 32)
                 for index, key in enumerate(self.keys)
             ]
         return []
@@ -436,6 +443,102 @@ class OperationSagaExactClaimTests(unittest.TestCase):
 
         self.assertEqual(connection.commits, 0)
         self.assertEqual(connection.rollbacks, 1)
+
+    def test_exact_claim_can_take_over_only_the_expected_expired_claim_set(self) -> None:
+        keys = ["a" * 64, "b" * 64]
+        cursor = _ExactClaimCursor(keys)
+        connection = _FakeConnection(cursor)  # type: ignore[arg-type]
+        repository = OperationSagaRepository(_FakeConfig(), connect=lambda _config: connection)
+
+        items = repository.claim_outbox_exact(
+            claim_owner="executor:new-worker",
+            run_id="run-1",
+            topic="jushuitan.cleanup_1688_link",
+            operation_keys=keys,
+            expected_expired_claim_owner="executor:1234",
+            expected_expired_claim_attempt_count=1,
+            expired_claim_recovery_evidence={
+                "approved_operation_keys_sha256": "c" * 64,
+                "reason": "previous owner stopped after the claim expired",
+            },
+        )
+
+        self.assertEqual({item.operation_key for item in items}, set(keys))
+        self.assertEqual(connection.commits, 1)
+        self.assertEqual(connection.rollbacks, 0)
+        validation = next(entry for entry in cursor.executed if "CASE WHEN" in entry[0])
+        self.assertEqual(
+            validation[1],
+            (1, "executor:1234", "stop_sale", "success", "already_offline"),
+        )
+        update = next(entry for entry in cursor.executed if "UPDATE outbox_row" in entry[0])
+        self.assertIn("outbox_row.status = 'claimed'", update[0])
+        self.assertIn("outbox_row.claim_owner = ?", update[0])
+        self.assertIn("outbox_row.claim_until < SYSUTCDATETIME()", update[0])
+        self.assertIn("saga_row.task_type = ?", update[0])
+        self.assertIn("last_error_code = 'expired_claim_recovered'", update[0])
+        self.assertIn("approved_operation_keys_sha256", str(update[1]))
+
+    def test_exact_expired_claim_takeover_requires_complete_evidence(self) -> None:
+        repository = OperationSagaRepository(
+            _FakeConfig(),
+            connect=lambda _config: _FakeConnection(_ExactClaimCursor(["a" * 64])),
+        )
+
+        with self.assertRaisesRegex(ValueError, "durable evidence"):
+            repository.claim_outbox_exact(
+                claim_owner="executor:new-worker",
+                run_id="run-1",
+                topic="jushuitan.cleanup_1688_link",
+                operation_keys=["a" * 64],
+                expected_expired_claim_owner="executor:1234",
+                expected_expired_claim_attempt_count=1,
+            )
+
+    def test_exact_expired_claim_takeover_rolls_back_on_owner_or_state_drift(self) -> None:
+        keys = ["a" * 64, "b" * 64]
+        cursor = _ExactClaimCursor(keys, invalid_key=keys[1])
+        connection = _FakeConnection(cursor)  # type: ignore[arg-type]
+        repository = OperationSagaRepository(_FakeConfig(), connect=lambda _config: connection)
+
+        with self.assertRaisesRegex(RuntimeError, "not_claimable"):
+            repository.claim_outbox_exact(
+                claim_owner="executor:new-worker",
+                run_id="run-1",
+                topic="jushuitan.cleanup_1688_link",
+                operation_keys=keys,
+                expected_expired_claim_owner="executor:1234",
+                expected_expired_claim_attempt_count=1,
+                expired_claim_recovery_evidence={"reason": "approved recovery"},
+            )
+
+        self.assertEqual(connection.commits, 0)
+        self.assertEqual(connection.rollbacks, 1)
+        self.assertFalse(any("UPDATE outbox_row" in sql for sql, _ in cursor.executed))
+
+    def test_exact_expired_sync_claim_binds_sku_replace_success_states(self) -> None:
+        key = "a" * 64
+        cursor = _ExactClaimCursor([key], topic="jushuitan.sync_1688_link")
+        repository = OperationSagaRepository(
+            _FakeConfig(),
+            connect=lambda _config: _FakeConnection(cursor),
+        )
+
+        repository.claim_outbox_exact(
+            claim_owner="executor:new-worker",
+            run_id="run-1",
+            topic="jushuitan.sync_1688_link",
+            operation_keys=[key],
+            expected_expired_claim_owner="executor:1234",
+            expected_expired_claim_attempt_count=1,
+            expired_claim_recovery_evidence={"reason": "approved recovery"},
+        )
+
+        validation = next(entry for entry in cursor.executed if "CASE WHEN" in entry[0])
+        self.assertEqual(
+            validation[1],
+            (1, "executor:1234", "sku_replace", "success", "already_replaced"),
+        )
 
 
 class _InterruptedRecoveryCursor:

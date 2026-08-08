@@ -721,6 +721,9 @@ class OperationSagaRepository:
         topic: str,
         operation_keys: Iterable[str],
         claim_seconds: int = 1800,
+        expected_expired_claim_owner: str = "",
+        expected_expired_claim_attempt_count: int | None = None,
+        expired_claim_recovery_evidence: Mapping[str, Any] | None = None,
     ) -> list[OutboxItem]:
         approved_keys = sorted({str(key or "").strip().lower() for key in operation_keys})
         if not approved_keys:
@@ -732,6 +735,45 @@ class OperationSagaRepository:
             raise ValueError("Exact Outbox claim requires lowercase SHA-256 operation_keys")
         if not str(run_id or "").strip() or not str(topic or "").strip():
             raise ValueError("Exact Outbox claim requires run_id and topic")
+        expected_expired_owner = str(expected_expired_claim_owner or "").strip()
+        recovering_expired_claim = bool(
+            expected_expired_owner
+            or expected_expired_claim_attempt_count is not None
+            or expired_claim_recovery_evidence
+        )
+        if recovering_expired_claim:
+            if not expected_expired_owner:
+                raise ValueError("Expired Outbox claim recovery requires the previous claim owner")
+            if len(expected_expired_owner) > 100:
+                raise ValueError("Expired Outbox claim owner is too long")
+            if (
+                expected_expired_claim_attempt_count is None
+                or int(expected_expired_claim_attempt_count) < 1
+            ):
+                raise ValueError("Expired Outbox claim recovery requires a positive attempt count")
+            if not expired_claim_recovery_evidence:
+                raise ValueError("Expired Outbox claim recovery requires durable evidence")
+            if topic == "jushuitan.cleanup_1688_link":
+                recovery_task_type = "stop_sale"
+                recovery_success_statuses = ("success", "already_offline")
+            elif topic == "jushuitan.sync_1688_link":
+                recovery_task_type = "sku_replace"
+                recovery_success_statuses = ("success", "already_replaced")
+            else:
+                raise ValueError("Expired Outbox claim recovery does not support this topic")
+        else:
+            recovery_task_type = ""
+            recovery_success_statuses = ("", "")
+        recovery_summary = ""
+        if recovering_expired_claim:
+            recovery_summary = json.dumps(
+                dict(expired_claim_recovery_evidence or {}),
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+            )
+            if len(recovery_summary) > 2000:
+                raise ValueError("Expired Outbox claim recovery evidence is too long")
 
         outbox = self._table("ali1688_operation_outbox")
         saga = self._table("ali1688_operation_saga")
@@ -747,25 +789,53 @@ class OperationSagaRepository:
                     "INSERT INTO #approved_operation_keys (operation_key) VALUES (?)",
                     [(key,) for key in approved_keys],
                 )
-                validation_rows = cursor.execute(
-                    f"""
+                if recovering_expired_claim:
+                    eligibility_sql = """
+                           outbox_row.status = 'claimed'
+                       AND outbox_row.attempt_count = ?
+                       AND outbox_row.claim_owner = ?
+                       AND outbox_row.claim_token IS NOT NULL
+                       AND outbox_row.claim_until IS NOT NULL
+                       AND outbox_row.claim_until < SYSUTCDATETIME()
+                       AND saga_row.state = 'jushuitan_pending'
+                       AND saga_row.task_type = ?
+                       AND saga_row.ali1688_status IN (?, ?)
+                       AND saga_row.jushuitan_status = 'pending'
+                    """
+                    eligibility_params: tuple[Any, ...] = (
+                        int(expected_expired_claim_attempt_count),
+                        expected_expired_owner,
+                        recovery_task_type,
+                        *recovery_success_statuses,
+                    )
+                else:
+                    eligibility_sql = """
+                           outbox_row.status IN ('pending', 'failed_retryable')
+                       AND outbox_row.available_at <= SYSUTCDATETIME()
+                       AND (outbox_row.claim_until IS NULL
+                            OR outbox_row.claim_until < SYSUTCDATETIME())
+                    """
+                    eligibility_params = ()
+                validation_query = f"""
                     SELECT approved.operation_key,
                            CASE WHEN outbox_row.outbox_id IS NULL THEN 0 ELSE 1 END AS exists_flag,
                            ISNULL(outbox_row.status, ''), ISNULL(outbox_row.topic, ''),
                            ISNULL(saga_row.run_id, ''),
-                           CASE WHEN outbox_row.status IN ('pending', 'failed_retryable')
-                                  AND outbox_row.available_at <= SYSUTCDATETIME()
-                                  AND (outbox_row.claim_until IS NULL
-                                       OR outbox_row.claim_until < SYSUTCDATETIME())
+                           CASE WHEN {eligibility_sql}
                                 THEN 1 ELSE 0 END AS eligible_flag
                       FROM #approved_operation_keys AS approved
                       LEFT JOIN {outbox} AS outbox_row WITH (UPDLOCK, HOLDLOCK)
                         ON outbox_row.operation_key = approved.operation_key
-                      LEFT JOIN {saga} AS saga_row WITH (UPDLOCK, HOLDLOCK)
+                     LEFT JOIN {saga} AS saga_row WITH (UPDLOCK, HOLDLOCK)
                         ON saga_row.operation_key = approved.operation_key
                      ORDER BY approved.operation_key
                     """
-                ).fetchall()
+                validation_cursor = (
+                    cursor.execute(validation_query, eligibility_params)
+                    if eligibility_params
+                    else cursor.execute(validation_query)
+                )
+                validation_rows = validation_cursor.fetchall()
                 observed_keys = {str(row[0]) for row in validation_rows}
                 if observed_keys != set(approved_keys) or len(validation_rows) != len(approved_keys):
                     raise SagaReconcileRequiredError("outbox_approved_scope_query_mismatch")
@@ -782,35 +852,78 @@ class OperationSagaRepository:
                         "outbox_approved_scope_not_claimable:" + ",".join(invalid)
                     )
 
-                rows = cursor.execute(
-                    f"""
-                    UPDATE outbox_row
-                       SET status = 'claimed', claim_owner = ?, claim_token = ?,
-                           claim_until = DATEADD(SECOND, ?, SYSUTCDATETIME()),
-                           attempt_count = attempt_count + 1,
-                           updated_at = SYSUTCDATETIME()
-                    OUTPUT inserted.outbox_id, inserted.operation_key, inserted.topic,
-                           inserted.payload_json, inserted.attempt_count, inserted.claim_token
-                      FROM {outbox} AS outbox_row
-                      JOIN #approved_operation_keys AS approved
-                        ON approved.operation_key = outbox_row.operation_key
-                      JOIN {saga} AS saga_row
-                        ON saga_row.operation_key = outbox_row.operation_key
-                     WHERE outbox_row.status IN ('pending', 'failed_retryable')
-                       AND outbox_row.available_at <= SYSUTCDATETIME()
-                       AND (outbox_row.claim_until IS NULL
-                            OR outbox_row.claim_until < SYSUTCDATETIME())
-                       AND outbox_row.topic = ?
-                       AND saga_row.run_id = ?
-                    """,
-                    (
-                        claim_owner[:100],
-                        claim_token,
-                        max(1, int(claim_seconds)),
-                        topic,
-                        run_id,
-                    ),
-                ).fetchall()
+                if recovering_expired_claim:
+                    rows = cursor.execute(
+                        f"""
+                        UPDATE outbox_row
+                           SET status = 'claimed', claim_owner = ?, claim_token = ?,
+                               claim_until = DATEADD(SECOND, ?, SYSUTCDATETIME()),
+                               attempt_count = attempt_count + 1,
+                               last_error_code = 'expired_claim_recovered',
+                               last_error_summary = ?, updated_at = SYSUTCDATETIME()
+                        OUTPUT inserted.outbox_id, inserted.operation_key, inserted.topic,
+                               inserted.payload_json, inserted.attempt_count, inserted.claim_token
+                          FROM {outbox} AS outbox_row
+                          JOIN #approved_operation_keys AS approved
+                            ON approved.operation_key = outbox_row.operation_key
+                          JOIN {saga} AS saga_row
+                            ON saga_row.operation_key = outbox_row.operation_key
+                         WHERE outbox_row.status = 'claimed'
+                           AND outbox_row.attempt_count = ?
+                           AND outbox_row.claim_owner = ?
+                           AND outbox_row.claim_token IS NOT NULL
+                           AND outbox_row.claim_until IS NOT NULL
+                           AND outbox_row.claim_until < SYSUTCDATETIME()
+                           AND outbox_row.topic = ?
+                           AND saga_row.run_id = ?
+                           AND saga_row.state = 'jushuitan_pending'
+                           AND saga_row.task_type = ?
+                           AND saga_row.ali1688_status IN (?, ?)
+                           AND saga_row.jushuitan_status = 'pending'
+                        """,
+                        (
+                            claim_owner[:100],
+                            claim_token,
+                            max(1, int(claim_seconds)),
+                            recovery_summary,
+                            int(expected_expired_claim_attempt_count),
+                            expected_expired_owner,
+                            topic,
+                            run_id,
+                            recovery_task_type,
+                            *recovery_success_statuses,
+                        ),
+                    ).fetchall()
+                else:
+                    rows = cursor.execute(
+                        f"""
+                        UPDATE outbox_row
+                           SET status = 'claimed', claim_owner = ?, claim_token = ?,
+                               claim_until = DATEADD(SECOND, ?, SYSUTCDATETIME()),
+                               attempt_count = attempt_count + 1,
+                               updated_at = SYSUTCDATETIME()
+                        OUTPUT inserted.outbox_id, inserted.operation_key, inserted.topic,
+                               inserted.payload_json, inserted.attempt_count, inserted.claim_token
+                          FROM {outbox} AS outbox_row
+                          JOIN #approved_operation_keys AS approved
+                            ON approved.operation_key = outbox_row.operation_key
+                          JOIN {saga} AS saga_row
+                            ON saga_row.operation_key = outbox_row.operation_key
+                         WHERE outbox_row.status IN ('pending', 'failed_retryable')
+                           AND outbox_row.available_at <= SYSUTCDATETIME()
+                           AND (outbox_row.claim_until IS NULL
+                                OR outbox_row.claim_until < SYSUTCDATETIME())
+                           AND outbox_row.topic = ?
+                           AND saga_row.run_id = ?
+                        """,
+                        (
+                            claim_owner[:100],
+                            claim_token,
+                            max(1, int(claim_seconds)),
+                            topic,
+                            run_id,
+                        ),
+                    ).fetchall()
                 claimed_keys = {str(row[1]) for row in rows}
                 if claimed_keys != set(approved_keys) or len(rows) != len(approved_keys):
                     raise SagaFencingError("outbox_exact_claim_compare_and_set_failed")

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
+import errno
 import hashlib
 import json
 import os
@@ -52,9 +54,80 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--claim-seconds", type=int, default=1800)
     parser.add_argument("--max-attempts", type=int, default=3)
     parser.add_argument("--retry-delay-seconds", type=int, default=300)
+    parser.add_argument("--recover-expired-claim-owner", default="")
+    parser.add_argument("--recover-expired-claim-attempt-count", type=int, default=None)
+    parser.add_argument("--recover-expired-claim-reason", default="")
     parser.add_argument("--handoff-out", default="")
     parser.add_argument("--results-dir", default="")
     return parser
+
+
+def _is_process_running(pid: int) -> bool:
+    if int(pid or 0) <= 0:
+        return False
+    if os.name == "nt":
+        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, int(pid))  # type: ignore[attr-defined]
+        if not handle:
+            try:
+                last_error = int(ctypes.windll.kernel32.GetLastError())  # type: ignore[attr-defined]
+            except Exception:
+                last_error = 0
+            return last_error == 5
+        ctypes.windll.kernel32.CloseHandle(handle)  # type: ignore[attr-defined]
+        return True
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError as exc:
+        return exc.errno != errno.ESRCH
+    return True
+
+
+def build_expired_claim_recovery_evidence(
+    args: argparse.Namespace,
+    *,
+    hostname: str = "",
+    process_checker: Callable[[int], bool] = _is_process_running,
+) -> dict[str, Any] | None:
+    expected_owner = str(getattr(args, "recover_expired_claim_owner", "") or "").strip()
+    expected_attempt_count = getattr(args, "recover_expired_claim_attempt_count", None)
+    reason = str(getattr(args, "recover_expired_claim_reason", "") or "").strip()
+    requested = bool(expected_owner or expected_attempt_count is not None or reason)
+    if not requested:
+        return None
+    if not expected_owner or expected_attempt_count is None or not reason:
+        raise ValueError(
+            "Expired claim recovery requires owner, attempt count, and reason together"
+        )
+    if int(expected_attempt_count) < 1:
+        raise ValueError("Expired claim recovery attempt count must be positive")
+    if len(reason) > 1000:
+        raise ValueError("Expired claim recovery reason is too long")
+    owner_hostname, separator, owner_pid_text = expected_owner.rpartition(":")
+    if not separator or not owner_hostname or not owner_pid_text.isdigit():
+        raise ValueError("Expired claim owner must use hostname:pid format")
+    current_hostname = str(hostname or socket.gethostname()).strip()
+    if owner_hostname.casefold() != current_hostname.casefold():
+        raise RuntimeError("Expired claim owner hostname does not match this executor")
+    owner_pid = int(owner_pid_text)
+    if owner_pid <= 0:
+        raise ValueError("Expired claim owner PID must be positive")
+    if process_checker(owner_pid):
+        raise RuntimeError("Expired claim owner process is still running")
+    return {
+        "action": "expired_claim_recovery",
+        "approved_operation_keys_sha256": str(
+            getattr(args, "approved_operation_keys_sha256", "") or ""
+        ).strip(),
+        "expected_claim_owner": expected_owner,
+        "expected_attempt_count": int(expected_attempt_count),
+        "previous_owner_pid_confirmed_inactive": True,
+        "executor_hostname": current_hostname,
+        "reason": reason,
+    }
 
 
 def load_approved_operation_keys(
@@ -203,6 +276,7 @@ def run(
         str(args.approved_operation_keys_sha256 or "").strip(),
         str(args.run_id or "").strip(),
     )
+    expired_claim_recovery_evidence = build_expired_claim_recovery_evidence(args)
     jushuitan_root = Path(args.jushuitan_root).resolve()
     if not (jushuitan_root / "package.json").exists():
         raise FileNotFoundError(f"Jushuitan project not found: {jushuitan_root}")
@@ -232,6 +306,13 @@ def run(
             topic=TOPICS[args.action],
             operation_keys=approved_keys,
             claim_seconds=args.claim_seconds,
+            expected_expired_claim_owner=str(
+                getattr(args, "recover_expired_claim_owner", "") or ""
+            ).strip(),
+            expected_expired_claim_attempt_count=getattr(
+                args, "recover_expired_claim_attempt_count", None
+            ),
+            expired_claim_recovery_evidence=expired_claim_recovery_evidence,
         )
         claimed_keys = {item.operation_key for item in items}
         if claimed_keys != set(approved_keys) or len(items) != len(approved_keys):
@@ -281,6 +362,7 @@ def run(
         "run_id": worker_run_id,
         "handoff_path": str(handoff_path),
         "result_path": str(result_path),
+        "expired_claim_recovered": expired_claim_recovery_evidence is not None,
     }
 
 

@@ -18,6 +18,7 @@ for path in (SCRIPTS_ROOT, RPA_ROOT):
 from operation_saga import OutboxItem
 from run_1688_jushuitan_outbox_worker import (
     build_node_command,
+    build_expired_claim_recovery_evidence,
     finish_claimed_items,
     load_approved_operation_keys,
     write_claimed_handoff,
@@ -124,6 +125,68 @@ class JushuitanOutboxWorkerTests(unittest.TestCase):
             digest = hashlib.sha256(path.read_bytes()).hexdigest()
             with self.assertRaisesRegex(RuntimeError, "run_id"):
                 load_approved_operation_keys(path, digest, "run-1")
+
+    def test_expired_claim_recovery_requires_dead_owner_on_this_executor(self) -> None:
+        args = type(
+            "Args",
+            (),
+            {
+                "recover_expired_claim_owner": "executor-1:1234",
+                "recover_expired_claim_attempt_count": 1,
+                "recover_expired_claim_reason": "controlled interrupted-run recovery",
+                "approved_operation_keys_sha256": "c" * 64,
+            },
+        )()
+
+        evidence = build_expired_claim_recovery_evidence(
+            args,
+            hostname="EXECUTOR-1",
+            process_checker=lambda pid: False,
+        )
+
+        self.assertIsNotNone(evidence)
+        assert evidence is not None
+        self.assertEqual(evidence["expected_claim_owner"], "executor-1:1234")
+        self.assertEqual(evidence["expected_attempt_count"], 1)
+        self.assertTrue(evidence["previous_owner_pid_confirmed_inactive"])
+
+    def test_expired_claim_recovery_blocks_a_live_previous_owner(self) -> None:
+        args = type(
+            "Args",
+            (),
+            {
+                "recover_expired_claim_owner": "executor-1:1234",
+                "recover_expired_claim_attempt_count": 1,
+                "recover_expired_claim_reason": "controlled interrupted-run recovery",
+                "approved_operation_keys_sha256": "c" * 64,
+            },
+        )()
+
+        with self.assertRaisesRegex(RuntimeError, "still running"):
+            build_expired_claim_recovery_evidence(
+                args,
+                hostname="executor-1",
+                process_checker=lambda pid: True,
+            )
+
+    def test_expired_claim_recovery_rejects_partial_arguments(self) -> None:
+        args = type(
+            "Args",
+            (),
+            {
+                "recover_expired_claim_owner": "executor-1:1234",
+                "recover_expired_claim_attempt_count": None,
+                "recover_expired_claim_reason": "",
+                "approved_operation_keys_sha256": "c" * 64,
+            },
+        )()
+
+        with self.assertRaisesRegex(ValueError, "requires owner, attempt count, and reason"):
+            build_expired_claim_recovery_evidence(
+                args,
+                hostname="executor-1",
+                process_checker=lambda pid: False,
+            )
 
 
 if __name__ == "__main__":
