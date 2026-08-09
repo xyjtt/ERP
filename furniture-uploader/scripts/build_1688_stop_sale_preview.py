@@ -132,6 +132,11 @@ REQUIRED_OUTPUT_COLUMNS = [
     ONLINE_SKU,
 ]
 
+REQUIRED_STOP_SALE_COLUMNS = [
+    *REQUIRED_OUTPUT_COLUMNS,
+    PLATFORM_STORE_ITEM_CODE,
+]
+
 REQUIRED_REPLACEMENT_COLUMNS = [
     *REQUIRED_OUTPUT_COLUMNS,
     REPLACEMENT_SKU,
@@ -365,19 +370,30 @@ def safe_filename(value: str) -> str:
     return name[:80] or "UNKNOWN_STORE"
 
 
-def task_key(row: dict[str, str]) -> tuple[str, str, str]:
-    return (
+# Stop-sale fans one browser action into per-link cleanup; replacement is one SKU mapping.
+def task_key(row: dict[str, str]) -> tuple[str, ...]:
+    base_key = (
         normalize_value(row.get(STORE_NAME)),
         normalize_value(row.get(PRODUCT_ID)),
         normalize_value(row.get(ONLINE_SKU)),
+    )
+    if normalize_value(row.get(HANDLING)) == REPLACEMENT_HANDLING:
+        return (*base_key, normalize_value(row.get(REPLACEMENT_SKU)))
+    return (*base_key, normalize_value(row.get(PLATFORM_STORE_ITEM_CODE)))
+
+
+def dedupe_sort_key(row: dict[str, str]) -> tuple[str, ...]:
+    return (
+        *task_key(row),
+        *(normalize_value(row.get(column)).casefold() for column in REPORT_COLUMNS),
     )
 
 
 def dedupe_rows(rows: Iterable[dict[str, str]]) -> tuple[list[dict[str, str]], list[dict[str, Any]]]:
     selected: list[dict[str, str]] = []
     duplicates: list[dict[str, Any]] = []
-    seen: set[tuple[str, str, str]] = set()
-    for row in rows:
+    seen: set[tuple[str, ...]] = set()
+    for row in sorted(rows, key=dedupe_sort_key):
         key = task_key(row)
         if key in seen:
             duplicate = dict(row)
@@ -386,6 +402,12 @@ def dedupe_rows(rows: Iterable[dict[str, str]]) -> tuple[list[dict[str, str]], l
                 PRODUCT_ID: key[1],
                 ONLINE_SKU: key[2],
             }
+            identity_field = (
+                REPLACEMENT_SKU
+                if normalize_value(row.get(HANDLING)) == REPLACEMENT_HANDLING
+                else PLATFORM_STORE_ITEM_CODE
+            )
+            duplicate["dedupe_key"][identity_field] = key[3]
             duplicates.append(duplicate)
             continue
         seen.add(key)
@@ -402,7 +424,7 @@ def count_required_nulls(
     required_columns = (
         REQUIRED_REPLACEMENT_COLUMNS
         if normalize_value(handling) == REPLACEMENT_HANDLING
-        else REQUIRED_OUTPUT_COLUMNS
+        else REQUIRED_STOP_SALE_COLUMNS
     )
     return {
         column: sum(1 for row in materialized if not normalize_value(row.get(column)))
@@ -680,7 +702,7 @@ def build_query(table: str, stores: Sequence[str]) -> tuple[str, list[str]]:
         "AND [pt] = ? "
         "AND [clsm] = ? "
         f"AND [dpmc] IN ({store_placeholders}) "
-        "ORDER BY [dpmc], [spi], [xsspbm]"
+        "ORDER BY [dpmc], [spi], [xsspbm], [kthspbmx], [ptdpspbm], [xskc], [sfhtx]"
     )
     return sql, list(stores)
 

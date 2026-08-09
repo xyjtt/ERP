@@ -20,14 +20,18 @@ from build_1688_stop_sale_preview import (  # noqa: E402
     HANDLING,
     METRIC_DATE,
     ONLINE_SKU,
+    ONLINE_STOCK,
     PLATFORM,
+    PLATFORM_STORE_ITEM_CODE,
     PRODUCT_ID,
     STORE_NAME,
     REPLACEMENT_HANDLING,
     REPLACEMENT_SKU,
     REJECTED_REASON_CODE,
     build_preview_outputs,
+    build_query,
     config_from_env,
+    count_required_nulls,
     dedupe_rows,
     mask_network_endpoint,
     normalize_value,
@@ -153,12 +157,13 @@ class Build1688StopSalePreviewTests(unittest.TestCase):
         self.assertEqual(normalize_value("1000406623557.0"), "1000406623557")
         self.assertEqual(normalize_value(date(2026, 7, 16)), "2026-07-16")
 
-    def test_task_key_and_dedupe_use_store_product_sku(self) -> None:
+    def test_stop_sale_task_key_keeps_distinct_platform_links(self) -> None:
         rows = [
             {
                 STORE_NAME: "阿里巴巴-常州工莱家具",
                 PRODUCT_ID: "1001",
                 ONLINE_SKU: "SKU-A",
+                PLATFORM_STORE_ITEM_CODE: "P1001",
                 PLATFORM: "Alibaba",
                 HANDLING: "全渠道下架",
                 METRIC_DATE: "2026-07-16",
@@ -167,6 +172,7 @@ class Build1688StopSalePreviewTests(unittest.TestCase):
                 STORE_NAME: "阿里巴巴-常州工莱家具",
                 PRODUCT_ID: "1001",
                 ONLINE_SKU: "SKU-A",
+                PLATFORM_STORE_ITEM_CODE: "P1001",
                 PLATFORM: "Alibaba",
                 HANDLING: "全渠道下架",
                 METRIC_DATE: "2026-07-16",
@@ -175,6 +181,7 @@ class Build1688StopSalePreviewTests(unittest.TestCase):
                 STORE_NAME: "阿里巴巴-常州乐畅家居有限公司",
                 PRODUCT_ID: "1001",
                 ONLINE_SKU: "SKU-A",
+                PLATFORM_STORE_ITEM_CODE: "P1002",
                 PLATFORM: "Alibaba",
                 HANDLING: "全渠道下架",
                 METRIC_DATE: "2026-07-16",
@@ -183,10 +190,95 @@ class Build1688StopSalePreviewTests(unittest.TestCase):
 
         selected, duplicates = dedupe_rows(rows)
 
-        self.assertEqual(task_key(rows[0]), ("阿里巴巴-常州工莱家具", "1001", "SKU-A"))
+        self.assertEqual(
+            task_key(rows[0]),
+            ("阿里巴巴-常州工莱家具", "1001", "SKU-A", "P1001"),
+        )
         self.assertEqual(len(selected), 2)
         self.assertEqual(len(duplicates), 1)
         self.assertEqual(duplicates[0]["dedupe_key"][STORE_NAME], "阿里巴巴-常州工莱家具")
+        self.assertEqual(duplicates[0]["dedupe_key"][PLATFORM_STORE_ITEM_CODE], "P1001")
+
+    def test_stop_sale_dedupe_preserves_distinct_platform_codes(self) -> None:
+        rows = [
+            {
+                STORE_NAME: "S",
+                PRODUCT_ID: "P",
+                ONLINE_SKU: "SKU",
+                PLATFORM_STORE_ITEM_CODE: "LINK-2",
+                HANDLING: "全渠道下架",
+            },
+            {
+                STORE_NAME: "S",
+                PRODUCT_ID: "P",
+                ONLINE_SKU: "SKU",
+                PLATFORM_STORE_ITEM_CODE: "LINK-1",
+                HANDLING: "全渠道下架",
+            },
+        ]
+
+        selected, duplicates = dedupe_rows(rows)
+
+        self.assertEqual(
+            [row[PLATFORM_STORE_ITEM_CODE] for row in selected],
+            ["LINK-1", "LINK-2"],
+        )
+        self.assertEqual(duplicates, [])
+
+    def test_replacement_dedupe_uses_operation_key_and_stable_representative(self) -> None:
+        rows = [
+            {
+                STORE_NAME: "S",
+                PRODUCT_ID: "P",
+                ONLINE_SKU: "OLD",
+                REPLACEMENT_SKU: "NEW",
+                PLATFORM_STORE_ITEM_CODE: "LINK-Z",
+                ONLINE_STOCK: "9",
+                HANDLING: REPLACEMENT_HANDLING,
+            },
+            {
+                STORE_NAME: "S",
+                PRODUCT_ID: "P",
+                ONLINE_SKU: "OLD",
+                REPLACEMENT_SKU: "NEW",
+                PLATFORM_STORE_ITEM_CODE: "LINK-A",
+                ONLINE_STOCK: "10",
+                HANDLING: REPLACEMENT_HANDLING,
+            },
+        ]
+
+        selected, duplicates = dedupe_rows(rows)
+        reversed_selected, reversed_duplicates = dedupe_rows(reversed(rows))
+
+        self.assertEqual(task_key(rows[0]), ("S", "P", "OLD", "NEW"))
+        self.assertEqual(selected[0][PLATFORM_STORE_ITEM_CODE], "LINK-A")
+        self.assertEqual(reversed_selected, selected)
+        self.assertEqual(reversed_duplicates, duplicates)
+        self.assertEqual(duplicates[0]["dedupe_key"][REPLACEMENT_SKU], "NEW")
+
+    def test_stop_sale_requires_platform_store_item_code(self) -> None:
+        row = {
+            STORE_NAME: "S",
+            PLATFORM: "Alibaba",
+            METRIC_DATE: "2026-08-09",
+            HANDLING: "全渠道下架",
+            PRODUCT_ID: "P",
+            ONLINE_SKU: "SKU",
+            PLATFORM_STORE_ITEM_CODE: "",
+        }
+
+        nulls = count_required_nulls([row], handling="全渠道下架")
+
+        self.assertEqual(nulls[PLATFORM_STORE_ITEM_CODE], 1)
+
+    def test_source_query_has_complete_deterministic_tie_break(self) -> None:
+        sql, stores = build_query("app.op_stop_sale", ["S"])
+
+        self.assertEqual(stores, ["S"])
+        self.assertIn(
+            "ORDER BY [dpmc], [spi], [xsspbm], [kthspbmx], [ptdpspbm], [xskc], [sfhtx]",
+            sql,
+        )
 
     def test_build_preview_outputs_writes_aggregate_and_store_csvs(self) -> None:
         rows = [
