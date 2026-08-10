@@ -207,7 +207,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--store",
         action="append",
         dest="stores",
-        help="Target store name. Repeat to override the default four stores.",
+        help="Target store name. Repeat to override the enabled runtime account scope.",
     )
     parser.add_argument("--limit", type=int, default=0, help="Limit deduped selected rows for controlled previews.")
     parser.add_argument(

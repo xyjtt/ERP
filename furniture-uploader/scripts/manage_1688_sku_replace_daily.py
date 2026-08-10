@@ -159,8 +159,6 @@ def build_preflight_command(args: argparse.Namespace) -> list[str]:
 
 def build_preview_command(args: argparse.Namespace, output_dir: Path) -> list[str]:
     stores = [str(item).strip() for item in (args.stores or []) if str(item).strip()]
-    if not stores:
-        stores = load_authoritative_store_names(args.shared_runtime_root)
     command = [
         sys.executable,
         str(SCRIPTS_ROOT / "build_1688_stop_sale_preview.py"),

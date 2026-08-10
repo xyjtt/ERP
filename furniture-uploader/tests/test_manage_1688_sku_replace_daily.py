@@ -66,7 +66,7 @@ class ReplaceDailyManagerTests(unittest.TestCase):
         self.assertEqual(args.batch_size, 10)
         self.assertEqual(args.mode, "preview")
 
-    def test_preview_command_uses_replacement_handling_and_app_source(self) -> None:
+    def test_preview_command_uses_runtime_enabled_scope_by_default(self) -> None:
         with self.temp_dir() as root:
             roster_path = root / "scripts" / "account_runtime_migration_roster.json"
             roster_path.parent.mkdir(parents=True)
@@ -94,7 +94,29 @@ class ReplaceDailyManagerTests(unittest.TestCase):
         self.assertEqual(command[command.index("--handling") + 1], "全渠道替换")
         self.assertEqual(command[command.index("--database") + 1], "JSReportReplica")
         self.assertEqual(command[command.index("--table") + 1], "app.op_stop_sale")
-        self.assertIn("阿里巴巴-常州平灿家居有限公司", command)
+        self.assertNotIn("--store", command)
+        self.assertEqual(
+            command[command.index("--shared-runtime-root") + 1],
+            str(root.resolve()),
+        )
+
+    def test_preview_command_preserves_explicit_store_override(self) -> None:
+        with self.temp_dir() as root:
+            args = build_argument_parser().parse_args(
+                [
+                    "run",
+                    "--shared-runtime-root",
+                    str(root),
+                    "--store",
+                    "阿里巴巴-广州沃来贸易有限公司",
+                ]
+            )
+            command = build_preview_command(args, root / "preview")
+
+        self.assertEqual(
+            command[command.index("--store") + 1],
+            "阿里巴巴-广州沃来贸易有限公司",
+        )
 
     def test_batch_command_forwards_worker_task_name(self) -> None:
         args = build_argument_parser().parse_args(
