@@ -28,6 +28,8 @@ from stop_sale_audit import (
 
 RECORDED_TERMINAL_FAILURE_STATUS = "failed"
 RECOVERABLE_UNSTARTED_ITEM_STATUSES = {"pending", "not_attempted"}
+INTERRUPTED_ERROR_CODE = "interrupted_executor_process"
+INTERRUPTED_ITEM_ERROR_PREFIX = INTERRUPTED_ERROR_CODE + ":"
 
 
 def build_argument_parser() -> argparse.ArgumentParser:
@@ -244,8 +246,11 @@ def _reconcile_interrupted_audit(
                 saga_error_summary_expected = error_message
             else:
                 error_category = "automation_error"
-                error_message = reason
-                saga_error_code_expected = "interrupted_executor_process"
+                error_message = _clean_text(
+                    INTERRUPTED_ITEM_ERROR_PREFIX + reason,
+                    2000,
+                )
+                saga_error_code_expected = INTERRUPTED_ERROR_CODE
                 saga_error_summary_expected = reason
             if not operation_key or saga_operation_key != operation_key:
                 raise RuntimeError(f"Interrupted recovery Saga is missing or mismatched: item_id={item_id}")

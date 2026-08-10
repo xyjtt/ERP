@@ -189,7 +189,10 @@ class RecoverInterruptedStopSaleRunTests(unittest.TestCase):
         self.assertIn("offline_status = ?", item_update[0])
         self.assertEqual(item_update[1][-1], "not_attempted")
         self.assertEqual(item_update[1][2], "automation_error")
-        self.assertEqual(item_update[1][3], reason)
+        self.assertEqual(
+            item_update[1][3],
+            "interrupted_executor_process:" + reason,
+        )
 
     def test_reconcile_preserves_recorded_business_terminal_failure(self) -> None:
         record = {
