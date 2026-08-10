@@ -27,6 +27,7 @@ from stop_sale_audit import (
 
 
 RECORDED_TERMINAL_FAILURE_STATUS = "failed"
+RECOVERABLE_UNSTARTED_ITEM_STATUSES = {"pending", "not_attempted"}
 
 
 def build_argument_parser() -> argparse.ArgumentParser:
@@ -256,7 +257,7 @@ def _reconcile_interrupted_audit(
                 raise RuntimeError(
                     f"Interrupted recovery unexpectedly has an Outbox row: operation_key={operation_key}"
                 )
-            if offline_status not in {"pending", "failed"}:
+            if offline_status not in {*RECOVERABLE_UNSTARTED_ITEM_STATUSES, "failed"}:
                 raise RuntimeError(
                     f"Interrupted recovery item has unexpected status: item_id={item_id}, "
                     f"status={offline_status!r}"
@@ -277,7 +278,7 @@ def _reconcile_interrupted_audit(
                 raise RuntimeError(
                     f"Interrupted recovery Saga terminal evidence changed: operation_key={operation_key}"
                 )
-            if offline_status == "pending":
+            if offline_status in RECOVERABLE_UNSTARTED_ITEM_STATUSES:
                 attempts = max(1, int((recorded_failure or {}).get("attempts") or 0))
                 screenshot_path = _clean_text(
                     (recorded_failure or {}).get("screenshot_path"), 1000
@@ -293,7 +294,7 @@ def _reconcile_interrupted_audit(
                         error_category = ?, error_message = ?,
                         screenshot_path = ?, html_snapshot_path = ?,
                         updated_at = SYSUTCDATETIME()
-                    WHERE id = ? AND run_id = ? AND offline_status = 'pending'
+                    WHERE id = ? AND run_id = ? AND offline_status = ?
                     """,
                     (
                         attempts,
@@ -304,6 +305,7 @@ def _reconcile_interrupted_audit(
                         html_snapshot_path,
                         item_id,
                         run_id,
+                        offline_status,
                     ),
                 )
                 if cursor.rowcount != 1:

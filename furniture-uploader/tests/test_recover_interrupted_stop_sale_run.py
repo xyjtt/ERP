@@ -24,11 +24,16 @@ from recover_interrupted_stop_sale_run import (  # noqa: E402
 
 
 class _RecoveryCursor:
-    def __init__(self, operation_key: str = "a" * 64) -> None:
+    def __init__(
+        self,
+        operation_key: str = "a" * 64,
+        offline_status: str = "pending",
+    ) -> None:
         self.rowcount = -1
         self._result = None
         self.executed: list[tuple[str, object]] = []
         self.operation_key = operation_key
+        self.offline_status = offline_status
 
     def execute(self, sql, params=None):
         self.executed.append((sql, params))
@@ -37,7 +42,7 @@ class _RecoveryCursor:
                 (
                     7,
                     self.operation_key,
-                    "pending",
+                    self.offline_status,
                     0,
                     None,
                     None,
@@ -71,8 +76,12 @@ class _RecoveryCursor:
 
 
 class _RecoveryConnection:
-    def __init__(self, operation_key: str = "a" * 64) -> None:
-        self._cursor = _RecoveryCursor(operation_key)
+    def __init__(
+        self,
+        operation_key: str = "a" * 64,
+        offline_status: str = "pending",
+    ) -> None:
+        self._cursor = _RecoveryCursor(operation_key, offline_status)
         self.commits = 0
 
     def __enter__(self):
@@ -153,6 +162,34 @@ class RecoverInterruptedStopSaleRunTests(unittest.TestCase):
         saga_update = next(sql for sql in updates if "state = 'failed_terminal'" in sql)
         self.assertIn("run_id = ?", saga_update)
         self.assertIn("account_fencing_token = ?", saga_update)
+
+    def test_reconcile_terminalizes_not_attempted_item_after_stage_timeout(self) -> None:
+        connection = _RecoveryConnection(offline_status="not_attempted")
+        reason = (
+            "PipelineStageTimeoutError: 1688 stage exceeded 3600 seconds "
+            "and its process tree was stopped"
+        )
+        with patch(
+            "recover_interrupted_stop_sale_run.connect_app_database",
+            return_value=connection,
+        ):
+            result = _reconcile_interrupted_audit(
+                _RecoveryRepository(),
+                run_id="RUN-1",
+                reason=reason,
+            )
+
+        self.assertEqual(result["item_terminalized_count"], 1)
+        self.assertEqual(result["saga_terminalized_count"], 1)
+        item_update = next(
+            entry
+            for entry in connection._cursor.executed
+            if "SET offline_status = 'failed'" in entry[0]
+        )
+        self.assertIn("offline_status = ?", item_update[0])
+        self.assertEqual(item_update[1][-1], "not_attempted")
+        self.assertEqual(item_update[1][2], "automation_error")
+        self.assertEqual(item_update[1][3], reason)
 
     def test_reconcile_preserves_recorded_business_terminal_failure(self) -> None:
         record = {
