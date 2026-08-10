@@ -654,6 +654,12 @@ def _load_pipeline_result(project_root: Path, run_id: str, return_code: int) -> 
         state = "completed_with_exceptions"
     if return_code not in {0, 2}:
         state = "failed"
+    infrastructure_failure = not summary or summary.get("failure_scope") == "infrastructure"
+    error_code = str(summary.get("error_code") or "").strip()
+    error_message = str(summary.get("error_message") or "").strip()
+    if not summary:
+        error_code = "pipeline_summary_missing"
+        error_message = "子流程未生成结构化结果；这是执行基础设施失败，不是1688商品页面结果。"
     return {
         "run_id": run_id,
         "return_code": return_code,
@@ -666,6 +672,13 @@ def _load_pipeline_result(project_root: Path, run_id: str, return_code: int) -> 
         "jushuitan_counts": _count_statuses(jushuitan_records),
         "error_categories": sorted(observed_categories),
         "safety_stop": bool(observed_categories & safety_categories),
+        "infrastructure_failure": infrastructure_failure,
+        "retryable": bool(summary.get("retryable", False)) if summary else False,
+        "account_key": str(summary.get("account_key") or "").strip(),
+        "store_name": str(summary.get("store_name") or "").strip(),
+        "error_type": str(summary.get("error_type") or "").strip(),
+        "error_code": error_code,
+        "error_message": error_message,
         "summary": summary,
     }
 
@@ -745,6 +758,7 @@ def _run_store_batches(
     input_file = Path(str(item["path"])).resolve()
     store_result: dict[str, Any] = {
         "store_name": store_name,
+        "account_key": "",
         "selected_count": int(item.get("count") or 0),
         "state": "success",
         "batch_count": 0,
@@ -802,6 +816,29 @@ def _run_store_batches(
                 store_result["batch_attempts"].append(result)
                 attempt_results.append(result)
 
+                resolved_account_key = str(result.get("account_key") or "").strip()
+                if resolved_account_key:
+                    store_result["account_key"] = resolved_account_key
+
+                if result.get("infrastructure_failure"):
+                    with batch_file.open("r", encoding="utf-8-sig", newline="") as handle:
+                        source_count = sum(1 for _row in csv.DictReader(handle))
+                    error_code = str(result.get("error_code") or "infrastructure_failure")
+                    result["retry_plan"] = {
+                        "source_count": source_count,
+                        "retry_count": 0,
+                        "deferred_count": source_count,
+                        "business_terminal_count": 0,
+                        "retry_reasons": {error_code: source_count},
+                        "retry_input_file": "",
+                        "offline_counts": {},
+                        "jushuitan_counts": {},
+                    }
+                    result["state"] = "infrastructure_failed"
+                    final_result = result
+                    outcome["infrastructure_failed"] = True
+                    break
+
                 retry_path = batch_file.parent / f"{batch_file.stem}.retry_{attempt_number:02d}{batch_file.suffix}"
                 retry_plan = build_batch_retry_input(batch_file, attempt_results, retry_path)
                 result["retry_plan"] = retry_plan
@@ -836,6 +873,14 @@ def _run_store_batches(
             store_result["attempted_batch_count"] = batch_index
             store_result["batches"].append(final_result)
 
+            if final_result.get("infrastructure_failure"):
+                store_result["state"] = "failed"
+                store_result["infrastructure_failure"] = {
+                    "error_type": final_result.get("error_type", ""),
+                    "error_code": final_result.get("error_code", ""),
+                    "error_message": final_result.get("error_message", ""),
+                }
+                break
             if final_result.get("state") == "failed":
                 store_result["state"] = "failed"
             else:

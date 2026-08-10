@@ -1,5 +1,11 @@
 # Project Evolution
 
+## 2026-08-10 Browser Capacity Becomes Slot-Isolated
+
+- 浏览器容量判断从“任一槽位出现过期 owner 即终止整个申请”改为“逐槽位隔离检查”。单个异常槽位不会再阻断其他可用槽位。
+- 当全部槽位都存在过期 owner 时仍失败关闭，并输出可恢复的明确原因；这项变化不自动删除租约，也不放宽账号互斥、fencing 或身份校验。
+- 下架日批的启动失败从无 Summary 的缺口，演进为带店铺和账号身份的基础设施终态；管理器不会再将未进入页面的批次解释成商品结果缺失并重复整批运行。
+
 ## 2026-08-07 Interrupted Child Recovery Preserves Partial Reports
 
 - Child recovery evolved from marking every pending audit item as an interruption failure to reconciling the persisted JSONL report first.

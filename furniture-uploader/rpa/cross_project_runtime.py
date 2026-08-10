@@ -493,6 +493,7 @@ class RuntimeLeaseGuard:
                 max(1, self.protocol_state.max_parallel_browser_accounts),
             )
             while self.browser_slot_lease is None:
+                expired_slot_count = 0
                 for slot_no in range(1, capacity + 1):
                     result = self._acquire_resource(
                         resource_type="browser_slot",
@@ -501,9 +502,16 @@ class RuntimeLeaseGuard:
                     if result.acquired:
                         self.browser_slot_lease = result.lease
                         break
+                    if result.status == "expired_owner_requires_recovery":
+                        expired_slot_count += 1
+                        continue
                     self._assert_waitable(result)
                 if self.browser_slot_lease is not None:
                     break
+                if expired_slot_count == capacity:
+                    raise RuntimeResourceBusyError(
+                        "expired_owner_requires_recovery:all_browser_slots"
+                    )
                 self._wait_or_timeout(deadline, "browser_slot_busy", heartbeat_account=True)
         except BaseException:
             self.release("failed", suppress_errors=True)

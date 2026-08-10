@@ -1,5 +1,12 @@
 # Platform Experience Knowledge Base
 
+## 2026-08-10 Expired Browser Slot Isolation Finding
+
+- `expired_owner_requires_recovery` 是某个资源 owner 的恢复要求，不等于整台执行机没有浏览器容量。浏览器槽位必须逐个申请；槽位 1 异常时仍要检查槽位 2/3。
+- 只有本轮容量内的全部槽位都返回过期 owner，才应立即停止并要求受控恢复；若其他槽位只是正常 busy，则继续心跳账号租约并等待，不能删除历史租约或抢占当前 owner。
+- 在浏览器启动前发生的租约异常不是 `missing_1688_result`，也不是商品搜索零行。Pipeline 必须先写结构化基础设施 Summary，日度管理器不得把同一源批次当成业务失败再无证据执行第二遍。
+- 生产恢复应使用正式 CAS 恢复工具，并在 fresh active/in-flight=0、对应 PID 已死亡、快照身份一致后执行；代码层的槽位隔离不能替代历史租约治理。
+
 ## 2026-08-07 Partial Child Report Recovery Finding
 
 - An externally terminated browser process can leave a valid JSONL result before `record_1688_results()` and the Saga terminal transition run. Database `pending/prepared` therefore does not prove that no page result exists.

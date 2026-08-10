@@ -1,5 +1,13 @@
 # Project Memory
 
+## 2026-08-10 Managed Update (Browser Slot Recovery and Stop-Sale Evidence)
+
+- 已定位三条 1688 自动化未形成业务结果的共同原因：浏览器槽位 1 存在过期 owner 时，租约守卫立即抛出 `expired_owner_requires_recovery`，没有继续尝试仍可用的槽位 2/3；任务因此在浏览器和商品页面启动前结束。
+- `RuntimeLeaseGuard` 现在跳过单个过期槽位并继续扫描其余容量；只有全部槽位都需要恢复时才明确返回 `expired_owner_requires_recovery:all_browser_slots`。账号租约、同账号互斥和 fencing 规则不变。
+- 下架 Pipeline 在租约启动阶段失败时也写结构化 Summary，包含 ERP 店铺、`account_key`、失败阶段和中文原因；日度管理器把这类结果归为基础设施失败，不再误报为 `missing_1688_result`，也不会把整批商品无证据重试两遍。
+- 四个正式 ERP 店铺名称及 `-`/`_` 兼容映射已回归验证：乐畅=`lechang`、工莱=`gonglai`、广州沃来=`guangzhou_wolai`、广州淘淘=`muke_lixiang`。
+- 开发验证：Python 全量 `808/808`，聚焦 `105 passed + 10 subtests`，聚水潭 TypeScript `31/31`、`check`、`build`，以及 `compileall`、`git diff --check`、高置信度 tracked-secret scan 均通过。执行机租约恢复、部署和三线真实并行验收仍需以 fresh 生产证据单独确认。
+
 ## 2026-08-07 Managed Update (Interrupted Child Evidence Preservation)
 
 - `recover_interrupted_stop_sale_run.py` now reads the exact child JSONL report before terminalizing an externally stopped run. A recorded failed item keeps its platform category, message, attempts, screenshot and HTML evidence; only items without a report record become `automation_error/interrupted_executor_process`.

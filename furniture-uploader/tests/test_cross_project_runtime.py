@@ -24,6 +24,7 @@ from cross_project_runtime import (
     RuntimeLeaseGuard,
     RuntimeProtocolError,
     RuntimeProtocolState,
+    RuntimeResourceBusyError,
     canonical_accounts_config_hash,
     resolve_executor_binding,
 )
@@ -193,6 +194,101 @@ class CrossProjectRuntimeTests(unittest.TestCase):
         ])
         self.assertEqual(repository.completed, ["completed"])
         self.assertEqual([item[0] for item in repository.releases], ["browser_slot", "account"])
+
+    def test_write_guard_skips_expired_first_slot_and_acquires_second_slot(self) -> None:
+        class FirstSlotExpiredRepository(FakeRuntimeRepository):
+            def acquire(self, **kwargs) -> LeaseAcquireResult:
+                if (
+                    kwargs["resource_type"] == "browser_slot"
+                    and kwargs["resource_key"].endswith(":1")
+                ):
+                    self.acquires.append((kwargs["resource_type"], kwargs["resource_key"]))
+                    return LeaseAcquireResult(
+                        "expired_owner_requires_recovery",
+                        "expired_owner_requires_recovery",
+                    )
+                return super().acquire(**kwargs)
+
+        repository = FirstSlotExpiredRepository()
+        guard = self._build_guard(repository)
+
+        with patch("cross_project_runtime.HEARTBEAT_INTERVAL_SECONDS", 3600):
+            with guard:
+                self.assertEqual(guard.browser_slot_key, "executor-a:2")
+
+        self.assertEqual(
+            repository.acquires[:3],
+            [
+                ("account", "gonglai"),
+                ("browser_slot", "executor-a:1"),
+                ("browser_slot", "executor-a:2"),
+            ],
+        )
+
+    def test_write_guard_fails_clearly_when_all_slots_have_expired_owners(self) -> None:
+        class AllSlotsExpiredRepository(FakeRuntimeRepository):
+            def acquire(self, **kwargs) -> LeaseAcquireResult:
+                self.acquires.append((kwargs["resource_type"], kwargs["resource_key"]))
+                if kwargs["resource_type"] == "browser_slot":
+                    return LeaseAcquireResult(
+                        "expired_owner_requires_recovery",
+                        "expired_owner_requires_recovery",
+                    )
+                token = 7
+                return LeaseAcquireResult(
+                    "acquired",
+                    "",
+                    ResourceLease(
+                        kwargs["resource_type"],
+                        kwargs["resource_key"],
+                        kwargs["owner_token"],
+                        token,
+                        NOW,
+                        NOW + timedelta(seconds=120),
+                    ),
+                )
+
+        repository = AllSlotsExpiredRepository()
+        guard = self._build_guard(repository)
+
+        with self.assertRaisesRegex(
+            RuntimeResourceBusyError,
+            "expired_owner_requires_recovery:all_browser_slots",
+        ):
+            guard.acquire()
+
+        self.assertEqual(
+            repository.acquires,
+            [
+                ("account", "gonglai"),
+                ("browser_slot", "executor-a:1"),
+                ("browser_slot", "executor-a:2"),
+            ],
+        )
+        self.assertEqual([item[0] for item in repository.releases], ["account"])
+        self.assertEqual(repository.completed, ["failed"])
+
+    @staticmethod
+    def _build_guard(repository: FakeRuntimeRepository) -> RuntimeLeaseGuard:
+        return RuntimeLeaseGuard(
+            repository,  # type: ignore[arg-type]
+            binding=ExecutorBinding(
+                "gonglai",
+                "D:/profiles/gonglai",
+                9301,
+                "20260730-1",
+                "a" * 64,
+                "executor-a",
+            ),
+            task_type="stop_sale",
+            run_id="run-expired-slot",
+            request_key="request-expired-slot",
+            build_sha="b" * 40,
+            component="erp-stop-sale",
+            hostname="executor-a",
+            wait_timeout_seconds=2,
+            poll_interval_seconds=0.001,
+        )
 
     def test_source_contains_only_stored_procedure_contract_for_shared_objects(self) -> None:
         source = (RPA_ROOT / "cross_project_runtime.py").read_text(encoding="utf-8")

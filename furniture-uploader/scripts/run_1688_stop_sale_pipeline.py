@@ -650,6 +650,59 @@ def notify_execute_startup_failure(
     )
 
 
+def write_startup_failure_summary(
+    *,
+    args: argparse.Namespace,
+    run_id: str,
+    pipeline_dir: Path,
+    account_key: str,
+    store_name: str,
+    exc: Exception,
+) -> dict[str, Any]:
+    """Persist startup failures before any browser or business action begins."""
+    message = str(exc).replace("\r", " ").replace("\n", " ").strip()[:500]
+    error_code = (
+        "expired_owner_requires_recovery"
+        if message.startswith("expired_owner_requires_recovery")
+        else "pipeline_startup_failed"
+    )
+    error_message_zh = (
+        "检测到已过期的历史运行租约，必须先完成受控恢复；本批次未启动1688页面操作。"
+        if error_code == "expired_owner_requires_recovery"
+        else "子流程在启动阶段失败，本批次未启动1688页面操作。"
+    )
+    summary_path = pipeline_dir / f"{run_id}.summary.json"
+    summary = {
+        "run_id": run_id,
+        "mode": args.mode,
+        "input_file": str(Path(args.file).resolve()),
+        "started_at": datetime.now().isoformat(timespec="seconds"),
+        "finished_at": datetime.now().isoformat(timespec="seconds"),
+        "1688_return_code": None,
+        "jushuitan_return_code": None,
+        "account_key": account_key,
+        "store_name": store_name,
+        "audit_status": "failed",
+        "offline_counts": {},
+        "jushuitan_counts": {},
+        "item_error_categories": {},
+        "failure_scope": "infrastructure",
+        "failure_stage": "runtime_acquire",
+        "retryable": False,
+        "requires_runtime_recovery": error_code == "expired_owner_requires_recovery",
+        "error_type": type(exc).__name__,
+        "error_code": error_code,
+        "error_message": f"{error_message_zh} {type(exc).__name__}: {message}".strip(),
+        "summary_path": str(summary_path),
+        "notification_sent": False,
+    }
+    summary_path.write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return summary
+
+
 def query_crawler_worker_state(task_name: str, account_key: str = "") -> dict[str, Any]:
     if sys.platform != "win32":
         return {
@@ -1385,11 +1438,21 @@ def main() -> int:
             )
             return 124
         if args.mode == "execute" and not pipeline_invoked:
+            summary = write_startup_failure_summary(
+                args=args,
+                run_id=run_id,
+                pipeline_dir=pipeline_dir,
+                account_key=account_key,
+                store_name=store_name,
+                exc=exc,
+            )
             notify_execute_startup_failure(
                 run_id=run_id,
                 exc=exc,
                 disabled=args.no_notify,
             )
+            print(json.dumps(summary, ensure_ascii=False, indent=2))
+            return 1
         raise
 
 

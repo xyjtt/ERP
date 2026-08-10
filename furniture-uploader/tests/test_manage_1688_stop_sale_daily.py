@@ -30,6 +30,7 @@ from manage_1688_stop_sale_daily import (
     paused_worker,
     run_daily,
     split_store_input,
+    _run_store_batches,
 )
 
 
@@ -659,6 +660,49 @@ class Manage1688StopSaleDailyTests(unittest.TestCase):
             result = _load_pipeline_result(Path(temp_dir), "missing", 0)
 
         self.assertEqual(result["state"], "failed")
+        self.assertTrue(result["infrastructure_failure"])
+        self.assertEqual(result["error_code"], "pipeline_summary_missing")
+
+    def test_infrastructure_failure_is_not_retried_as_missing_1688_result(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "store-a.csv"
+            self.write_store_csv(source, [("STORE-A", "1", "SKU-1")])
+            args = self.build_args(root / "scheduler")
+            args.batch_retry_backoff_seconds = 0
+            item = {"store_name": "STORE-A", "count": 1, "path": str(source)}
+            pipeline_result = {
+                "state": "failed",
+                "safety_stop": False,
+                "infrastructure_failure": True,
+                "retryable": False,
+                "account_key": "lechang",
+                "error_type": "RuntimeResourceBusyError",
+                "error_code": "expired_owner_requires_recovery",
+                "error_message": "检测到已过期的历史运行租约。",
+            }
+            with (
+                patch("manage_1688_stop_sale_daily._run_logged", return_value=1) as run_logged,
+                patch(
+                    "manage_1688_stop_sale_daily._load_pipeline_result",
+                    return_value=pipeline_result,
+                ),
+                patch("manage_1688_stop_sale_daily.build_batch_retry_input") as retry_builder,
+            ):
+                outcome = _run_store_batches(
+                    args=args,
+                    manager_run_id="daily-test",
+                    manager_dir=root / "scheduler",
+                    index=1,
+                    item=item,
+                )
+
+        self.assertTrue(outcome["infrastructure_failed"])
+        self.assertEqual(outcome["store"]["account_key"], "lechang")
+        self.assertEqual(outcome["store"]["attempted_batch_count"], 1)
+        self.assertEqual(outcome["store"]["batches"][0]["state"], "infrastructure_failed")
+        self.assertEqual(run_logged.call_count, 1)
+        retry_builder.assert_not_called()
 
     def test_store_parallelism_is_bounded_and_default_remains_sequential(self) -> None:
         for max_parallel, expected_peak in ((1, 1), (2, 2)):

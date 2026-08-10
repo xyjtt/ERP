@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -55,6 +56,28 @@ class FakeRunReport:
 
 
 class SkuOfflineMainTests(unittest.TestCase):
+    def test_formal_erp_store_names_resolve_to_exact_execution_accounts(self) -> None:
+        config = json.loads(
+            (PROJECT_ROOT / "config" / "systems" / "1688_sku_offline.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        cases = {
+            "阿里巴巴-常州乐畅家居有限公司": "lechang",
+            "阿里巴巴_常州乐畅家居有限公司": "lechang",
+            "阿里巴巴-常州工莱家具": "gonglai",
+            "阿里巴巴_常州工莱家具": "gonglai",
+            "阿里巴巴-广州沃来贸易有限公司": "guangzhou_wolai",
+            "阿里巴巴_广州沃来贸易有限公司": "guangzhou_wolai",
+            "阿里巴巴-广州淘淘家居有限公司": "muke_lixiang",
+            "阿里巴巴_广州淘淘家居有限公司": "muke_lixiang",
+        }
+
+        for store_name, expected_account_key in cases.items():
+            with self.subTest(store_name=store_name):
+                binding = resolve_store_account_binding(config, store_name)
+                self.assertEqual(binding["account_key"], expected_account_key)
+
     def test_default_store_stop_scope_is_only_true_store_mismatch(self) -> None:
         self.assertTrue(should_stop_store_on_error("store_mismatch", {}))
         self.assertFalse(should_stop_store_on_error("login_required", {}))

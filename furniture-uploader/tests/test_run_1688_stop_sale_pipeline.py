@@ -42,6 +42,7 @@ from run_1688_stop_sale_pipeline import (
     resolve_shared_lock_path,
     validate_interrupted_recovery_arguments,
     wait_for_active_crawler_tasks,
+    write_startup_failure_summary,
 )
 
 
@@ -432,6 +433,47 @@ class Run1688StopSalePipelineTests(unittest.TestCase):
             )
 
         notify.assert_not_called()
+
+    def test_expired_runtime_owner_writes_structured_startup_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            args = SimpleNamespace(mode="execute", file=str(root / "input.csv"))
+            summary = write_startup_failure_summary(
+                args=args,
+                run_id="run-expired",
+                pipeline_dir=root,
+                account_key="lechang",
+                store_name="阿里巴巴-常州乐畅家居有限公司",
+                exc=RuntimeError("expired_owner_requires_recovery"),
+            )
+            persisted = json.loads(
+                (root / "run-expired.summary.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(summary["failure_scope"], "infrastructure")
+        self.assertEqual(summary["error_code"], "expired_owner_requires_recovery")
+        self.assertTrue(summary["requires_runtime_recovery"])
+        self.assertFalse(summary["retryable"])
+        self.assertEqual(persisted["account_key"], "lechang")
+        self.assertEqual(persisted["store_name"], "阿里巴巴-常州乐畅家居有限公司")
+
+    def test_all_expired_browser_slots_use_runtime_recovery_error_code(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            args = SimpleNamespace(mode="execute", file=str(root / "input.csv"))
+            summary = write_startup_failure_summary(
+                args=args,
+                run_id="run-all-slots-expired",
+                pipeline_dir=root,
+                account_key="gonglai",
+                store_name="阿里巴巴-常州工莱家具",
+                exc=RuntimeError(
+                    "expired_owner_requires_recovery:all_browser_slots"
+                ),
+            )
+
+        self.assertEqual(summary["error_code"], "expired_owner_requires_recovery")
+        self.assertTrue(summary["requires_runtime_recovery"])
 
     def test_audit_status_is_partial_when_some_items_succeeded(self) -> None:
         status = derive_audit_status(

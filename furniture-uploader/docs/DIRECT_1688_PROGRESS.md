@@ -1,5 +1,12 @@
 # DIRECT 1688 Progress
 
+## 2026-08-10 Managed Update (Runtime Slot Iteration Fix)
+
+- 修复浏览器并发容量被单个过期槽位整体阻断的问题：槽位 1 的历史 owner 过期后，Listing/Stop-Sale/Crawler 不应把槽位 2/3 视为不可用。
+- 下架启动失败现在形成结构化批次证据，并与商品搜索不到、页面技术失败、业务终态、聚水潭未终态分开统计；基础设施失败不再触发整批重复执行。
+- 四店 ERP 名称到账户映射及连接符兼容已有自动测试，业务 `store_name` 不再因租约启动失败而丢失。
+- 本地代码与完整回归已通过；当前节点是提交、执行机受控恢复过期租约、部署后同时启动不同账号的爬虫/上架/下架，并按各自 task/attempt/Saga/业务表或页面证据验收。测试通过本身不等于生产完成。
+
 ## 2026-08-07 Managed Update (Interrupted Child Recovery Classification)
 
 - The interrupted child `daily_20260807_123003_304694_s02_b003` has 10 audit items. Its JSONL report proves one pre-toggle `sole_sku_requires_product_offline` business terminal; the other nine have no execution report.
