@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import sys
 import tempfile
 import unittest
@@ -42,10 +43,127 @@ from build_1688_stop_sale_preview import (  # noqa: E402
     task_key,
     validate_replacement_rows,
     parse_args,
+    resolve_enabled_target_store_scope,
+    resolve_target_store_scope,
 )
 
 
 class Build1688StopSalePreviewTests(unittest.TestCase):
+    def test_default_scope_uses_every_enabled_runtime_account_and_store_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            runtime_root = root / "runtime"
+            runtime_root.mkdir()
+            accounts = {
+                "config_revision": "test-1",
+                "target_hostname": "EXECUTOR-1",
+                "accounts": [
+                    {"account_key": "account_a", "enabled": True},
+                    {"account_key": "account_b", "enabled": True},
+                    {"account_key": "account_disabled", "enabled": False},
+                ],
+            }
+            from cross_project_runtime import canonical_accounts_config_hash
+
+            accounts["config_hash"] = canonical_accounts_config_hash(accounts)
+            (runtime_root / "accounts.json").write_text(
+                json.dumps(accounts, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            system_config = {
+                "execution": {
+                    "store_accounts": [
+                        {
+                            "account_key": "account_a",
+                            "store_name": "阿里巴巴-店铺甲",
+                            "store_aliases": ["店铺甲"],
+                        },
+                        {
+                            "account_key": "account_b",
+                            "store_name": "阿里巴巴-店铺乙",
+                            "store_aliases": ["阿里巴巴_店铺乙"],
+                        },
+                    ]
+                }
+            }
+            with (
+                patch(
+                    "build_1688_stop_sale_preview.resolve_external_config_root",
+                    return_value=runtime_root,
+                ),
+                patch(
+                    "build_1688_stop_sale_preview.load_json_with_local_override",
+                    return_value=system_config,
+                ),
+                patch.dict("os.environ", {"COMPUTERNAME": "EXECUTOR-1"}, clear=False),
+            ):
+                scope = resolve_enabled_target_store_scope()
+
+        self.assertEqual(scope["enabled_account_keys"], ["account_a", "account_b"])
+        self.assertEqual(scope["account_count"], 2)
+        self.assertIn("阿里巴巴-店铺甲", scope["query_stores"])
+        self.assertIn("阿里巴巴_店铺甲", scope["query_stores"])
+        self.assertIn("阿里巴巴-店铺乙", scope["query_stores"])
+        self.assertNotIn("account_disabled", scope["enabled_account_keys"])
+
+    def test_default_scope_fails_closed_when_enabled_account_mapping_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            accounts = {
+                "config_revision": "test-1",
+                "target_hostname": "EXECUTOR-1",
+                "accounts": [{"account_key": "missing_account", "enabled": True}],
+            }
+            from cross_project_runtime import canonical_accounts_config_hash
+
+            accounts["config_hash"] = canonical_accounts_config_hash(accounts)
+            (root / "accounts.json").write_text(json.dumps(accounts), encoding="utf-8")
+            with (
+                patch(
+                    "build_1688_stop_sale_preview.resolve_external_config_root",
+                    return_value=root,
+                ),
+                patch(
+                    "build_1688_stop_sale_preview.load_json_with_local_override",
+                    return_value={"execution": {"store_accounts": []}},
+                ),
+                patch.dict("os.environ", {"COMPUTERNAME": "EXECUTOR-1"}, clear=False),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "missing_account"):
+                    resolve_enabled_target_store_scope()
+
+    def test_default_scope_fails_closed_when_runtime_hash_is_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            accounts = {
+                "config_revision": "test-1",
+                "config_hash": "0" * 64,
+                "target_hostname": "EXECUTOR-1",
+                "accounts": [{"account_key": "account_a", "enabled": True}],
+            }
+            (root / "accounts.json").write_text(json.dumps(accounts), encoding="utf-8")
+            with (
+                patch(
+                    "build_1688_stop_sale_preview.resolve_external_config_root",
+                    return_value=root,
+                ),
+                patch.dict("os.environ", {"COMPUTERNAME": "EXECUTOR-1"}, clear=False),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "hash does not match"):
+                    resolve_enabled_target_store_scope()
+
+    def test_explicit_store_scope_does_not_read_runtime_config(self) -> None:
+        args = parse_args(["--store", "阿里巴巴_广州沃来贸易有限公司"])
+
+        with patch(
+            "build_1688_stop_sale_preview.resolve_enabled_target_store_scope"
+        ) as runtime_scope:
+            scope = resolve_target_store_scope(args)
+
+        runtime_scope.assert_not_called()
+        self.assertEqual(scope["source"], "explicit_cli_stores")
+        self.assertIn("阿里巴巴-广州沃来贸易有限公司", scope["query_stores"])
+
     def test_replacement_preview_uses_new_header_and_replace_prefix(self) -> None:
         rows = [{
             STORE_NAME: "阿里巴巴-常州工莱家具",

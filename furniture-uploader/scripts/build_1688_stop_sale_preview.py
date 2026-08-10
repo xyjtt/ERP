@@ -21,6 +21,11 @@ if str(RPA_ROOT) not in sys.path:
 from stop_sale_audit import hydrate_source_database_credentials
 from stop_sale_audit import hydrate_dingtalk_credentials
 from stop_sale_audit import resolve_stop_sale_app_config
+from config_loader import load_json_with_local_override
+from cross_project_runtime import (
+    canonical_accounts_config_hash,
+    resolve_external_config_root,
+)
 from dingtalk import post_dingtalk_text_message
 from sku_offline_tasks import (
     COMBINATION_SKU_REASON,
@@ -63,13 +68,6 @@ SOURCE_ENV_FALLBACKS = {
     "STOP_SALE_SOURCE_SQLSERVER_PASSWORD": "STOP_SALE_SQLSERVER_PASSWORD",
     "STOP_SALE_SOURCE_SQLSERVER_DRIVER": "STOP_SALE_SQLSERVER_DRIVER",
 }
-
-DEFAULT_TARGET_STORES = [
-    "阿里巴巴-广州淘淘家居有限公司",
-    "阿里巴巴-广州沃来贸易有限公司",
-    "阿里巴巴-常州工莱家具",
-    "阿里巴巴-常州乐畅家居有限公司",
-]
 
 OUTPUT_COLUMNS = [
     STORE_NAME,
@@ -363,6 +361,137 @@ def normalize_value(value: Any) -> str:
     if text.endswith(".0") and text[:-2].isdigit():
         return text[:-2]
     return text
+
+
+def _unique_nonempty(values: Iterable[Any]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = normalize_value(value)
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
+
+
+def _store_name_variants(store_name: Any) -> list[str]:
+    text = normalize_value(store_name)
+    if not text:
+        return []
+    variants = [text]
+    if text.startswith("阿里巴巴-"):
+        variants.append("阿里巴巴_" + text[len("阿里巴巴-"):])
+    elif text.startswith("阿里巴巴_"):
+        variants.append("阿里巴巴-" + text[len("阿里巴巴_"):])
+    return variants
+
+
+def resolve_enabled_target_store_scope() -> dict[str, Any]:
+    """Resolve the formal enabled-account scope without guessing shop identity."""
+    accounts_path = resolve_external_config_root() / "accounts.json"
+    if not accounts_path.exists():
+        raise RuntimeError(f"Runtime accounts config is missing: {accounts_path}")
+    runtime_config = json.loads(accounts_path.read_text(encoding="utf-8-sig"))
+    accounts = runtime_config.get("accounts") if isinstance(runtime_config, dict) else None
+    if not isinstance(accounts, list):
+        raise RuntimeError("Runtime accounts config must contain an accounts list.")
+
+    revision = normalize_value(runtime_config.get("config_revision"))
+    declared_hash = normalize_value(runtime_config.get("config_hash")).lower()
+    target_hostname = normalize_value(runtime_config.get("target_hostname"))
+    if not revision or not declared_hash or not target_hostname:
+        raise RuntimeError("Runtime accounts config metadata is incomplete.")
+    if not re.fullmatch(r"[0-9a-f]{64}", declared_hash):
+        raise RuntimeError("Runtime accounts config hash is invalid.")
+    computed_hash = canonical_accounts_config_hash(runtime_config)
+    if computed_hash != declared_hash:
+        raise RuntimeError("Runtime accounts config hash does not match its contents.")
+    current_hostname = normalize_value(os.getenv("COMPUTERNAME"))
+    if current_hostname and target_hostname.casefold() != current_hostname.casefold():
+        raise RuntimeError(
+            "Runtime accounts config targets a different executor: "
+            f"expected={target_hostname}, actual={current_hostname}"
+        )
+
+    enabled_account_keys = _unique_nonempty(
+        item.get("account_key")
+        for item in accounts
+        if isinstance(item, dict) and item.get("enabled") is True
+    )
+    if not enabled_account_keys:
+        raise RuntimeError("Runtime accounts config has no explicitly enabled accounts.")
+
+    system_config = load_json_with_local_override(
+        PROJECT_ROOT / "config" / "systems" / "1688_sku_offline.json"
+    )
+    store_accounts = system_config.get("execution", {}).get("store_accounts", [])
+    if not isinstance(store_accounts, list):
+        raise RuntimeError("1688 stop-sale config store_accounts must be a list.")
+    bindings: dict[str, dict[str, Any]] = {}
+    duplicate_keys: list[str] = []
+    for item in store_accounts:
+        if not isinstance(item, dict):
+            continue
+        account_key = normalize_value(item.get("account_key"))
+        if not account_key:
+            continue
+        if account_key in bindings:
+            duplicate_keys.append(account_key)
+        bindings[account_key] = item
+    if duplicate_keys:
+        raise RuntimeError(
+            "1688 stop-sale config contains duplicate account bindings: "
+            + ", ".join(sorted(set(duplicate_keys)))
+        )
+
+    missing_bindings = [key for key in enabled_account_keys if key not in bindings]
+    if missing_bindings:
+        raise RuntimeError(
+            "Enabled runtime accounts are missing stop-sale shop mappings: "
+            + ", ".join(missing_bindings)
+        )
+
+    canonical_stores: list[str] = []
+    query_stores: list[str] = []
+    for account_key in enabled_account_keys:
+        binding = bindings[account_key]
+        canonical_store = normalize_value(binding.get("store_name"))
+        if not canonical_store:
+            raise RuntimeError(
+                f"Enabled account has no canonical stop-sale store_name: {account_key}"
+            )
+        canonical_stores.append(canonical_store)
+        names = [canonical_store, *(binding.get("store_aliases") or [])]
+        for name in names:
+            query_stores.extend(_store_name_variants(name))
+
+    return {
+        "source": "runtime_enabled_accounts",
+        "config_path": str(accounts_path),
+        "config_revision": revision,
+        "config_hash": declared_hash,
+        "target_hostname": target_hostname,
+        "enabled_account_keys": enabled_account_keys,
+        "account_count": len(enabled_account_keys),
+        "canonical_stores": _unique_nonempty(canonical_stores),
+        "query_stores": _unique_nonempty(query_stores),
+    }
+
+
+def resolve_target_store_scope(args: argparse.Namespace) -> dict[str, Any]:
+    explicit_stores = _unique_nonempty(args.stores or [])
+    if explicit_stores:
+        query_stores: list[str] = []
+        for store in explicit_stores:
+            query_stores.extend(_store_name_variants(store))
+        return {
+            "source": "explicit_cli_stores",
+            "account_count": None,
+            "canonical_stores": explicit_stores,
+            "query_stores": _unique_nonempty(query_stores),
+        }
+    return resolve_enabled_target_store_scope()
 
 
 def safe_filename(value: str) -> str:
@@ -903,7 +1032,8 @@ def send_replacement_rejection_notification(
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
     metric_date = date.fromisoformat(str(args.date))
-    stores = [str(item).strip() for item in (args.stores or DEFAULT_TARGET_STORES) if str(item).strip()]
+    target_scope = resolve_target_store_scope(args)
+    stores = list(target_scope["query_stores"])
     credential_source = hydrate_preview_database_credentials(args)
     config = config_from_env(args)
     output_dir = Path(args.output_dir)
@@ -966,6 +1096,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             HANDLING: str(args.handling),
             STORE_NAME: stores,
         },
+        "target_store_scope": target_scope,
         "base_count_for_date_platform_handling": base_count,
         **outputs,
     }
