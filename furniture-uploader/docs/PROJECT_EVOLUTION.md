@@ -1,5 +1,13 @@
 # Project Evolution
 
+## 2026-08-12 Cross-Project Runtime Coordination Evolution
+
+- 运行时互斥从本机文件锁和整机 Worker 暂停演进为 Crawler-owned SQL Server request/lease/fencing 协议；文件锁和历史门禁在兼容阶段继续保留。
+- 业务一致性从 JSONL 交接演进为 ERP-owned Saga + Outbox：1688 不可逆动作前 `prepared`，成功后持久化聚水潭任务，聚水潭按 claim token 和 CAS 回写。
+- 并发边界从“整机只允许一个浏览器任务”演进为“同账号互斥、不同账号共享容量、聚水潭全局单路”，但正式容量仍必须按 1 -> 2 -> 3 验收。
+- 代码复核把三个此前未显式关闭的差异提升为 P0：浏览器槽位等待退让、下架/替换页面动作级租约检查、批次 request key 重启稳定性。文档和测试不得再把进程级心跳概括成完整逐动作 fencing。
+- 详细设计与部署门禁见 `docs/handoff/1688_CROSS_PROJECT_RUNTIME_LEASE_ERP_HANDOFF_2026-08-12.md`。
+
 ## 2026-08-04 Combination SKU Classification Evolution
 
 - `运营自行组合替换` 从“非法替换货号”调整为明确业务终态 `combination_sku`，中文异常原因为 `组合货号`。

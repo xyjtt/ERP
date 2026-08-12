@@ -1,5 +1,14 @@
 # Delivery Handover 2026-03-24
 
+## 2026-08-12 Cross-Project Runtime Lease Handover
+
+- 当前 ERP 交接基线：分支 `codex/1688-cross-project-lease-erp-20260730`，HEAD `9429927`。GitHub 同名分支已同步，Gitee 同名分支仍为 `6de6a43`，执行机仅使用 Gitee 时需先同步或通过审核后的 Git bundle 交付。
+- Crawler 独占 shared runtime DDL/存储过程；ERP 独占 Saga/Outbox 和四条业务入口。ERP 不得创建或修改 `ali1688_runtime_*` 对象。
+- 2026-08-12 本地验证：ERP `599/599`、聚水潭 `24/24`、compile/check/build/diff-check 全过；不代表真实账号、真实页面、正式数据库或执行机验收。
+- 联合部署前 P0：槽位等待时账号租约退让、下架/替换页面动作级 guard、稳定 request key/reconcile；解决后才可安排容量 1。
+- 详细执行、DDL、部署、回滚、只读查询、异常分类、证据模板和容量 1/2/3 清单统一见 `docs/handoff/1688_CROSS_PROJECT_RUNTIME_LEASE_ERP_HANDOFF_2026-08-12.md`。
+- 当前没有生产授权：不得执行 DDL、部署执行机、修改计划任务、启用每日下架、移除旧门禁或做跨项目并发 Canary。
+
 ## 2026-08-04 Combination SKU Skip Handover
 
 - `可替换商品编码（新）` 去除前后空格后等于 `运营自行组合替换` 时，按业务跳过处理，异常原因固定为 `组合货号`，编码为 `combination_sku`。

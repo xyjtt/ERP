@@ -15,6 +15,8 @@
 
 ### 2. 交付与交接
 
+- [handoff/1688_CROSS_PROJECT_RUNTIME_LEASE_ERP_HANDOFF_2026-08-12.md](D:/script_files/ERP_cross_project_lease_20260730/furniture-uploader/docs/handoff/1688_CROSS_PROJECT_RUNTIME_LEASE_ERP_HANDOFF_2026-08-12.md)
+  - 跨项目运行时租约、Saga、Outbox、四条业务入口、P0 差异、执行机部署/回滚和容量 1/2/3 联合验收的详细交接稿
 - [PROJECT_HANDOVER.md](D:/script_files/ERP/furniture-uploader/docs/PROJECT_HANDOVER.md)
   - 简版交接说明
 - [DELIVERY_HANDOVER_2026-03-24.md](D:/script_files/ERP/furniture-uploader/docs/DELIVERY_HANDOVER_2026-03-24.md)
@@ -65,11 +67,12 @@
 ## 建议阅读顺序
 
 1. `PROJECT_MEMORY.md`
-2. `DIRECT_1688_PROGRESS.md`
-3. `DELIVERY_HANDOVER_2026-03-24.md`
-4. `PLATFORM_EXPERIENCE_KB.md`
-5. `AI_CONTINUITY_GUIDE.md`
-6. `D:\script_files\1688\README.md`
+2. `handoff/1688_CROSS_PROJECT_RUNTIME_LEASE_ERP_HANDOFF_2026-08-12.md`
+3. `DIRECT_1688_PROGRESS.md`
+4. `DELIVERY_HANDOVER_2026-03-24.md`
+5. `PLATFORM_EXPERIENCE_KB.md`
+6. `AI_CONTINUITY_GUIDE.md`
+7. `D:\script_files\1688\README.md`
 
 ## 历史档案
 

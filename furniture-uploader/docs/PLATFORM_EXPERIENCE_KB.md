@@ -1,5 +1,15 @@
 # Platform Experience Knowledge Base
 
+## 2026-08-12 Cross-Project Lease and Saga Findings
+
+- 跨项目共享锁必须以数据库 request/lease/fencing 为权威，本机文件锁只保留为兼容防重，不能承担跨仓库 ownership。
+- 写操作应先登记 priority=100 request，再等待同账号当前 Crawler 自然结束；禁止强杀 Crawler、抢用 Profile 或删除对方锁。
+- 取得账号租约但拿不到浏览器槽位时，目标契约要求释放账号租约、保留 request 心跳后退避。当前 ERP 实现仍持有账号租约等待槽位，容量 2 前必须修复或经双方修改契约明确接受。
+- 上架已把租约检查注入浏览器动作；下架/替换当前主要依赖父 Pipeline 每 10 秒检查并终止子进程。进程级止损不等于每个不可逆页面动作前的 fencing 校验，容量 1 前需补齐。
+- Saga/Outbox 数据库行是恢复事实源；JSONL、退出码、计划任务状态和浏览器关闭只能作为辅助证据。未知 `prepared/reconcile_required/claimed` 不能通过新 run id 或广泛重跑绕过。
+- 聚水潭必须在释放 1688 账号/槽位后，以 `jushuitan/global` 单路执行；逐条已验证成功不得因同批其他条目导致的非零退出码被回滚。
+- 完整交接与异常矩阵见 `docs/handoff/1688_CROSS_PROJECT_RUNTIME_LEASE_ERP_HANDOFF_2026-08-12.md`。
+
 ## 2026-08-04 Combination SKU Business Rule
 
 - BI 字段 `可替换商品编码（新）` 中的固定值 `运营自行组合替换` 是运营指令，不是 1688 SKU，也不是脏数据。
