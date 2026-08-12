@@ -2,9 +2,9 @@
 
 ## 2026-08-12 Managed Update (ERP Lease/Saga/Outbox Handoff)
 
-- 当前 ERP 集成分支为 `codex/1688-cross-project-lease-erp-20260730`，HEAD `9429927`；共享 runtime 对象继续由 Crawler 独占，ERP 只调用存储过程并自有 `app.ali1688_operation_saga/outbox`。
+- 当前 ERP 集成分支为 `codex/1688-cross-project-lease-erp-20260730`，交接代码基线 `9429927`、详细文档提交 `bdc2788`；共享 runtime 对象继续由 Crawler 独占，ERP 只调用存储过程并自有 `app.ali1688_operation_saga/outbox`。
 - 上架、下架、替换和聚水潭 Outbox Worker 已接入代码基线；下架/替换仍保留“全部”Tab、同商品多 SKU 一次提交、重复条形码全部下架、组合货号业务跳过和旧安全门禁。
-- 当前 HEAD 本地回归：ERP `599/599`，聚水潭 `24/24`，Python 编译、TypeScript check/build、`git diff --check` 均通过。
+- 交接代码基线本地回归：ERP `599/599`，聚水潭 `24/24`，Python 编译、TypeScript check/build、`git diff --check` 均通过。
 - 状态仍是“代码完成 + 本地验证通过 + 生产未验收”。容量 1 联合部署前先闭环槽位退让、页面动作级租约守卫和稳定 request key 三项 P0。
 - 详细交接：`docs/handoff/1688_CROSS_PROJECT_RUNTIME_LEASE_ERP_HANDOFF_2026-08-12.md`。每日任务保持禁用，未经主会话统一审核不得部署或并发测试。
 

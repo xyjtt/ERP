@@ -2,8 +2,8 @@
 
 ## 2026-08-12 Managed Update (Cross-Project Runtime Lease ERP Handoff)
 
-- ERP 跨项目运行时租约、Saga、Outbox 和上架/下架/替换/聚水潭入口已在分支 `codex/1688-cross-project-lease-erp-20260730` 汇总，当前 HEAD 为 `9429927`；GitHub `origin` 已同步，Gitee 同名分支仍停在 `6de6a43`。
-- 2026-08-12 重新验证当前 HEAD：ERP Python `599/599`、`compileall`、聚水潭 `check`、`24/24`、`build` 和 `git diff --check` 全部通过。以上仅是本地开发证据，不是执行机或生产验收。
+- ERP 跨项目运行时租约、Saga、Outbox 和上架/下架/替换/聚水潭入口已在分支 `codex/1688-cross-project-lease-erp-20260730` 汇总；交接代码基线为 `9429927`，详细文档提交为 `bdc2788`。GitHub `origin` 已同步到文档提交，Gitee 同名分支仍停在 `6de6a43`。
+- 2026-08-12 重新验证代码基线：ERP Python `599/599`、`compileall`、聚水潭 `check`、`24/24`、`build` 和 `git diff --check` 全部通过。以上仅是本地开发证据，不是执行机或生产验收。
 - 详细交接新增于 `docs/handoff/1688_CROSS_PROJECT_RUNTIME_LEASE_ERP_HANDOFF_2026-08-12.md`，包含 ownership、协议、状态机、文件清单、部署/回滚、异常分类和容量 1/2/3 验收。
 - 联合部署前仍有三项 P0：槽位繁忙时账号租约退让、下架/替换不可逆页面动作前的进程内租约检查、批次 request key 的崩溃重启稳定性；另需补替换“释放 1688 租约先于聚水潭”的专门顺序测试。
 - 当前仍禁止生产 DDL、执行机部署、计划任务修改、启用 `YYDD-1688-Stop-Sale-Daily`、移除旧全局安全门禁和跨项目并发 Canary。

@@ -2,7 +2,7 @@
 
 ## 2026-08-12 Cross-Project Runtime Lease Handover
 
-- 当前 ERP 交接基线：分支 `codex/1688-cross-project-lease-erp-20260730`，HEAD `9429927`。GitHub 同名分支已同步，Gitee 同名分支仍为 `6de6a43`，执行机仅使用 Gitee 时需先同步或通过审核后的 Git bundle 交付。
+- 当前 ERP 交接分支：`codex/1688-cross-project-lease-erp-20260730`；代码基线 `9429927`，详细文档提交 `bdc2788`。GitHub 同名分支已同步到文档提交，Gitee 同名分支仍为 `6de6a43`，执行机仅使用 Gitee 时需先同步或通过审核后的 Git bundle 交付。
 - Crawler 独占 shared runtime DDL/存储过程；ERP 独占 Saga/Outbox 和四条业务入口。ERP 不得创建或修改 `ali1688_runtime_*` 对象。
 - 2026-08-12 本地验证：ERP `599/599`、聚水潭 `24/24`、compile/check/build/diff-check 全过；不代表真实账号、真实页面、正式数据库或执行机验收。
 - 联合部署前 P0：槽位等待时账号租约退让、下架/替换页面动作级 guard、稳定 request key/reconcile；解决后才可安排容量 1。

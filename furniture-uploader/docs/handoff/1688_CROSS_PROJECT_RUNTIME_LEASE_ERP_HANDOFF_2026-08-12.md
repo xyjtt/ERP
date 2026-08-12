@@ -109,12 +109,13 @@ ERP 侧已经完成以下开发工作：
 | 项目 | 值 |
 |---|---|
 | 分支 | `codex/1688-cross-project-lease-erp-20260730` |
-| HEAD | `9429927f7f63f3cf6ab9d5a83f29cf43e89b22ea` |
-| GitHub `origin` 同名分支 | `9429927` |
+| 交接代码基线 | `9429927f7f63f3cf6ab9d5a83f29cf43e89b22ea` |
+| 文档提交 | `bdc27882a518d26eb8b3b70a4fa6d2e52fa32275` |
+| GitHub `origin` 同名分支 | `bdc2788` |
 | Gitee `gitee` 同名分支 | `6de6a43` |
 | 本轮编辑前工作树 | 干净 |
 
-远端存在差异：GitHub 已包含 `9429927`，Gitee 仍停在 `6de6a43`。如果执行机只允许从 Gitee 拉取，不能假设能直接取得当前 HEAD。部署负责人必须先选择以下一种受控方式：
+远端存在差异：GitHub 已包含代码基线 `9429927` 和文档提交 `bdc2788`，Gitee 仍停在 `6de6a43`。如果执行机只允许从 Gitee 拉取，不能假设能直接取得当前交接分支。部署负责人必须先选择以下一种受控方式：
 
 - 将审核后的当前分支同步到 Gitee；
 - 从开发机创建 Git bundle，经批准的传输通道送到执行机；
@@ -1042,7 +1043,7 @@ python scripts\apply_1688_operation_saga_ddl.py `
 11. 把本地测试/Preview 写成生产验收；
 12. 在日志、命令或文档中输出密码、Cookie、Webhook 或 secret；
 13. 在 dirty 执行机仓库 stash/reset/clean/覆盖；
-14. 在 Gitee 分支未同步时声称执行机已取得 `9429927`；
+14. 在 Gitee 分支未同步时声称执行机已取得代码基线 `9429927` 和文档提交 `bdc2788`；
 15. 用 queued task 数量作为部署阻塞；真正门禁是 fresh active/in-flight、租约和浏览器槽位。
 
 ## 22. 后续任务优先级
