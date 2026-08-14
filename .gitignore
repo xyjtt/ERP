@@ -12,3 +12,18 @@ results/
 storage/
 *.local.json
 .env
+
+# Temporary and debug files
+*.log
+*_debug*.py
+*_debug*.log
+canary_*.log
+check_*.py
+check_*.ps1
+force_kill_*.py
+kill_*.py
+run_canary*.py
+run_barcode_canary.py
+temp_*.py
+*.bak*
+*.bak.20*
