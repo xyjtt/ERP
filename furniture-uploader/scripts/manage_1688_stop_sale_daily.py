@@ -43,6 +43,7 @@ NON_RETRYABLE_OFFLINE_CATEGORIES = {
     "sole_sku_requires_product_offline",
     "campaign_restriction",
     "delivery_service_backfill_failed",
+    "system_prompt",
     "submit_blocked_before_request",
 }
 SAFETY_ERROR_CATEGORIES = {

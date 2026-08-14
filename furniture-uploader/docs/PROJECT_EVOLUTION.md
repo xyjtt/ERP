@@ -156,3 +156,9 @@
 - The listing source lifecycle check moved from an executor artifact into a version-controlled read-only script.
 - SQL Server driver selection now follows the installed-driver preference used by the rest of the project.
 - Source eligibility remains a fail-closed browser prerequisite and is kept separate from draft, submission, and business acceptance.
+
+## 2026-08-04 Stop-Sale Hidden Validation Isolation
+
+- Explicit 1688 submit validation text is now a first-class `system_prompt` outcome instead of the ambiguous `submit_blocked_before_request` fallback.
+- A system prompt fails only the current product ID/SKU, preserves the original platform message, and allows the remaining store batch to continue.
+- Retry governance, daily-manager classification, Chinese reporting, and regression coverage were updated together; related tests pass `126/126`.

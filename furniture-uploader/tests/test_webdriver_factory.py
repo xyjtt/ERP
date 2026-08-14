@@ -78,6 +78,34 @@ class WebdriverFactoryTests(unittest.TestCase):
                     "150.0.4078.83",
                 )
 
+    @patch(
+        "webdriver_factory.detect_windows_executable_version",
+        return_value="150.0.4078.105",
+    )
+    def test_detect_edge_version_prefers_active_executable_over_staged_directory(
+        self,
+        _version_mock,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir:
+            program_files = Path(temp_dir)
+            install_root = program_files / "Microsoft" / "Edge" / "Application"
+            install_root.mkdir(parents=True)
+            (install_root / "msedge.exe").touch()
+            (install_root / "150.0.4078.105").mkdir()
+            (install_root / "151.0.4129.59").mkdir()
+
+            with patch.dict(
+                "os.environ",
+                {
+                    "PROGRAMFILES(X86)": str(program_files),
+                    "PROGRAMFILES": "",
+                    "LOCALAPPDATA": "",
+                },
+            ):
+                resolved = detect_edge_version_from_installation()
+
+        self.assertEqual(resolved, "150.0.4078.105")
+
     def test_cached_edge_driver_uses_latest_compatible_build(self) -> None:
         with TemporaryDirectory() as temp_dir:
             cache_root = Path(temp_dir)
@@ -128,6 +156,26 @@ class WebdriverFactoryTests(unittest.TestCase):
         cache_mock.return_value = "C:/cache/msedgedriver.exe"
 
         self.assertEqual(resolve_edge_driver_path(), "C:/cache/msedgedriver.exe")
+        manager_mock.assert_not_called()
+
+    @patch("webdriver_factory.EdgeChromiumDriverManager")
+    @patch(
+        "webdriver_factory.download_edge_driver",
+        return_value="C:/cache/150.0.4078.105/msedgedriver.exe",
+    )
+    @patch("webdriver_factory.find_compatible_cached_edge_driver", return_value="")
+    @patch("webdriver_factory.detect_edge_version", return_value="150.0.4078.105")
+    def test_resolve_edge_driver_downloads_detected_version_not_latest(
+        self,
+        _detect_mock,
+        _cache_mock,
+        download_mock,
+        manager_mock,
+    ) -> None:
+        resolved = resolve_edge_driver_path(debugger_address="127.0.0.1:9306")
+
+        self.assertEqual(resolved, "C:/cache/150.0.4078.105/msedgedriver.exe")
+        download_mock.assert_called_once_with("150.0.4078.105")
         manager_mock.assert_not_called()
 
 

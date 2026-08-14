@@ -389,3 +389,10 @@
 - The bridge upload is now slot-adaptive: `_ensure_primary_picture_bridge_slot` extends `imageList` with placeholder entries before writing; landing detection waits for a NEW remote URL anywhere in the list (robust to the component ignoring the requested slot index) and records `main_image_bridge_slot_mismatches` diagnostics.
 - The pre-save repair from the previous round automatically inherits the adaptive upload.
 - Local validation: listing `588/588`; doctor `status: ok`.
+
+## 2026-08-04 SKU 下架隐藏校验分类
+
+- 1688 编辑页可能在 SKU 已切换为下架后，通过隐藏校验阻止提交，例如 `毛重必须为数字`。这类结果不是下架成功，也不是整店安全故障。
+- 提交未产生平台请求且能读取到明确平台提示时，执行器记录 `error_category=system_prompt`，并把平台原文写入 `page_error_text` 和 `system_prompt`。
+- `system_prompt` 不重试、不停止整店；当前商品 ID/SKU 记录失败后继续下一商品。唯一在线 SKU 的专用分类仍优先于通用系统提示。
+- 本地相关回归 `126/126` 通过；执行机部署和真实 Canary 仍需单独验证，不能用本地测试代替生产验收。

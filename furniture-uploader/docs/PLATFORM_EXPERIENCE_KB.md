@@ -280,3 +280,11 @@
 - A required 1688 specification must be checked for exact persisted text after refresh; non-empty alone is insufficient.
 - Direct Chinese input plus Tab is valid for color, but review must compare the committed value with the payload.
 - For CTG028601N1416V01, expected persisted values are color `胡桃色` and size `48/40/50`.
+
+## 2026-08-04 Live Finding: Hidden Validation Before SKU Offline Submit
+
+- The 1688 edit page can show an offline switch as selected while a hidden product-attribute validation still prevents the save request. Observed example: `毛重必须为数字` for attribute `p-1957`.
+- A visible switch state is not proof of persistence. When no submit request is emitted, collect assist and hidden validation text before classifying the result.
+- Preserve explicit platform text as `system_prompt`; fail and skip only the current product ID/SKU, then continue the store batch.
+- Do not retry the same unchanged product, stop the store, create a Jushuitan handoff, or report the SKU as successfully offline.
+- Keep dedicated business classifications, such as `sole_sku_requires_product_offline`, ahead of the generic system-prompt classification.
