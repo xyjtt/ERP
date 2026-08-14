@@ -18,6 +18,7 @@ storage/
 *_debug*.py
 *_debug*.log
 canary_*.log
+canary_*.py
 check_*.py
 check_*.ps1
 force_kill_*.py
