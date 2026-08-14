@@ -116,7 +116,10 @@ def finish_claimed_items(
     for item in items:
         record = by_key.get(item.operation_key, {})
         result_status = str(record.get("status") or "").strip()
-        if return_code == 0 and result_status in {"success", "already_cleared", "already_synced"}:
+        # The Node CLI returns a batch-level non-zero code when any item fails.
+        # Its per-item success rows have already passed live-page verification and
+        # must not be rolled back to failed_retryable by an unrelated item.
+        if result_status in {"success", "already_cleared", "already_synced"}:
             status = "succeeded"
             error_code = ""
             error_summary = ""
