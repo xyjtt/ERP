@@ -1055,6 +1055,11 @@ class BrowserRPA:
                     element.dispatchEvent(new InputEvent('input', { bubbles: true, data: value }));
                     element.dispatchEvent(new Event('change', { bubbles: true }));
                   };
+                  const fireClick = (node) => {
+                    ['mousedown', 'mouseup', 'click'].forEach((type) => {
+                      node.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+                    });
+                  };
                   const root = document.querySelector('#guid-skuTable');
                   if (!root || !isVisible(root)) return false;
                   const headerCells = Array.from(root.querySelectorAll('.next-table-header [data-next-table-col], .next-table-header th'));
@@ -1065,7 +1070,6 @@ class BrowserRPA:
                     if (!c) continue;
                     if (text.includes('颜色')) col.color = c;
                     else if (text.includes('尺寸')) col.size = c;
-                    else if (text.includes('单价')) col.price = c;
                     else if (text.includes('可售数量')) col.quantity = c;
                     else if (text.includes('货号')) col.skuCode = c;
                   }
@@ -1074,31 +1078,64 @@ class BrowserRPA:
                     .filter(tr => tr.querySelector('input') && isVisible(tr));
                   let existing = readRows().length;
                   let guard = 0;
-                  while (existing < rawRows.length && addButton && guard < 50) {
-                    addButton.click();
-                    existing = readRows().length;
+                  while (existing < rawRows.length && addButton && guard < 60) {
+                    fireClick(addButton);
+                    for (let w = 0; w < 10; w++) {
+                      const after = readRows().length;
+                      if (after > existing) { existing = after; break; }
+                    }
                     guard += 1;
                   }
-                  const rows = readRows();
-                  if (rows.length < rawRows.length) return false;
-                  const fillCell = (tr, key, value) => {
-                    if (!key || value === undefined || value === null || value === '') return;
-                    const cell = tr.querySelector(`td[data-next-table-col="${key}"]`);
-                    if (!cell) return;
-                    const input = cell.querySelector('input');
-                    if (!input || !isVisible(input) || input.disabled || input.readOnly) return;
-                    input.scrollIntoView({block: 'center', inline: 'nearest'});
-                    input.focus();
-                    setValue(input, String(value));
+                  if (readRows().length < rawRows.length) return false;
+                  const pickAntSelect = (cell, text) => {
+                    if (!cell) return false;
+                    const select = cell.querySelector('.ant-select');
+                    if (!select || !isVisible(select)) return false;
+                    fireClick(select);
+                    const waitDropdown = () => Array.from(document.querySelectorAll('.ant-select-dropdown:not(.ant-select-dropdown-hidden)'));
+                    let dropdown = waitDropdown();
+                    let tries = 0;
+                    while (dropdown.length === 0 && tries < 10) {
+                      tries += 1;
+                      const dummy = new Date(); while (Date.now() - dummy < 200) {}
+                      dropdown = waitDropdown();
+                    }
+                    if (dropdown.length === 0) return false;
+                    const options = Array.from(dropdown[0].querySelectorAll('.ant-select-item, li[role="option"], .ant-select-item-option'));
+                    const visibleOptions = options.filter(o => isVisible(o) && (o.textContent || '').trim());
+                    if (visibleOptions.length === 0) return false;
+                    const target = text
+                      ? (visibleOptions.find(o => (o.textContent || '').trim() === text)
+                         || visibleOptions.find(o => (o.textContent || '').includes(text) || text.includes((o.textContent || '').trim())))
+                      : visibleOptions[0];
+                    const pick = target || visibleOptions[0];
+                    fireClick(pick);
+                    return true;
                   };
+                  const rows = readRows();
                   rows.forEach((tr, index) => {
                     const row = rawRows[index];
                     if (!row) return;
-                    fillCell(tr, col.color, row.sku_name);
-                    fillCell(tr, col.size, '');
-                    fillCell(tr, col.price, row.sale_price);
-                    fillCell(tr, col.quantity, '999');
-                    fillCell(tr, col.skuCode, row.sku_code);
+                    const cellOf = (key) => key ? tr.querySelector(`td[data-next-table-col="${key}"]`) : null;
+                    const sizeCell = cellOf(col.size);
+                    if (sizeCell) {
+                      const input = sizeCell.querySelector('input');
+                      if (input && isVisible(input) && !input.readOnly) {
+                        const m = String(row.sku_name || '').match(/\d+(?:\.\d+)?(?:\s*[xX*/]\s*\d+(?:\.\d+)?){1,2}/);
+                        if (m) { input.focus(); setValue(input, m[0]); }
+                      }
+                    }
+                    const qtyCell = cellOf(col.quantity);
+                    if (qtyCell) {
+                      const input = qtyCell.querySelector('input');
+                      if (input && isVisible(input) && !input.readOnly) { input.focus(); setValue(input, '999'); }
+                    }
+                    const codeCell = cellOf(col.skuCode);
+                    if (codeCell) {
+                      const input = codeCell.querySelector('input');
+                      if (input && isVisible(input) && !input.readOnly) { input.focus(); setValue(input, String(row.sku_code || '')); }
+                    }
+                    pickAntSelect(cellOf(col.color), String(row.sku_name || ''));
                   });
                   return true;
                 }
