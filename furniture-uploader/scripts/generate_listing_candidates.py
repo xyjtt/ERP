@@ -13,6 +13,8 @@
 from __future__ import annotations
 
 import argparse
+import re
+from datetime import datetime, timezone
 import json
 import sys
 from dataclasses import dataclass, field
@@ -68,7 +70,7 @@ ACCOUNTS: list[tuple[str, str]] = [
 PUBLISH_TABLES = ("jst_skumap", "jst_skumap_pdd", "jst_skumap_qmcust_add")
 
 GATE_SQL = """
-SELECT TOP 5000 s.sku_id, s.i_id, s.name, s.brand, s.category,
+SELECT TOP {top_n} s.sku_id, s.i_id, s.name, s.brand, s.category,
        s.cost_price, s.sale_price, s.other_1, s.other_2, s.other_3,
        s.other_4, s.other_5, s.other_6, s.other_7, s.other_8,
        s.other_9, s.other_10, s.purchase_price, s.enabled, s.created, s.modified,
@@ -138,8 +140,8 @@ def compute_price(cost: float | None, freight: float | None, limit_price: float 
     return max(base, round_up_1dp(limit_price))
 
 
-def fetch_gate_skus(cursor: Any) -> list[CandidateSku]:
-    cursor.execute(GATE_SQL, *BRAND_WHITELIST)
+def fetch_gate_skus(cursor: Any, gate_sql: str | None = None) -> list[CandidateSku]:
+    cursor.execute(gate_sql or GATE_SQL, *BRAND_WHITELIST)
     rows = cursor.fetchall()
     columns = [d[0] for d in cursor.description]
     skus: list[CandidateSku] = []
@@ -299,10 +301,18 @@ def build_payload(spu: CandidateSpu, shop: tuple[str, str]) -> dict[str, Any]:
         },
         "sku": {"rows": sku_rows},
         "workflow": {
+            "state": "draft_pending",
             "submit_mode": "single_offer",
             "independent_link_required": True,
             "approval_required": True,
             "auto_submit": False,
+            "event_history": [
+                {
+                    "event": "review_approved",
+                    "evidence": {"approved_by": "auto-listing-generator"},
+                    "recorded_at": datetime.now(timezone.utc).isoformat(),
+                }
+            ],
         },
         "preflight": {},
     }
@@ -312,6 +322,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Generate 1688 auto-listing candidates (SPU-merged, all shops).")
     parser.add_argument("--inbox", default=r"C:\ProgramData\YYDD\1688-listing\inbox")
     parser.add_argument("--limit", type=int, default=0, help="limit gate SKUs for a small run (0=all)")
+    parser.add_argument("--top", type=int, default=5000, help="TOP N gate SKUs from source")
+    parser.add_argument("--skip-publish", action="store_true", help="skip publish-count check (validation only)")
     parser.add_argument("--dry-run", action="store_true", help="print candidates, do not write files")
     args = parser.parse_args()
 
@@ -328,24 +340,29 @@ def main() -> int:
     connection.timeout = 300
     cursor = connection.cursor()
 
-    gate_skus = fetch_gate_skus(cursor)
-    print("GATE_SKUS", len(gate_skus))
+    gate_sql = GATE_SQL.format(top_n=args.top)
+    gate_skus = fetch_gate_skus(cursor, gate_sql=gate_sql)
+    print("GATE_SKUS", len(gate_skus), flush=True)
     if args.limit > 0:
         gate_skus = gate_skus[: args.limit]
-        print("LIMITED_TO", len(gate_skus))
+        print("LIMITED_TO", len(gate_skus), flush=True)
 
-    publish_map = fetch_publish_counts(cursor, [s.sku_id for s in gate_skus])
-    never_published = [s for s in gate_skus if publish_map.get(s.sku_id, 0) == 0]
-    print("NEVER_PUBLISHED", len(never_published))
+    if args.skip_publish:
+        never_published = list(gate_skus)
+        print("NEVER_PUBLISHED(skip-publish)", len(never_published), flush=True)
+    else:
+        publish_map = fetch_publish_counts(cursor, [s.sku_id for s in gate_skus])
+        never_published = [s for s in gate_skus if publish_map.get(s.sku_id, 0) == 0]
+        print("NEVER_PUBLISHED", len(never_published), flush=True)
 
     spus = merge_spus(never_published)
-    print("SPU_MERGED", len(spus))
+    print("SPU_MERGED", len(spus), flush=True)
 
     # 幂等：inbox 已有同 SPU 候选则跳过
     inbox = Path(args.inbox)
     existing = {p.name.removeprefix("listing_task_").removesuffix(".json") for p in inbox.glob("*.json")} if inbox.exists() else set()
     spus = [s for s in spus if s.spu not in existing]
-    print("SPU_AFTER_INBOX_DEDUPE", len(spus), "existing_inbox", len(existing))
+    print("SPU_AFTER_INBOX_DEDUPE", len(spus), "existing_inbox", len(existing), flush=True)
 
     assigned = distribute_shops(spus)
     total_written = 0
@@ -357,12 +374,12 @@ def main() -> int:
             payload = build_payload(spu, (account_key, shop_name))
             file_name = f"listing_task_{spu.spu}.json"
             if args.dry_run:
-                print("CANDIDATE", account_key, file_name, "skus", len(spu.skus), "price", payload["pricing"]["sale_price"])
+                print("CANDIDATE", account_key, file_name, "skus", len(spu.skus), "price", payload["pricing"]["sale_price"], flush=True)
                 continue
             (inbox / file_name).write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
             total_written += 1
-        print(f"SHOP {account_key}: {len(candidates)} candidates")
-    print("TOTAL_WRITTEN", total_written)
+        print(f"SHOP {account_key}: {len(candidates)} candidates", flush=True)
+    print("TOTAL_WRITTEN", total_written, flush=True)
     return 0
 
 
