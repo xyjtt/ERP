@@ -61,6 +61,7 @@ class ProductRecord:
     source_record_id: str
     raw: dict[str, str]
     sanitization_notes: list[str] = field(default_factory=list)
+    sku_rows: list[dict[str, object]] = field(default_factory=list)
 
     @classmethod
     def from_row(cls, row: dict[str, str]) -> "ProductRecord":
@@ -87,6 +88,7 @@ class ProductRecord:
             source_record_id=sanitized_row.get("source_record_id", "").strip(),
             raw=sanitized_row,
             sanitization_notes=sanitization_notes,
+            sku_rows=list(row.get("sku_rows") or []),
         )
 
 

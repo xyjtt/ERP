@@ -67,6 +67,7 @@ class ReleaseVariant:
     updated_at: str
     platform_category: str
     quantity: str
+    sku_rows: list[dict[str, object]] = field(default_factory=list)
     store_label: str
     ship_from_template: str
     freight_template: str
@@ -135,6 +136,7 @@ class ReleaseVariant:
             updated_at=str(normalized.get("updated_at", "")).strip(),
             platform_category=str(normalized.get("platform_category", "")).strip(),
             quantity=str(normalized.get("quantity", "999")).strip() or "999",
+            sku_rows=list(normalized.get("sku_rows") or []),
             store_label=str(normalized.get("store_label", "")).strip(),
             ship_from_template=str(normalized.get("ship_from_template", "")).strip(),
             freight_template=str(normalized.get("freight_template", "")).strip(),
@@ -221,6 +223,7 @@ def build_products_from_variants(
                     "color": str(variant.attributes.get("color", variant.attributes.get("颜色", ""))).strip(),
                     "price": variant.price_value,
                     "quantity": variant.quantity or "999",
+                    "sku_rows": variant.sku_rows,
                     "platform_category": variant.platform_category,
                     "main_image": local_main_images[0] if local_main_images else "",
                     "main_image_remote": remote_main_images[0] if remote_main_images else "",
@@ -245,6 +248,15 @@ def build_products_from_variants(
                     "variant_id": variant.variant_id,
                     "attributes_json": json.dumps(variant.attributes, ensure_ascii=False),
                     "image_enrichment_error": image_enrichment_error,
+                    "submit_reapply_required_fields": variant.raw.get(
+                        "submit_reapply_required_fields", []
+                    ),
+                    "submit_reapply_evidence": variant.raw.get(
+                        "submit_reapply_evidence", {}
+                    ),
+                    "submit_reapply_contract_sha256": variant.raw.get(
+                        "submit_reapply_contract_sha256", ""
+                    ),
                 }
             )
         )
@@ -443,7 +455,18 @@ def _download_public_urls(
             saved_paths.append(str(target_path))
             continue
 
-        request = Request(_prepare_download_url(clean_url), method="GET")
+        request = Request(
+            _prepare_download_url(clean_url),
+            method="GET",
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                ),
+                "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+                "Referer": "https://www.1688.com/",
+            },
+        )
         max_attempts = 4
         for attempt in range(1, max_attempts + 1):
             try:
@@ -457,7 +480,7 @@ def _download_public_urls(
                 source_path.write_text(clean_url + "\n", encoding="utf-8")
                 break
             except HTTPError as exc:
-                retryable = exc.code in {408, 429, 500, 502, 503, 504}
+                retryable = exc.code in {408, 420, 429, 500, 502, 503, 504}
                 if not retryable or attempt >= max_attempts:
                     raise
             except URLError:
