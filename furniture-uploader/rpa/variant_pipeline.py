@@ -67,7 +67,6 @@ class ReleaseVariant:
     updated_at: str
     platform_category: str
     quantity: str
-    sku_rows: list[dict[str, object]] = field(default_factory=list)
     store_label: str
     ship_from_template: str
     freight_template: str
@@ -78,6 +77,7 @@ class ReleaseVariant:
     weight_g: str
     description: str
     raw: dict[str, Any] = field(default_factory=dict)
+    sku_rows: list[dict[str, object]] = field(default_factory=list)
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> "ReleaseVariant":
