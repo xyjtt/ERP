@@ -71,7 +71,8 @@ GATE_SQL = """
 SELECT TOP 5000 s.sku_id, s.i_id, s.name, s.brand, s.category,
        s.cost_price, s.sale_price, s.other_1, s.other_2, s.other_3,
        s.other_4, s.other_5, s.other_6, s.other_7, s.other_8,
-       s.other_9, s.other_10, s.purchase_price, s.enabled, s.created, s.modified
+       s.other_9, s.other_10, s.purchase_price, s.enabled, s.created, s.modified,
+       s.pic
 FROM dbo.jst_sku s WITH (NOLOCK)
 WHERE s.enabled = 1 AND s.stock_disabled = 0
   AND s.item_type = N'成品' AND s.other_5 = N'销售'
@@ -100,6 +101,7 @@ class CandidateSku:
     cost_price: float | None
     sale_price: float | None
     created: str
+    pic: str = ""
     raw: Mapping[str, Any] = field(default_factory=dict)
 
 
@@ -153,6 +155,7 @@ def fetch_gate_skus(cursor: Any) -> list[CandidateSku]:
                 cost_price=_as_float(record.get("cost_price")),
                 sale_price=_as_float(record.get("sale_price")),
                 created=str(record.get("created") or ""),
+                pic=fix(record.get("pic")),
                 raw=record,
             )
         )
@@ -222,6 +225,17 @@ def distribute_shops(spus: list[CandidateSpu]) -> dict[str, list[CandidateSpu]]:
     return assigned
 
 
+def parse_sku_specs(sku_name: str) -> tuple[str, str]:
+    """从 SKU 名解析颜色/尺寸（"款式一 52/32/32 胡桃色腿+墨绿色坐垫" → ("胡桃色腿+墨绿色坐垫", "52/32/32")）。"""
+    name = str(sku_name or "").strip()
+    match = re.search(r"(\d+(?:\.\d+)?(?:\s*[xX*/]\s*\d+(?:\.\d+)?){1,2})", name)
+    size = match.group(1) if match else ""
+    color = re.sub(r"^\s*款式[一二三四五六七八九十\d]+\s*", "", name)
+    if size:
+        color = re.sub(r"^\s*" + re.escape(size) + r"\s*", "", color)
+    return color.strip(), size
+
+
 def build_payload(spu: CandidateSpu, shop: tuple[str, str]) -> dict[str, Any]:
     """组装 listing_task_payload_v1 候选（SPU 级 task；sku.rows=SPU 下全部 SKU）。"""
     account_key, shop_name = shop
@@ -272,7 +286,17 @@ def build_payload(spu: CandidateSpu, shop: tuple[str, str]) -> dict[str, Any]:
             "freight": freight,
             "limit_price": limit_price,
         },
+        "attributes": {
+            "color": "|".join(dict.fromkeys(parse_sku_specs(sku.name)[0] for sku in spu.skus if parse_sku_specs(sku.name)[0])),
+            "size": "|".join(dict.fromkeys(parse_sku_specs(sku.name)[1] for sku in spu.skus if parse_sku_specs(sku.name)[1])),
+        },
         "inventory": {"quantity": 999, "quantity_source": "business_default"},
+        "images": {
+            "source": "jiansun",
+            "main_urls": [main.pic] if main.pic else [],
+            "detail_urls": [],
+            "description_urls": [],
+        },
         "sku": {"rows": sku_rows},
         "workflow": {
             "submit_mode": "single_offer",

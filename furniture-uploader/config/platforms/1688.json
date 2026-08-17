@@ -487,7 +487,9 @@
                 "label": "尺寸",
                 "source": "size",
                 "required": false,
-                "commit_key": "tab"
+                "commit_key": "tab",
+                "multi_value": true,
+                "split_pattern": "\\s*(?:\\||,|，|;|；|\\n)+\\s*"
               }
             ]
           },
@@ -510,7 +512,9 @@
                 "label": "尺寸",
                 "source": "size",
                 "required": false,
-                "commit_key": "tab"
+                "commit_key": "tab",
+                "multi_value": true,
+                "split_pattern": "\\s*(?:\\||,|，|;|；|\\n)+\\s*"
               }
             ]
           }

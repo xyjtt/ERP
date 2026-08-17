@@ -1037,114 +1037,96 @@ class BrowserRPA:
         ]
         if not rows_payload:
             return True
-        applied = bool(
-            self.driver.execute_script(
+        try:
+            result = self.driver.execute_script(
                 """
-                (rawRows) => {
-                  if (!Array.isArray(rawRows) || rawRows.length <= 1) return true;
-                  function isVisible(node) {
-                    if (!node) return false;
-                    const style = window.getComputedStyle(node);
-                    const rect = node.getBoundingClientRect();
-                    return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
-                  }
-                  const setValue = (element, value) => {
-                    const descriptor = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
-                    if (descriptor && descriptor.set) descriptor.set.call(element, value);
-                    else element.value = value;
-                    element.dispatchEvent(new InputEvent('input', { bubbles: true, data: value }));
-                    element.dispatchEvent(new Event('change', { bubbles: true }));
-                  };
-                  const fireClick = (node) => {
-                    ['mousedown', 'mouseup', 'click'].forEach((type) => {
-                      node.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
-                    });
-                  };
-                  const root = document.querySelector('#guid-skuTable');
-                  if (!root || !isVisible(root)) return false;
-                  const headerCells = Array.from(root.querySelectorAll('.next-table-header [data-next-table-col], .next-table-header th'));
-                  const col = {};
-                  for (const cell of headerCells) {
-                    const text = String(cell.innerText || cell.textContent || '').replace(/\s+/g, ' ').trim();
-                    const c = String(cell.getAttribute('data-next-table-col') || '').trim();
-                    if (!c) continue;
-                    if (text.includes('颜色')) col.color = c;
-                    else if (text.includes('尺寸')) col.size = c;
-                    else if (text.includes('可售数量')) col.quantity = c;
-                    else if (text.includes('货号')) col.skuCode = c;
-                  }
-                  const addButton = Array.from(root.querySelectorAll('button, span, a')).find(el => (el.textContent || '').trim() === '添加');
-                  const readRows = () => Array.from(root.querySelectorAll('.next-table-body tbody tr, .next-table-tbody tr'))
-                    .filter(tr => tr.querySelector('input') && isVisible(tr));
-                  let existing = readRows().length;
-                  let guard = 0;
-                  while (existing < rawRows.length && addButton && guard < 60) {
-                    fireClick(addButton);
-                    for (let w = 0; w < 10; w++) {
-                      const after = readRows().length;
-                      if (after > existing) { existing = after; break; }
+                const rawRows = arguments[0];
+                  const diag = { ok: false, phase: 'start', reason: '', rowsFound: 0, expected: Array.isArray(rawRows) ? rawRows.length : 0 };
+                  try {
+                    if (!Array.isArray(rawRows) || rawRows.length <= 1) { diag.ok = true; diag.phase = 'skip'; return diag; }
+                    function isVisible(node) {
+                      if (!node) return false;
+                      const style = window.getComputedStyle(node);
+                      const rect = node.getBoundingClientRect();
+                      return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
                     }
-                    guard += 1;
-                  }
-                  if (readRows().length < rawRows.length) return false;
-                  const pickAntSelect = (cell, text) => {
-                    if (!cell) return false;
-                    const select = cell.querySelector('.ant-select');
-                    if (!select || !isVisible(select)) return false;
-                    fireClick(select);
-                    const waitDropdown = () => Array.from(document.querySelectorAll('.ant-select-dropdown:not(.ant-select-dropdown-hidden)'));
-                    let dropdown = waitDropdown();
+                    const setValue = (element, value) => {
+                      const descriptor = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
+                      if (descriptor && descriptor.set) descriptor.set.call(element, value);
+                      else element.value = value;
+                      element.dispatchEvent(new InputEvent('input', { bubbles: true, data: value }));
+                      element.dispatchEvent(new Event('change', { bubbles: true }));
+                    };
+                    const liveRoot = () => document.querySelector('#guid-skuTable');
+                    diag.phase = 'wait-root';
+                    let root = liveRoot();
+                    let waitRoot = 0;
+                    while ((!root || !isVisible(root)) && waitRoot < 40) {
+                      const dummy = new Date(); while (Date.now() - dummy < 500) {}
+                      root = liveRoot();
+                      waitRoot += 1;
+                    }
+                    if (!root || !isVisible(root)) { diag.phase = 'root-missing'; diag.reason = 'guid-skuTable not visible after 20s'; return diag; }
+                    diag.phase = 'columns';
+                    const headerCells = Array.from(root.querySelectorAll('.next-table-header [data-next-table-col], .next-table-header th'));
+                    const col = {};
+                    for (const cell of headerCells) {
+                      const text = String(cell.innerText || cell.textContent || '').replace(/\s+/g, ' ').trim();
+                      const c = String(cell.getAttribute('data-next-table-col') || '').trim();
+                      if (!c) continue;
+                      if (text.includes('可售数量')) col.quantity = c;
+                      else if (text.includes('货号')) col.skuCode = c;
+                    }
+                    diag.phase = 'wait-rows';
+                    const readRows = () => {
+                      const r = liveRoot();
+                      if (!r) return [];
+                      return Array.from(r.querySelectorAll('.next-table-body tbody tr, .next-table-tbody tr'))
+                        .filter(tr => tr.querySelector('input') && isVisible(tr));
+                    };
+                    let rows = readRows();
                     let tries = 0;
-                    while (dropdown.length === 0 && tries < 10) {
+                    while (rows.length < rawRows.length && tries < 40) {
+                      const dummy = new Date(); while (Date.now() - dummy < 500) {}
+                      rows = readRows();
                       tries += 1;
-                      const dummy = new Date(); while (Date.now() - dummy < 200) {}
-                      dropdown = waitDropdown();
                     }
-                    if (dropdown.length === 0) return false;
-                    const options = Array.from(dropdown[0].querySelectorAll('.ant-select-item, li[role="option"], .ant-select-item-option'));
-                    const visibleOptions = options.filter(o => isVisible(o) && (o.textContent || '').trim());
-                    if (visibleOptions.length === 0) return false;
-                    const target = text
-                      ? (visibleOptions.find(o => (o.textContent || '').trim() === text)
-                         || visibleOptions.find(o => (o.textContent || '').includes(text) || text.includes((o.textContent || '').trim())))
-                      : visibleOptions[0];
-                    const pick = target || visibleOptions[0];
-                    fireClick(pick);
-                    return true;
-                  };
-                  const rows = readRows();
-                  rows.forEach((tr, index) => {
-                    const row = rawRows[index];
-                    if (!row) return;
-                    const cellOf = (key) => key ? tr.querySelector(`td[data-next-table-col="${key}"]`) : null;
-                    const sizeCell = cellOf(col.size);
-                    if (sizeCell) {
-                      const input = sizeCell.querySelector('input');
-                      if (input && isVisible(input) && !input.readOnly) {
-                        const m = String(row.sku_name || '').match(/\d+(?:\.\d+)?(?:\s*[xX*/]\s*\d+(?:\.\d+)?){1,2}/);
-                        if (m) { input.focus(); setValue(input, m[0]); }
+                    diag.rowsFound = rows.length;
+                    if (rows.length < rawRows.length) { diag.phase = 'rows-insufficient'; diag.reason = rows.length + '/' + rawRows.length; return diag; }
+                    diag.phase = 'fill';
+                    rows.forEach((tr, index) => {
+                      const row = rawRows[index];
+                      if (!row) return;
+                      const cellOf = (key) => key ? tr.querySelector(`td[data-next-table-col="${key}"]`) : null;
+                      const qtyCell = cellOf(col.quantity);
+                      if (qtyCell) {
+                        const input = qtyCell.querySelector('input');
+                        if (input && isVisible(input) && !input.readOnly) { input.focus(); setValue(input, '999'); }
                       }
-                    }
-                    const qtyCell = cellOf(col.quantity);
-                    if (qtyCell) {
-                      const input = qtyCell.querySelector('input');
-                      if (input && isVisible(input) && !input.readOnly) { input.focus(); setValue(input, '999'); }
-                    }
-                    const codeCell = cellOf(col.skuCode);
-                    if (codeCell) {
-                      const input = codeCell.querySelector('input');
-                      if (input && isVisible(input) && !input.readOnly) { input.focus(); setValue(input, String(row.sku_code || '')); }
-                    }
-                    pickAntSelect(cellOf(col.color), String(row.sku_name || ''));
-                  });
-                  return true;
-                }
+                      const codeCell = cellOf(col.skuCode);
+                      if (codeCell) {
+                        const input = codeCell.querySelector('input');
+                        if (input && isVisible(input) && !input.readOnly) { input.focus(); setValue(input, String(row.sku_code || '')); }
+                      }
+                    });
+                    diag.ok = true;
+                    diag.phase = 'done';
+                    return diag;
+                  } catch (exc) {
+                    diag.phase = 'js-exception';
+                    diag.reason = String(exc && exc.stack || exc);
+                    return diag;
+                  }
                 """,
                 rows_payload,
             )
-        )
-        if not applied:
-            raise ValueError("SKU table multi-row fill failed (guid-skuTable not found or rows missing)")
+        except Exception as exc:
+            print(f"[WARN] sku_table_rows execute_script error: {type(exc).__name__}: {exc}")
+            raise ValueError(f"SKU table multi-row fill script error: {exc}") from exc
+        if not isinstance(result, dict) or not result.get("ok"):
+            diag_text = json.dumps(result, ensure_ascii=False) if isinstance(result, dict) else str(result)
+            print(f"[WARN] sku_table_rows diagnostic: {diag_text}")
+            raise ValueError(f"SKU table multi-row fill failed: {diag_text}")
         return True
 
     def _fill_logistics_dimensions(self, step: dict[str, Any], context: dict[str, Any]) -> bool:
