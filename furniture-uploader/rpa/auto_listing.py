@@ -17,6 +17,7 @@ PRICE_MULTIPLIER = Decimal("2.5")
 DEFAULT_QUANTITY = 999
 PLATFORM = "1688"
 IMAGE_SOURCE = "yidian"
+JIANYUN_IMAGE_SOURCE = "jiansun"
 IMAGE_CAPACITY_PROBE_MAX_AGE_SECONDS = 30 * 60
 SOURCE_LIFECYCLE_ACTIVE = "销售"
 
@@ -248,8 +249,13 @@ def validate_listing_payload(payload: dict[str, Any], *, require_duplicate_clear
     checks.append(_preflight_check("category", bool(str(product.get("category") or "").strip()), "category is required"))
     checks.append(_preflight_check("price", bool(pricing.get("publish_price")), "publish price is required"))
     checks.append(_preflight_check("inventory", int((payload.get("inventory") or {}).get("quantity") or 0) == DEFAULT_QUANTITY, "quantity must be 999"))
-    checks.append(_preflight_check("yidian_images", images.get("source") == IMAGE_SOURCE and bool(images.get("material_id")), "latest complete Yidian bundle is required"))
-    checks.append(_preflight_check("sku_sales_row", bool(sku.get("rows")) and len(sku.get("rows")) == 1 and bool(sku["rows"][0].get("sku_name")), "one independent SKU sales row is required"))
+    checks.append(_preflight_check(
+        "images",
+        (images.get("source") == IMAGE_SOURCE and bool(images.get("material_id")))
+        or (images.get("source") == JIANYUN_IMAGE_SOURCE and bool(images.get("main_urls"))),
+        "latest complete image bundle is required (yidian material or jiansun main urls)",
+    ))
+    checks.append(_preflight_check("sku_sales_row", bool(sku.get("rows")) and len(sku.get("rows")) >= 1 and bool(sku["rows"][0].get("sku_name")), "at least one SKU sales row is required (SPU-merged candidates carry multiple rows)"))
     checks.append(_preflight_check(
         "logistics",
         all(logistics.get(key) not in (None, "") for key in ("length_cm", "width_cm", "height_cm", "weight_g")),
@@ -394,8 +400,14 @@ def advance_listing_state(payload: dict[str, Any], event: str, *, evidence: dict
     next_state = transitions.get((current, event))
     if next_state is None:
         raise ListingContractError(f"invalid listing state transition: {current} -> {event}")
-    if event == "review_approved" and not evidence.get("approved_by"):
-        raise ListingContractError("approved_by is required")
+    approval_binding: dict[str, Any] = {}
+    if event == "review_approved":
+        from listing_review import ListingReviewError, assert_approval_binding
+
+        try:
+            approval_binding = assert_approval_binding(payload, evidence)
+        except ListingReviewError as exc:
+            raise ListingContractError(str(exc)) from exc
     if event == "submit_succeeded" and not evidence.get("offer_id"):
         raise ListingContractError("offer_id is required after submit")
     if event == "offer_written_back" and not evidence.get("offer_url"):
@@ -542,6 +554,10 @@ def advance_listing_state(payload: dict[str, Any], event: str, *, evidence: dict
     if event == "draft_saved":
         workflow["draft"] = dict(evidence)
         workflow.pop("pending_draft_id", None)
+    elif event == "review_approved":
+        draft = workflow.setdefault("draft", {})
+        draft["post_save_verified"] = True
+        draft["inspection_binding"] = approval_binding
     elif event == "submit_succeeded":
         workflow["offer"] = dict(evidence)
     return next_payload

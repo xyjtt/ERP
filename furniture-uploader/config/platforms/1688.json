@@ -132,7 +132,12 @@
       "identity_only"
     ],
     "draft_buyer_protection_allow_fallback": false,
-    "submit_reapply_nonpersistent_fields": [],
+    "submit_reapply_nonpersistent_fields": [
+      "delivery_service",
+      "send_address",
+      "logistics",
+      "buyer_protection"
+    ],
     "submit_blocking_assist_keywords": [
       "必填",
       "请填写",
@@ -146,7 +151,7 @@
       "refresh_wait_seconds": 4,
       "require_title": true,
       "require_main_image": true,
-      "minimum_main_image_count": 4,
+      "minimum_main_image_count": 1,
       "require_description": true,
       "main_image_wait_seconds": 30,
       "main_image_poll_seconds": 0.8,
@@ -156,6 +161,7 @@
       "minimum_description_image_count": 1,
       "require_send_address": true,
       "strict_send_address_persist": true,
+      "require_delivery_service": true,
       "require_logistics_dimensions": true,
       "strict_logistics_persist": true,
       "required_logistics_fields": [
@@ -190,8 +196,7 @@
       ],
       "require_specs": true,
       "required_spec_labels": [
-        "颜色",
-        "尺寸"
+        "颜色"
       ],
       "forbidden_assist_keywords": [
         "商品主图为必填项",
@@ -207,7 +212,7 @@
       "enabled": true,
       "timeout_seconds": 5,
       "capture_body_chars": 4000,
-      "buyer_protection_include_sps_code": false,
+      "buyer_protection_include_sps_code": true,
       "buyer_protection_source": "buyer_protection_ship_time",
       "buyer_protection_default_value": "24小时发货",
       "buyer_protection_step_template": [
@@ -220,12 +225,6 @@
       "quotation_type_text": "按产品规格报价",
       "unit_text": "件",
       "min_begin_amount": "1",
-      "delivery_service_default_ids": [
-        3385307
-      ],
-      "delivery_service_label_id_map": {
-        "市区物流点自提": 3385307
-      },
       "response_failure_keywords": [
         "系统错误",
         "发布失败",
@@ -234,7 +233,7 @@
     },
     "draft_page_state_patch": {
       "enabled": true,
-      "buyer_protection_include_sps_code": false,
+      "buyer_protection_include_sps_code": true,
       "buyer_protection_source": "buyer_protection_ship_time",
       "buyer_protection_default_value": "24小时发货",
       "buyer_protection_step_template": [
@@ -244,12 +243,6 @@
           "service_code": "essxsfh"
         }
       ],
-      "delivery_service_default_ids": [
-        3385307
-      ],
-      "delivery_service_label_id_map": {
-        "市区物流点自提": 3385307
-      },
       "cat_props": [
         {
           "label": "材质",
@@ -493,8 +486,10 @@
               {
                 "label": "尺寸",
                 "source": "size",
-                "required": true,
-                "commit_key": "tab"
+                "required": false,
+                "commit_key": "tab",
+                "multi_value": true,
+                "split_pattern": "\\s*(?:\\||,|，|;|；|\\n)+\\s*"
               }
             ]
           },
@@ -516,12 +511,20 @@
               {
                 "label": "尺寸",
                 "source": "size",
-                "required": true,
-                "commit_key": "tab"
+                "required": false,
+                "commit_key": "tab",
+                "multi_value": true,
+                "split_pattern": "\\s*(?:\\||,|，|;|；|\\n)+\\s*"
               }
             ]
           }
         }
+      },
+      {
+        "name": "sku_table_rows",
+        "action": "sku_table_rows",
+        "required": false,
+        "source": "sku_rows"
       },
       {
         "name": "main_image",
