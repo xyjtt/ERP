@@ -10,6 +10,8 @@
 
 更新记录（2026-08-18）：合并 Gitee 部署分支 `deploy/cross-project-lease-20260730`（HEAD `16d305a`）至当前分支，合并提交 `d03f31d`。纳入 Edge 驱动版本匹配、隐藏 SKU 校验隔离、outbox 状态查询/requeue 等能力，完整回归通过后 §0.1/§3/§15 已同步更新。三项 P0（§0.3）仍未实现，状态不变。
 
+更新记录（2026-08-19）：Gitee 部署分支再推进至 `23cc650`（自动上架多 SKU 铺货：候选生成、SKU 表格 RPA、登记脚本），合并提交 `5bc05ad`。该分支存在**未提交依赖**：`rpa/listing_review.py`、`rpa/listing_audit.py` 新版及配套 v2 契约测试未随分支提交，已从 `codex/erp-direct-mode-20260814` 恢复并以独立 commit 补齐；恢复后全量 618/618 通过。
+
 ## 0. 一页结论
 
 ### 0.1 当前做到哪里
@@ -29,9 +31,9 @@ ERP 侧已经完成以下开发工作：
 
 2026-08-12 与 2026-08-18（合并 Gitee 部署分支后）在当前 HEAD 上重新验证：
 
-| 验证项 | 2026-08-12 | 2026-08-18（合并后） |
+| 验证项 | 2026-08-12 | 2026-08-19（两次合并+恢复后） |
 |---|---:|---:|
-| ERP Python 全量测试 | `599/599` 通过 | `602/602` 通过 |
+| ERP Python 全量测试 | `599/599` 通过 | `618/618` 通过 |
 | Python `compileall` | 通过 | 通过 |
 | 聚水潭 `npm run check` | 通过 | 通过 |
 | 聚水潭测试 | `24/24` 通过 | `24/24` 通过 |
@@ -112,14 +114,14 @@ ERP 侧已经完成以下开发工作：
 |---|---|
 | 分支 | `codex/1688-cross-project-lease-erp-20260730` |
 | 交接代码基线（2026-08-12） | `9429927f7f63f3cf6ab9d5a83f29cf43e89b22ea` |
-| 2026-08-18 合并提交 | `d03f31d`（合并 Gitee `deploy/cross-project-lease-20260730`，见 §3.2） |
+| 2026-08-18/19 合并提交 | `d03f31d`、`5bc05ad` + 依赖恢复提交（合并 Gitee `deploy/cross-project-lease-20260730`，见 §3.2） |
 | 文档提交 | `bdc27882a518d26eb8b3b70a4fa6d2e52fa32275` |
-| GitHub `origin` 同名分支 | `74605dd`（本地领先 7 提交，含合并提交，尚未推送） |
-| Gitee `gitee` 同名分支 | `6de6a43`（未同步） |
-| Gitee 新分支 `deploy/cross-project-lease-20260730` | `16d305a`（2026-08-18 已合并入本地） |
+| GitHub `origin` 同名分支 | `60e9551`（2026-08-19 已推送，与本地一致） |
+| Gitee `gitee` 同名分支 | `60e9551`（2026-08-19 已从 `6de6a43` 快进同步） |
+| Gitee 新分支 `deploy/cross-project-lease-20260730` | `23cc650`（2026-08-19 分两次全部合并入本地） |
 | 本轮编辑前工作树 | 干净 |
 
-远端存在差异：GitHub 已包含本地历史至 `74605dd`，本地另领先 7 个提交（Gitee 部署分支 6 个 + 合并提交 `d03f31d`，2026-08-18 尚未推送）；Gitee 的 `codex` 同名分支仍停在 `6de6a43`，但 Gitee 已存在部署分支 `deploy/cross-project-lease-20260730`（`16d305a`）并已合并入本地。如果执行机只允许从 Gitee 拉取，不能假设能直接取得当前交接分支（含合并提交 `d03f31d` 的 HEAD 不在任何远端）。部署负责人必须先选择以下一种受控方式：
+远端状态（2026-08-19 已推送）：GitHub `origin` 与 Gitee 同名分支均已推至本地 HEAD（含两次部署分支合并与依赖恢复提交）。Gitee 部署分支 `deploy/cross-project-lease-20260730`（`23cc650`）已全部分量合并入本分支；后续执行机如从 Gitee 拉取本分支可直接取得完整 HEAD。部署负责人仍必须按受控方式选择以下一种途径核对后再部署：
 
 - 将审核后的当前分支同步到 Gitee；
 - 从开发机创建 Git bundle，经批准的传输通道送到执行机；
@@ -148,6 +150,9 @@ ERP 侧已经完成以下开发工作：
 | `08b692e` | outbox 状态查询与 requeue 功能（Gitee 部署分支） |
 | `16d305a` | 新增 `requeue_1688_jushuitan_outbox.py` 与 `.gitignore` 更新（Gitee 部署分支 HEAD） |
 | `d03f31d` | 2026-08-18 合并 `gitee/deploy/cross-project-lease-20260730`（6 提交，无手工冲突） |
+| `23cc650..5863726` | Gitee 部署分支第二波：自动上架多 SKU 铺货（候选生成 `generate_listing_candidates.py`、登记 `register_listing_candidates.py`、SKU 表格 RPA） |
+| `5bc05ad` | 2026-08-19 合并部署分支第二波（6 提交，ort 自动合并） |
+| （恢复提交） | 从 `codex/erp-direct-mode-20260814` 恢复部署分支未提交依赖：`listing_review.py` v2、`listing_audit.py`、v2 契约测试，618/618 |
 
 这些 commit 中夹有上架草稿修复和合并提交。部署时不能只按表中 commit 零散 cherry-pick 而忽略依赖；应以最终审核分支 HEAD 为整体做 diff 和测试。
 
@@ -748,7 +753,7 @@ git diff --check
 
 ### 15.2 结果
 
-- Python：`Ran 602 tests ... OK`（2026-08-18 合并部署分支后复测，基线 599）；
+- Python：`Ran 618 tests ... OK`（2026-08-19 两次合并部署分支并恢复缺失依赖后复测，基线 599）；
 - `compileall`：退出码 0；
 - TypeScript check：退出码 0；
 - Node tests：24 tests，24 pass，0 fail；
@@ -1062,7 +1067,7 @@ python scripts\apply_1688_operation_saga_ddl.py `
 
 1. 修复/裁决第 0.3 节三项协议差异；
 2. 补替换租约释放顺序测试；
-3. 重新跑 ERP 602、聚水潭 24 和 Crawler 全量测试；
+3. 重新跑 ERP 618、聚水潭 24 和 Crawler 全量测试；
 4. 双方审核最终 SQL 和 protocol version；
 5. 生成干净、可验证的 ERP/Crawler commit；
 6. 同步 Gitee 或制作 bundle；
