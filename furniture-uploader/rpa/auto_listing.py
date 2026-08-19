@@ -255,7 +255,7 @@ def validate_listing_payload(payload: dict[str, Any], *, require_duplicate_clear
         or (images.get("source") == JIANYUN_IMAGE_SOURCE and bool(images.get("main_urls"))),
         "latest complete image bundle is required (yidian material or jiansun main urls)",
     ))
-    checks.append(_preflight_check("sku_sales_row", bool(sku.get("rows")) and len(sku.get("rows")) >= 1 and bool(sku["rows"][0].get("sku_name")), "at least one SKU sales row is required (SPU-merged candidates carry multiple rows)"))
+    checks.append(_preflight_check("sku_sales_row", bool(sku.get("rows")) and len(sku.get("rows")) == 1 and bool(sku["rows"][0].get("sku_name")), "one independent SKU sales row is required"))
     checks.append(_preflight_check(
         "logistics",
         all(logistics.get(key) not in (None, "") for key in ("length_cm", "width_cm", "height_cm", "weight_g")),

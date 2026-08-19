@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -37,7 +38,7 @@ from auto_listing_executor import (
     restore_execution_only_detail_images,
     resolve_1688_publish_url,
 )
-from test_auto_listing import sample_payload
+from test_auto_listing import review_approval_evidence, sample_payload
 from run_1688_listing_task import _resolve_listing_account_lock_path
 
 
@@ -59,6 +60,14 @@ class AutoListingExecutorTests(unittest.TestCase):
                 section["buyer_protection_step_template"],
                 [{"from": 1, "service_name": expected_name, "service_code": expected_code}],
             )
+        request_patch = publish["draft_request_patch"]
+        page_state_patch = publish["draft_page_state_patch"]
+        self.assertTrue(request_patch["buyer_protection_include_sps_code"])
+        self.assertTrue(page_state_patch["buyer_protection_include_sps_code"])
+        self.assertEqual(
+            request_patch["buyer_protection_step_template"],
+            page_state_patch["buyer_protection_step_template"],
+        )
         buyer_step = next(
             step for step in publish["steps"] if step.get("name") == "buyer_protection_ship_time"
         )
@@ -85,7 +94,7 @@ class AutoListingExecutorTests(unittest.TestCase):
         draft = advance_listing_state(
             sample_payload(), "draft_saved", evidence={"draft_id": "draft-1", "draft_url": "draft"}
         )
-        approved = advance_listing_state(draft, "review_approved", evidence={"approved_by": "reviewer"})
+        approved = advance_listing_state(draft, "review_approved", evidence=review_approval_evidence(draft))
         with patch.dict(os.environ, {"ENABLE_1688_LISTING_EXECUTION": "true"}, clear=True):
             with self.assertRaisesRegex(ListingContractError, "ENABLE_1688_LISTING_SUBMIT"):
                 assert_execution_allowed(approved, "submit")
@@ -94,7 +103,7 @@ class AutoListingExecutorTests(unittest.TestCase):
         draft = advance_listing_state(
             sample_payload(), "draft_saved", evidence={"draft_id": "draft-1", "draft_url": "draft"}
         )
-        approved = advance_listing_state(draft, "review_approved", evidence={"approved_by": "reviewer"})
+        approved = advance_listing_state(draft, "review_approved", evidence=review_approval_evidence(draft))
         with patch.dict(
             os.environ,
             {"ENABLE_1688_LISTING_EXECUTION": "true", "ENABLE_1688_LISTING_SUBMIT": "true"},
@@ -113,6 +122,26 @@ class AutoListingExecutorTests(unittest.TestCase):
         self.assertEqual(variant["width_cm"], "40")
         self.assertEqual(variant["height_cm"], "49")
         self.assertEqual(variant["weight_g"], "12500")
+
+    def test_release_variant_carries_reviewed_submit_reapply_contract(self) -> None:
+        payload = sample_payload()
+        payload["workflow"]["draft"] = {
+            "submit_reapply_required_fields": ["delivery_service"],
+            "submit_reapply_evidence": {"fields": {"delivery_service": {}}},
+            "submit_reapply_contract_sha256": "a" * 64,
+        }
+
+        variant = build_release_variant_payload(payload)
+
+        self.assertEqual(
+            variant["submit_reapply_required_fields"],
+            ["delivery_service"],
+        )
+        self.assertEqual(
+            variant["submit_reapply_evidence"],
+            {"fields": {"delivery_service": {}}},
+        )
+        self.assertEqual(variant["submit_reapply_contract_sha256"], "a" * 64)
 
     def test_publish_url_uses_bedside_table_category_id(self) -> None:
         payload = sample_payload()
@@ -437,7 +466,7 @@ class AutoListingExecutorTests(unittest.TestCase):
         draft = advance_listing_state(
             sample_payload(), "draft_saved", evidence={"draft_id": "draft-1", "draft_url": "draft"}
         )
-        approved = advance_listing_state(draft, "review_approved", evidence={"approved_by": "reviewer"})
+        approved = advance_listing_state(draft, "review_approved", evidence=review_approval_evidence(draft))
         failure_payload = {
             "task_id": approved["task_id"],
             "result_context": {
@@ -458,8 +487,153 @@ class AutoListingExecutorTests(unittest.TestCase):
         self.assertEqual(evidence["offer_id"], "1068081966540")
         self.assertEqual(evidence["post_submit_verified"], "reconciled_success_page")
 
+    def test_submit_reconciliation_reconstructs_dropped_reviewed_replay_evidence(self) -> None:
+        contract = {
+            "contract_version": "listing_submit_reapply_v1",
+            "draft_id": "draft-1",
+            "required_fields": ["delivery_service", "send_address", "buyer_protection"],
+            "save": {
+                "http_status": 200,
+                "success": True,
+                "request_draft_id": "draft-1",
+                "response_draft_id": "draft-1",
+            },
+            "fields": {
+                "delivery_service": {
+                    "status": "submit_reapply_required",
+                    "requested_ids": [365841],
+                    "pre_save_selected_ids": [365841],
+                    "allowed_services": [
+                        {"id": 365841, "label": "送到楼下"},
+                        {"id": 4511641, "label": "市区物流点自提"},
+                    ],
+                },
+                "send_address": {
+                    "status": "submit_reapply_required",
+                    "pre_save_selected": True,
+                    "expected_value": "35281125",
+                    "requested_value": "35281125",
+                },
+                "buyer_protection": {
+                    "status": "submit_reapply_required",
+                    "pre_save_selected": True,
+                    "service_name": "24小时发货",
+                    "service_code": "essxsfh",
+                    "requested_steps": [
+                        {
+                            "from": 1,
+                            "serviceName": "24小时发货",
+                            "serviceCode": "essxsfh",
+                        }
+                    ],
+                    "available_services": [
+                        {"serviceName": "24小时发货", "serviceCode": "essxsfh"}
+                    ],
+                },
+            },
+        }
+        contract_hash = hashlib.sha256(
+            json.dumps(
+                contract,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        draft = advance_listing_state(
+            sample_payload(),
+            "draft_saved",
+            evidence={
+                "draft_id": "draft-1",
+                "draft_url": "draft",
+                "submit_reapply_required_fields": contract["required_fields"],
+                "submit_reapply_evidence": contract,
+                "submit_reapply_contract_sha256": contract_hash,
+            },
+        )
+        approved = advance_listing_state(
+            draft,
+            "review_approved",
+            evidence=review_approval_evidence(draft),
+        )
+        failure_payload = {
+            "task_id": approved["task_id"],
+            "result_context": {
+                "current_url": "https://offer-new.1688.com/result.htm?offerId=1072868453052",
+                "page_title": "商品发布成功 - 卖家工作台",
+                "submit_required_fields_verified": True,
+                "submit_send_address_value": "35281125",
+                "submit_delivery_service_state": {
+                    "selectedServiceIds": [365841],
+                    "allowedServiceIds": [365841, 4511641],
+                },
+                "submit_buyer_protection_value": "24小时发货",
+                "submit_buyer_protection_schedule": [
+                    {"from": 1, "serviceName": "24小时发货", "serviceCode": "essxsfh"}
+                ],
+                "submit_blocking_assist_messages": [],
+                "submit_reapply_results": {},
+            },
+        }
+
+        evidence = extract_submit_reconciliation_evidence(approved, failure_payload)
+
+        self.assertEqual(evidence["offer_id"], "1072868453052")
+        self.assertEqual(
+            evidence["submit_reapply_evidence_source"],
+            "reconstructed_from_failure_context",
+        )
+        self.assertEqual(
+            set(evidence["submit_reapply_results"]),
+            {"delivery_service", "send_address", "buyer_protection"},
+        )
+
+        failure_payload["result_context"]["submit_delivery_service_state"][
+            "selectedServiceIds"
+        ] = [4511641]
+        with self.assertRaisesRegex(ListingContractError, "delivery service"):
+            extract_submit_reconciliation_evidence(approved, failure_payload)
+
     def test_draft_reconciliation_requires_matching_success_and_read_only_inspection(self) -> None:
         payload = sample_payload()
+        reapply_contract = {
+            "contract_version": "listing_submit_reapply_v1",
+            "draft_id": "draft-1",
+            "required_fields": ["send_address", "buyer_protection"],
+            "save": {
+                "http_status": 200,
+                "success": True,
+                "request_draft_id": "draft-1",
+                "response_draft_id": "draft-1",
+            },
+            "fields": {
+                "send_address": {
+                    "status": "submit_reapply_required",
+                    "pre_save_selected": True,
+                    "expected_value": "35281125",
+                    "requested_value": "35281125",
+                },
+                "buyer_protection": {
+                    "status": "submit_reapply_required",
+                    "pre_save_selected": True,
+                    "service_name": "24小时发货",
+                    "service_code": "essxsfh",
+                    "requested_steps": [
+                        {
+                            "from": 1,
+                            "serviceName": "24小时发货",
+                            "serviceCode": "essxsfh",
+                        }
+                    ],
+                    "available_services": [
+                        {
+                            "serviceName": "24小时发货",
+                            "serviceCode": "essxsfh",
+                        }
+                    ],
+                },
+            },
+        }
         failure_payload = {
             "task_id": payload["task_id"],
             "error_type": "PublishValidationError",
@@ -472,6 +646,7 @@ class AutoListingExecutorTests(unittest.TestCase):
                     "responseJson": {"success": True, "data": {"draftId": "draft-1"}},
                 },
                 "draft_submit_reapply_required_fields": ["send_address", "buyer_protection"],
+                "draft_submit_reapply_evidence": reapply_contract,
             },
         }
         inspection_payload = {
@@ -497,6 +672,49 @@ class AutoListingExecutorTests(unittest.TestCase):
         self.assertEqual(evidence["draft_id"], "draft-1")
         self.assertEqual(evidence["repair_scope"], "full")
         self.assertFalse(evidence["post_save_verified"])
+        self.assertEqual(
+            evidence["submit_reapply_contract_sha256"],
+            hashlib.sha256(
+                json.dumps(
+                    reapply_contract,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest(),
+        )
+
+    def test_draft_reconciliation_rejects_reapply_fields_without_bound_evidence(self) -> None:
+        payload = sample_payload()
+        failure_payload = {
+            "task_id": payload["task_id"],
+            "error_type": "PublishValidationError",
+            "result_context": {
+                "current_url": "https://offer-new.1688.com/popular/publish.htm?draftId=draft-1",
+                "draft_submit_trace": {
+                    "status": 200,
+                    "url": "https://offer-new.1688.com/popular/draftSubmit.htm",
+                    "responseJson": {"success": True, "data": {"draftId": "draft-1"}},
+                },
+                "draft_submit_reapply_required_fields": ["send_address"],
+            },
+        }
+        inspection_payload = {
+            "status": "failed",
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+            "task_id": payload["task_id"],
+            "draft_id": "draft-1",
+            "checks": {"draft_id": True, "title": False},
+            "draft_saved": False,
+            "offer_submitted": False,
+        }
+
+        with self.assertRaisesRegex(ListingContractError, "contract_version"):
+            extract_draft_reconciliation_evidence(
+                payload,
+                failure_payload,
+                inspection_payload,
+            )
 
     def test_draft_reconciliation_rejects_mismatched_inspection_draft(self) -> None:
         payload = sample_payload()

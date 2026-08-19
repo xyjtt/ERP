@@ -27,6 +27,12 @@ from auto_listing import (
     select_latest_complete_yidian_bundle,
     validate_listing_payload,
 )
+from listing_review import (
+    INSPECTION_ARTIFACT_VERSION,
+    REQUIRED_INSPECTION_CHECKS,
+    build_review_contract_sha256,
+    build_submit_reapply_contract_sha256,
+)
 
 
 def sample_product() -> dict:
@@ -91,6 +97,28 @@ def sample_payload(duplicate_status: str = "clear") -> dict:
     )
 
 
+def review_approval_evidence(payload: dict, *, approved_by: str = "reviewer") -> dict:
+    draft_id = str(((payload.get("workflow") or {}).get("draft") or {}).get("draft_id") or "")
+    return {
+        "approved_by": approved_by,
+        "inspection_binding": {
+            "artifact_version": INSPECTION_ARTIFACT_VERSION,
+            "artifact_sha256": "b" * 64,
+            "inspector_build_sha": "a" * 40,
+            "payload_contract_sha256": build_review_contract_sha256(payload),
+            "submit_reapply_contract_sha256": build_submit_reapply_contract_sha256(payload),
+            "task_id": str(payload.get("task_id") or ""),
+            "draft_id": draft_id,
+            "account_key": str(((payload.get("shop") or {}).get("account_key") or "")),
+            "shop_name": str(((payload.get("shop") or {}).get("shop_name") or "")),
+            "cdp_port": 9306,
+            "checked_at": "2026-08-05T00:00:00+08:00",
+            "required_checks": sorted(REQUIRED_INSPECTION_CHECKS),
+            "field_outcomes_sha256": "c" * 64,
+        },
+    }
+
+
 class AutoListingContractTests(unittest.TestCase):
     def test_price_uses_sale_price_multiplier_and_ceiling_one_decimal(self) -> None:
         result = calculate_publish_price("10.01")
@@ -153,9 +181,17 @@ class AutoListingContractTests(unittest.TestCase):
 
     def test_state_machine_requires_draft_then_approval_then_offer_writeback(self) -> None:
         payload = sample_payload()
-        draft = advance_listing_state(payload, "draft_saved", evidence={"draft_url": "https://draft.invalid/1"})
+        draft = advance_listing_state(
+            payload,
+            "draft_saved",
+            evidence={"draft_id": "draft-1", "draft_url": "https://draft.invalid/1"},
+        )
         self.assertEqual(draft["workflow"]["state"], STATE_DRAFT_PENDING_REVIEW)
-        approved = advance_listing_state(draft, "review_approved", evidence={"approved_by": "reviewer"})
+        approved = advance_listing_state(
+            draft,
+            "review_approved",
+            evidence=review_approval_evidence(draft),
+        )
         self.assertEqual(approved["workflow"]["state"], STATE_SUBMIT_PENDING)
         submitted = advance_listing_state(approved, "submit_succeeded", evidence={"offer_id": "123"})
         self.assertEqual(submitted["workflow"]["state"], STATE_SUBMITTED)
